@@ -27,7 +27,15 @@ export interface DashboardSnapshot {
 export interface RecentMovement {
   id: string;
   type: string;
-  quantity: number;
+  /**
+   * The signed effect on stock: negative for anything that took units away.
+   *
+   * The column stores the size of the move and leaves the direction to `type`,
+   * so a raw `quantity` renders as "+120" on an outbound movement. Deriving the
+   * sign from the two balances is the one form that cannot disagree with what
+   * actually happened.
+   */
+  change: number;
   /** Stock on hand once this movement had been applied. */
   newStock: number;
   createdAt: Date;
@@ -81,7 +89,7 @@ export async function loadDashboard(): Promise<DashboardResult> {
           select: {
             id: true,
             type: true,
-            quantity: true,
+            previousStock: true,
             newStock: true,
             createdAt: true,
             product: { select: { name: true, sku: true } },
@@ -110,7 +118,7 @@ export async function loadDashboard(): Promise<DashboardResult> {
         recentMovements: movements.map((movement) => ({
           id: movement.id,
           type: movement.type,
-          quantity: movement.quantity,
+          change: movement.newStock - movement.previousStock,
           newStock: movement.newStock,
           createdAt: movement.createdAt,
           productName: movement.product.name,

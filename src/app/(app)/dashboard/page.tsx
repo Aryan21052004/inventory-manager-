@@ -148,12 +148,12 @@ function DashboardContent({ snapshot }: { snapshot: DashboardSnapshot }) {
                       </TableCell>
                       <TableCell
                         className={`tabular text-right font-medium ${
-                          movement.quantity < 0
+                          movement.change < 0
                             ? "text-destructive"
                             : "text-success"
                         }`}
                       >
-                        {formatDelta(movement.quantity)}
+                        {formatDelta(movement.change)}
                       </TableCell>
                       <TableCell className="tabular text-right">
                         {formatNumber(movement.newStock)}

@@ -105,6 +105,8 @@ and lists whatever setup steps are still outstanding.
 | `npm run db:seed`     | Load the sample data (clears the tables first)     |
 | `npm run db:reset`    | Drop and re-migrate; seed separately after it      |
 | `npm run db:generate` | Regenerate the Prisma client                       |
+| `npm test`            | Vitest, against a `..._test` database              |
+| `npm run test:watch`  | Vitest in watch mode                               |
 
 ## Project structure
 
@@ -139,7 +141,10 @@ src/
     nav.ts               Single source of truth for navigation
     validation/          Zod schemas shared by forms and server actions
   server/
+    auth.ts              Clerk session to local user, and role checks
     dashboard.ts         Server-side read models
+    stock.ts             The only way stock is allowed to change
+tests/                   Integration tests (real Postgres, mocked Clerk)
   proxy.ts               Clerk auth context (Next 16 `proxy` convention)
 ```
 
@@ -171,6 +176,43 @@ schema language cannot express these, so they live in the migration SQL.
 proxy. A page added under that group is protected because of where it lives, and
 the sign-in pages are public because they live outside it. This also matches
 Clerk's current guidance, which deprecates matcher-based protection.
+
+**Clerk authenticates; the database authorises.** Clerk owns the credential —
+password, MFA, sessions — and this app never sees or stores one. The `users`
+table owns the local business identity: the `role` that decides what someone may
+do here, and a row for foreign keys such as `stock_transactions.created_by` to
+point at.
+
+`clerkId` is the join between the two, and the only acceptable one. Email is
+unique in our table and looks like it would work, but Clerk lets people change
+their address; the next request would then look like a different person and
+quietly create a second record. `clerkId` never changes.
+
+Users are synced lazily by `resolveUser` in `src/server/auth.ts`: the first
+authenticated request from an unknown Clerk account creates a local row (as
+STAFF — signing up is not a route to ADMIN), and the unique index on `clerk_id`
+makes concurrent first requests harmless, since the loser reads back the
+winner's row. Rows that predate Clerk — the seeded accounts — carry an
+`unlinked_` placeholder, and the first sign-in with a matching email claims the
+row, which is how the seeded admin keeps its ADMIN role.
+
+A Clerk webhook on `user.updated` / `user.deleted` is the production upgrade.
+Lazy sync refreshes the local mirror only when a row is created or claimed, so
+a later name or email change in Clerk leaves a stale value here, and a deletion
+in Clerk is invisible — the user simply stops arriving, leaving a local row that
+looks active forever. Identity itself is unaffected either way, because lookups
+go through `clerkId`. Worth adding once there are real users; not worth the
+endpoint, signature verification and replay handling while nothing depends on
+the mirror being fresh.
+
+**The server decides who did something, never the client.** `createdBy` is not
+an input to `recordStockMovement` — it is read from the session. A field the
+browser can set is a field the browser can lie about, and an audit log that
+records whoever the request claimed to be is not an audit log. Role checks live
+in `requireRole` for the same reason: hiding a button is a courtesy, not a
+control, so every privileged path re-checks on the server against the role in
+our database. Manual corrections (`ADJUSTMENT`, `REVERSAL`) are ADMIN-only,
+because they change what the system believes with no document behind them.
 
 **Errors are normalised before display.** `toSafeError` in `src/lib/errors.ts`
 passes through messages we wrote and replaces everything else with a generic

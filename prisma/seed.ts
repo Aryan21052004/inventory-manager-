@@ -19,8 +19,6 @@
  *      is whatever the ledger says it is, so the two cannot disagree.
  */
 
-import { randomBytes, scryptSync } from "node:crypto";
-
 import { PrismaPg } from "@prisma/adapter-pg";
 import { config } from "dotenv";
 
@@ -73,36 +71,6 @@ const daysAgo = (days: number, hour = 10): Date => {
   const date = new Date(NOW - days * DAY_MS);
   date.setHours(hour, (days * 7) % 60, 0, 0);
   return date;
-};
-
-/**
- * scrypt with a per-user salt, stored as `scrypt$N$r$p$salt$hash`.
- *
- * Real sign-in is not built yet, so this exists to make the column truthful:
- * `passwordHash` must never hold anything a leak could replay. The parameters
- * travel with the digest so they can be raised later without invalidating
- * hashes written today.
- */
-const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 64 } as const;
-
-const hashPassword = (password: string): string => {
-  const salt = randomBytes(16);
-  const derived = scryptSync(password, salt, SCRYPT.keylen, {
-    N: SCRYPT.N,
-    r: SCRYPT.r,
-    p: SCRYPT.p,
-    // scrypt's default memory ceiling is below what N=16384 needs.
-    maxmem: 64 * 1024 * 1024,
-  });
-
-  return [
-    "scrypt",
-    SCRYPT.N,
-    SCRYPT.r,
-    SCRYPT.p,
-    salt.toString("base64"),
-    derived.toString("base64"),
-  ].join("$");
 };
 
 // ---------------------------------------------------------------------------
@@ -509,26 +477,29 @@ async function main(): Promise<void> {
   console.log("  cleared existing rows");
 
   // --- Users -------------------------------------------------------------
+  // Seeded users predate any Clerk account, so they carry `unlinked_`
+  // placeholders instead of real Clerk ids. Signing in with a matching email
+  // claims the row and swaps in the real `user_...` id, which is how the admin
+  // keeps their ADMIN role instead of arriving as a brand-new STAFF account.
+  // See `resolveUser` in src/server/auth.ts.
   const users = await Promise.all(
     (
       [
         {
+          clerkId: "unlinked_seed_admin",
           name: "Aryan Verma",
           email: "admin@inventory.local",
-          password: "Admin!2345",
           role: "ADMIN",
         },
         {
+          clerkId: "unlinked_seed_staff",
           name: "Sana Qureshi",
           email: "staff@inventory.local",
-          password: "Staff!2345",
           role: "STAFF",
         },
       ] as const
-    ).map(({ password, ...user }) =>
-      prisma.user.create({
-        data: { ...user, role: user.role as UserRole, passwordHash: hashPassword(password) },
-      }),
+    ).map((user) =>
+      prisma.user.create({ data: { ...user, role: user.role as UserRole } }),
     ),
   );
 

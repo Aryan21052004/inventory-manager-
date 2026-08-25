@@ -88,16 +88,34 @@ enum StockReferenceType {
 // People
 // ---------------------------------------------------------------------------
 
-/// An operator of the system. `passwordHash` holds a hash, never a password —
-/// the seed writes scrypt digests in the form `scrypt$N$r$p$salt$hash`.
+/// An operator of the system.
+///
+/// Clerk owns authentication — the password, MFA, the session — and this row
+/// owns the local business identity: what the person is allowed to do here, and
+/// something for foreign keys to point at. There is deliberately no password
+/// column; if one existed it would be a second, unused credential store.
+///
+/// `clerkId` is the join between the two and the only stable identity key.
+/// Email is *not* usable for that: it is unique here, but a user can change it
+/// in Clerk at any time, which would silently strand the mapping.
 model User {
-  id           String   @id @default(cuid())
-  name         String
-  email        String   @unique
-  passwordHash String   @map("password_hash")
-  role         UserRole @default(STAFF)
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id String @id @default(cuid())
+
+  /// Clerk's user id (`user_...`). Rows created before their Clerk account
+  /// exists — the seed's, for instance — carry an `unlinked_` placeholder
+  /// instead, which the first sign-in with a matching email claims. See
+  /// `resolveUser` in src/server/auth.ts.
+  clerkId String @unique @map("clerk_id")
+
+  name  String
+  email String @unique
+
+  /// Authorisation lives here, not in Clerk. Clerk answers "who is this?";
+  /// this column answers "what may they do in the inventory app?".
+  role UserRole @default(STAFF)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   stockTransactions StockTransaction[]
 
