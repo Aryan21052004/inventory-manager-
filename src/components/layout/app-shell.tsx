@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Header } from "@/components/layout/header";
 import { SetupBanner } from "@/components/layout/setup-banner";
 import { Sidebar } from "@/components/layout/sidebar";
+import { UserMenu } from "@/components/layout/user-menu";
 
 /**
  * The dashboard chrome: fixed sidebar, sticky header, scrolling content.
@@ -25,7 +26,10 @@ function AppShell({
       <Sidebar appName={appName} />
 
       <div className="flex min-h-svh flex-col lg:pl-64">
-        <Header appName={appName} authEnabled={authEnabled} />
+        {/* Rendered here, not inside Header: the menu is a server component
+            (Clerk's `<Show>` resolves the session on the server) and Header is
+            a client one, so it travels as an element rather than an import. */}
+        <Header appName={appName} userMenu={<UserMenu authEnabled={authEnabled} />} />
         {!authEnabled ? <SetupBanner /> : null}
 
         <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">

@@ -1,18 +1,7 @@
-"use client";
+import { Show, SignInButton, UserButton } from "@clerk/nextjs";
 
-import Link from "next/link";
-import { SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
-import { KeyRound, UserCircle2 } from "lucide-react";
-
+import { SetupModeMenu } from "@/components/layout/setup-mode-menu";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 
 /**
  * Account control in the header.
@@ -21,60 +10,43 @@ import {
  * profile and sign-out flows with it. Without keys the app is running in setup
  * mode, and Clerk's components would throw — so a placeholder menu explains
  * what is missing instead of taking the page down.
+ *
+ * A server component, deliberately. Clerk Core 3 replaced `<SignedIn>` and
+ * `<SignedOut>` with `<Show>`, and the `<Show>` exported from `@clerk/nextjs`
+ * is an async server component — it resolves the session on the server rather
+ * than shipping both branches and choosing in the browser. That is why this
+ * file has no "use client" and why the header takes it as a prop instead of
+ * importing it: a client component cannot render an async server one.
  */
 function UserMenu({ authEnabled }: { authEnabled: boolean }) {
   if (!authEnabled) {
     return <SetupModeMenu />;
   }
 
+  /*
+   * One `<Show>` with a fallback rather than two — a signed-in branch and a
+   * signed-out branch that could both miss, or both match, on a session that is
+   * neither. `fallback` makes "signed out" mean exactly "not signed in", so the
+   * header always has precisely one control in it.
+   */
   return (
-    <>
-      <SignedIn>
-        <UserButton
-          appearance={{
-            elements: {
-              avatarBox: "size-8",
-              userButtonPopoverCard: "shadow-lg",
-            },
-          }}
-        />
-      </SignedIn>
-      <SignedOut>
+    <Show
+      when="signed-in"
+      fallback={
         <SignInButton mode="modal">
           <Button size="sm">Sign in</Button>
         </SignInButton>
-      </SignedOut>
-    </>
-  );
-}
-
-function SetupModeMenu() {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="Account">
-          <UserCircle2 className="text-muted-foreground" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-64">
-        <DropdownMenuLabel>Not signed in</DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <div className="px-2 py-1.5 text-xs leading-relaxed text-muted-foreground">
-          Authentication is running in setup mode. Add your Clerk keys to
-          <code className="mx-1 rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
-            .env.local
-          </code>
-          to enable sign-in.
-        </div>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link href="/settings">
-            <KeyRound />
-            Setup instructions
-          </Link>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+      }
+    >
+      <UserButton
+        appearance={{
+          elements: {
+            avatarBox: "size-8",
+            userButtonPopoverCard: "shadow-lg",
+          },
+        }}
+      />
+    </Show>
   );
 }
 

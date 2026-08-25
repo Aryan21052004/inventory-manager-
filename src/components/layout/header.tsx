@@ -1,13 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import { Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { MobileNav } from "@/components/layout/mobile-nav";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
-import { UserMenu } from "@/components/layout/user-menu";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { findNavItem } from "@/lib/nav";
@@ -18,13 +17,18 @@ import { findNavItem } from "@/lib/nav";
  *
  * The title is derived from the route rather than passed in by each page, so a
  * page cannot forget to set it or set one that disagrees with the sidebar.
+ *
+ * `userMenu` arrives as a prop rather than being imported. This component is
+ * interactive and therefore client-side, while the menu resolves the Clerk
+ * session with `<Show>` and is therefore a server component — so the shell
+ * renders it and passes the finished element through this slot.
  */
 function Header({
   appName,
-  authEnabled,
+  userMenu,
 }: {
   appName: string;
-  authEnabled: boolean;
+  userMenu: ReactNode;
 }) {
   const pathname = usePathname();
   const [query, setQuery] = useState("");
@@ -78,7 +82,7 @@ function Header({
 
       <div className="flex items-center gap-1">
         <ThemeToggle />
-        <UserMenu authEnabled={authEnabled} />
+        {userMenu}
       </div>
     </header>
   );
