@@ -1,14 +1,19 @@
 // Inventory Manager — database schema.
 //
-// Scope note: this is the foundation, not the finished domain model. It covers
-// the entities the app already navigates to and the relationships the stock
-// engine will need. Anything speculative (multi-warehouse, batches/lots, tax
-// rules, price tiers) is deliberately left out until the feature that needs it.
+// Design rules applied throughout:
+//   * Every relationship is a real foreign key. Ownership decides the delete
+//     behaviour: line items are Cascade (they cannot outlive their document),
+//     anything a document points at is Restrict (a product with history cannot
+//     be deleted out from under it), and optional lookups are SetNull.
+//   * Money is Decimal(12, 2). Never Float — binary floating point cannot hold
+//     0.10 exactly and totals drift once you add enough of them.
+//   * Every table carries timestamps, and every column that gets filtered or
+//     sorted on carries an index.
 //
-// The one invariant worth stating up front: Product.quantity is the single
+// The one invariant worth stating up front: Product.stockQuantity is the single
 // source of truth for stock on hand, and every change to it must be written
-// alongside a StockMovement row in the same transaction. StockMovement is the
-// audit log that explains how a quantity got to be what it is.
+// alongside a StockTransaction row in the same transaction. StockTransaction is
+// the audit log that explains how a quantity came to be what it is.
 
 generator client {
   provider = "prisma-client"
@@ -23,13 +28,19 @@ datasource db {
 // Enums
 // ---------------------------------------------------------------------------
 
-/// Application roles. Authentication is handled by Clerk; authorisation is
-/// ours, so the role lives here rather than in Clerk metadata.
+/// Application roles. ADMIN can do everything; STAFF works the day-to-day
+/// screens but cannot manage users or delete records.
 enum UserRole {
   ADMIN
-  MANAGER
   STAFF
-  VIEWER
+}
+
+/// Whether a catalogue item can be sold. DISCONTINUED is kept distinct from
+/// INACTIVE so a temporary pause reads differently from a permanent one.
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+  DISCONTINUED
 }
 
 /// Sales order lifecycle. Stock leaves the building on CONFIRMED, which is the
@@ -50,32 +61,45 @@ enum PurchaseStatus {
   CANCELLED
 }
 
-/// Why a quantity changed. Every StockMovement carries one.
-enum MovementType {
-  PURCHASE
-  SALE
+/// Why a quantity changed. STOCK_IN and STOCK_OUT are the ordinary inbound and
+/// outbound moves, ADJUSTMENT is a manual correction (a stock count, breakage),
+/// and REVERSAL undoes an earlier transaction rather than deleting it — the
+/// ledger is append-only.
+enum StockTransactionType {
+  STOCK_IN
+  STOCK_OUT
   ADJUSTMENT
-  RETURN_IN
-  RETURN_OUT
+  REVERSAL
+}
+
+/// What a stock transaction points at. This pair (referenceType, referenceId)
+/// is deliberately polymorphic — it can address an order, a purchase, another
+/// transaction, or nothing at all — so the database cannot enforce it as a
+/// foreign key. The enum at least keeps the type side honest, and MANUAL marks
+/// the rows that legitimately have no reference.
+enum StockReferenceType {
+  ORDER
+  PURCHASE
+  STOCK_TRANSACTION
+  MANUAL
 }
 
 // ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
 
-/// A local mirror of a Clerk user. Clerk owns identity (email, password, MFA);
-/// this row owns everything the app needs to join on or authorise against.
+/// An operator of the system. `passwordHash` holds a hash, never a password —
+/// the seed writes scrypt digests in the form `scrypt$N$r$p$salt$hash`.
 model User {
-  id        String   @id @default(cuid())
-  clerkId   String   @unique @map("clerk_id")
-  email     String   @unique
-  name      String?
-  imageUrl  String?  @map("image_url")
-  role      UserRole @default(STAFF)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         UserRole @default(STAFF)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
-  stockMovements StockMovement[]
+  stockTransactions StockTransaction[]
 
   @@index([role])
   @@map("users")
@@ -84,11 +108,9 @@ model User {
 model Customer {
   id        String   @id @default(cuid())
   name      String
-  email     String?
   phone     String?
+  email     String?  @unique
   address   String?
-  notes     String?
-  isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -99,16 +121,14 @@ model Customer {
 }
 
 model Supplier {
-  id          String   @id @default(cuid())
-  name        String
-  contactName String?  @map("contact_name")
-  email       String?
-  phone       String?
-  address     String?
-  notes       String?
-  isActive    Boolean  @default(true) @map("is_active")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id            String   @id @default(cuid())
+  name          String
+  contactPerson String?  @map("contact_person")
+  phone         String?
+  email         String?  @unique
+  address       String?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
 
   products  Product[]
   purchases Purchase[]
@@ -121,54 +141,46 @@ model Supplier {
 // Catalogue
 // ---------------------------------------------------------------------------
 
-model Category {
-  id          String   @id @default(cuid())
-  name        String   @unique
-  description String?
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-
-  products Product[]
-
-  @@map("categories")
-}
-
 model Product {
   id          String  @id @default(cuid())
-  sku         String  @unique
   name        String
+  sku         String  @unique
   description String?
-  location    String?
+
+  /// A plain label rather than a lookup table: categories here are a filter in
+  /// the UI, not something that owns behaviour or rows of its own.
+  category String
 
   /// What we pay for one unit.
-  unitCost Decimal @map("unit_cost") @db.Decimal(14, 2)
+  costPrice Decimal @map("cost_price") @db.Decimal(12, 2)
 
   /// What we sell one unit for.
-  unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
+  sellingPrice Decimal @map("selling_price") @db.Decimal(12, 2)
 
   /// Stock on hand. Never write this directly — go through the stock engine so
-  /// a StockMovement is recorded in the same transaction.
-  quantity Int @default(0)
+  /// a StockTransaction is recorded in the same database transaction.
+  stockQuantity Int @default(0) @map("stock_quantity")
 
-  /// At or below this level the product counts as low stock. Derived status is
-  /// never stored, so it cannot drift from the quantity it describes.
-  reorderLevel Int @default(0) @map("reorder_level")
+  /// At or below this level the product counts as low stock. The derived
+  /// status is never stored, so it cannot drift from the quantity it describes.
+  minimumStock Int @default(0) @map("minimum_stock")
 
-  isActive  Boolean  @default(true) @map("is_active")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  status    ProductStatus @default(ACTIVE)
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
 
-  categoryId String?   @map("category_id")
-  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  /// Optional: a product can exist before its supplier is known, and removing
+  /// a supplier must not remove the catalogue items bought from them.
   supplierId String?   @map("supplier_id")
-  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
-  orderItems     OrderItem[]
-  purchaseItems  PurchaseItem[]
-  stockMovements StockMovement[]
+  orderItems        OrderItem[]
+  purchaseItems     PurchaseItem[]
+  stockTransactions StockTransaction[]
 
   @@index([name])
-  @@index([categoryId])
+  @@index([category])
+  @@index([status])
   @@index([supplierId])
   @@map("products")
 }
@@ -181,26 +193,29 @@ model Order {
   id          String      @id @default(cuid())
   orderNumber String      @unique @map("order_number")
   status      OrderStatus @default(DRAFT)
-  orderDate   DateTime    @default(now()) @map("order_date")
-  confirmedAt DateTime?   @map("confirmed_at")
-  notes       String?
 
-  /// Sum of the line totals, denormalised so lists and reports do not have to
-  /// aggregate items on every read. Recalculated whenever items change.
-  total Decimal @default(0) @db.Decimal(14, 2)
+  /// Sum of the line totals, then the adjustments applied to it. Denormalised
+  /// so lists and reports do not aggregate items on every read; recalculated
+  /// whenever the items change. total = subtotal - discount + tax.
+  subtotal Decimal @default(0) @db.Decimal(12, 2)
+  discount Decimal @default(0) @db.Decimal(12, 2)
+  tax      Decimal @default(0) @db.Decimal(12, 2)
+  total    Decimal @default(0) @db.Decimal(12, 2)
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  customerId String?   @map("customer_id")
-  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  /// Required: an order without a customer is not a state this app has a use
+  /// for. Restrict, so a customer with history cannot be deleted — deactivate
+  /// them instead.
+  customerId String   @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  items          OrderItem[]
-  stockMovements StockMovement[]
+  items OrderItem[]
 
   @@index([status])
   @@index([customerId])
-  @@index([orderDate])
+  @@index([createdAt])
   @@map("orders")
 }
 
@@ -209,16 +224,20 @@ model OrderItem {
 
   quantity Int
 
-  /// Copied from the product at the time of sale — the order must not change
+  /// Copied from the product at the time of sale — an order must not change
   /// retrospectively when someone edits the price list.
-  unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
-  lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
+  unitPrice Decimal @map("unit_price") @db.Decimal(12, 2)
+  total     Decimal @db.Decimal(12, 2)
 
-  orderId   String  @map("order_id")
-  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
   productId String  @map("product_id")
-  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
+  /// One line per product per order. Two lines for the same product are an
+  /// editing mistake, not a scenario — the quantity belongs on one line.
+  @@unique([orderId, productId])
   @@index([orderId])
   @@index([productId])
   @@map("order_items")
@@ -232,24 +251,24 @@ model Purchase {
   id             String         @id @default(cuid())
   purchaseNumber String         @unique @map("purchase_number")
   status         PurchaseStatus @default(DRAFT)
-  orderDate      DateTime       @default(now()) @map("order_date")
-  receivedAt     DateTime?      @map("received_at")
-  notes          String?
 
-  total Decimal @default(0) @db.Decimal(14, 2)
+  total Decimal @default(0) @db.Decimal(12, 2)
+
+  /// When the order was placed with the supplier, which is not necessarily
+  /// when the row was created.
+  purchaseDate DateTime @default(now()) @map("purchase_date")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  supplierId String?   @map("supplier_id")
-  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  supplierId String   @map("supplier_id")
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  items          PurchaseItem[]
-  stockMovements StockMovement[]
+  items PurchaseItem[]
 
   @@index([status])
   @@index([supplierId])
-  @@index([orderDate])
+  @@index([purchaseDate])
   @@map("purchases")
 }
 
@@ -260,14 +279,16 @@ model PurchaseItem {
 
   /// Copied from the product at the time of purchase, for the same reason
   /// OrderItem copies the price.
-  unitCost  Decimal @map("unit_cost") @db.Decimal(14, 2)
-  lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
+  unitCost Decimal @map("unit_cost") @db.Decimal(12, 2)
+  total    Decimal @db.Decimal(12, 2)
 
   purchaseId String   @map("purchase_id")
-  purchase   Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
-  productId  String   @map("product_id")
-  product    Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  purchase   Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([purchaseId, productId])
   @@index([purchaseId])
   @@index([productId])
   @@map("purchase_items")
@@ -277,34 +298,43 @@ model PurchaseItem {
 // Stock ledger
 // ---------------------------------------------------------------------------
 
-/// One row per change to a product quantity — the audit trail behind the
-/// automatic stock adjustments. `quantity` is a signed delta (negative for a
-/// sale) and `quantityAfter` is the resulting stock on hand, recorded so a
-/// historical balance can be read back without replaying the whole ledger.
-model StockMovement {
-  id            String       @id @default(cuid())
-  type          MovementType
+/// One row per change to a product quantity — the audit trail behind every
+/// stock adjustment. `quantity` is the absolute size of the move; the direction
+/// is carried by `type`. `previousStock` and `newStock` record both sides of
+/// the change, so a historical balance can be read back without replaying the
+/// whole ledger, and a broken chain is visible at a glance.
+///
+/// The table is append-only: a mistake is corrected with a REVERSAL row that
+/// references the transaction it undoes, never by editing or deleting history.
+model StockTransaction {
+  id            String               @id @default(cuid())
+  type          StockTransactionType
   quantity      Int
-  quantityAfter Int          @map("quantity_after")
-  note          String?
-  createdAt     DateTime     @default(now()) @map("created_at")
+  previousStock Int                  @map("previous_stock")
+  newStock      Int                  @map("new_stock")
 
+  /// Polymorphic pointer at whatever caused the move. Not a foreign key — see
+  /// StockReferenceType. `referenceId` is null exactly when the type is MANUAL.
+  referenceType StockReferenceType @default(MANUAL) @map("reference_type")
+  referenceId   String?            @map("reference_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// Restrict: a product that has moved stock has history, and history is not
+  /// something a delete should take with it. Retire the product instead.
   productId String  @map("product_id")
-  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  /// Set when the movement was caused by confirming an order or receiving a
-  /// purchase; null for a manual adjustment.
-  orderId    String?   @map("order_id")
-  order      Order?    @relation(fields: [orderId], references: [id], onDelete: SetNull)
-  purchaseId String?   @map("purchase_id")
-  purchase   Purchase? @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
-
-  /// Who triggered it. Null for system-generated movements such as seeding.
-  createdById String? @map("created_by_id")
-  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  /// Who triggered it. Null for system-generated rows such as the seed, and
+  /// nulled rather than cascaded if the user is later removed — the movement
+  /// still happened.
+  createdBy     String? @map("created_by")
+  createdByUser User?   @relation(fields: [createdBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@index([productId, createdAt])
   @@index([type])
+  @@index([referenceType, referenceId])
+  @@index([createdBy])
   @@index([createdAt])
-  @@map("stock_movements")
+  @@map("stock_transactions")
 }

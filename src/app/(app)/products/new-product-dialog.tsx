@@ -109,6 +109,20 @@ function NewProductDialog() {
           </div>
 
           <Field
+            label="Category"
+            htmlFor="category"
+            hint="A plain label, e.g. Peripherals. Used to group and filter the catalogue."
+            error={errors.category}
+          >
+            <Input
+              id="category"
+              name="category"
+              placeholder="Peripherals"
+              aria-invalid={Boolean(errors.category)}
+            />
+          </Field>
+
+          <Field
             label="Description"
             htmlFor="description"
             hint="Optional."
@@ -123,32 +137,32 @@ function NewProductDialog() {
           </Field>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Unit cost" htmlFor="unitCost" error={errors.unitCost}>
+            <Field label="Cost price" htmlFor="costPrice" error={errors.costPrice}>
               <Input
-                id="unitCost"
-                name="unitCost"
+                id="costPrice"
+                name="costPrice"
                 type="number"
                 step="0.01"
                 min="0"
                 defaultValue="0.00"
-                aria-invalid={Boolean(errors.unitCost)}
+                aria-invalid={Boolean(errors.costPrice)}
                 className="tabular"
               />
             </Field>
 
             <Field
-              label="Unit price"
-              htmlFor="unitPrice"
-              error={errors.unitPrice}
+              label="Selling price"
+              htmlFor="sellingPrice"
+              error={errors.sellingPrice}
             >
               <Input
-                id="unitPrice"
-                name="unitPrice"
+                id="sellingPrice"
+                name="sellingPrice"
                 type="number"
                 step="0.01"
                 min="0"
                 defaultValue="0.00"
-                aria-invalid={Boolean(errors.unitPrice)}
+                aria-invalid={Boolean(errors.sellingPrice)}
                 className="tabular"
               />
             </Field>
@@ -157,34 +171,34 @@ function NewProductDialog() {
           <div className="grid gap-4 sm:grid-cols-2">
             <Field
               label="Opening stock"
-              htmlFor="quantity"
+              htmlFor="stockQuantity"
               hint="Recorded as the first stock movement."
-              error={errors.quantity}
+              error={errors.stockQuantity}
             >
               <Input
-                id="quantity"
-                name="quantity"
+                id="stockQuantity"
+                name="stockQuantity"
                 type="number"
                 min="0"
                 defaultValue="0"
-                aria-invalid={Boolean(errors.quantity)}
+                aria-invalid={Boolean(errors.stockQuantity)}
                 className="tabular"
               />
             </Field>
 
             <Field
-              label="Reorder level"
-              htmlFor="reorderLevel"
+              label="Minimum stock"
+              htmlFor="minimumStock"
               hint="Flags the product as low stock at or below this."
-              error={errors.reorderLevel}
+              error={errors.minimumStock}
             >
               <Input
-                id="reorderLevel"
-                name="reorderLevel"
+                id="minimumStock"
+                name="minimumStock"
                 type="number"
                 min="0"
                 defaultValue="0"
-                aria-invalid={Boolean(errors.reorderLevel)}
+                aria-invalid={Boolean(errors.minimumStock)}
                 className="tabular"
               />
             </Field>

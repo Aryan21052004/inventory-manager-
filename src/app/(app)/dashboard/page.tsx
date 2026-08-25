@@ -156,7 +156,7 @@ function DashboardContent({ snapshot }: { snapshot: DashboardSnapshot }) {
                         {formatDelta(movement.quantity)}
                       </TableCell>
                       <TableCell className="tabular text-right">
-                        {formatNumber(movement.quantityAfter)}
+                        {formatNumber(movement.newStock)}
                       </TableCell>
                       <TableCell className="text-right text-muted-foreground">
                         {formatDateTime(movement.createdAt)}

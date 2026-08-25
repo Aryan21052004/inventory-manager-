@@ -28,7 +28,8 @@ export interface RecentMovement {
   id: string;
   type: string;
   quantity: number;
-  quantityAfter: number;
+  /** Stock on hand once this movement had been applied. */
+  newStock: number;
   createdAt: Date;
   productName: string;
   productSku: string;
@@ -55,31 +56,33 @@ export async function loadDashboard(): Promise<DashboardResult> {
     const [aggregate, openOrderCount, pendingPurchaseCount, movements] =
       await Promise.all([
         /*
-         * One pass over products for all five figures. `quantity <= reorder_level`
-         * compares two columns, which the query builder cannot express, and
-         * splitting this into separate counts would mean four table scans
-         * instead of one.
+         * One pass over products for all five figures.
+         * `stock_quantity <= minimum_stock` compares two columns, which the
+         * query builder cannot express, and splitting this into separate counts
+         * would mean four table scans instead of one.
          */
         prisma.$queryRaw<ProductAggregate[]>`
           SELECT
-            COUNT(*)::int                                                        AS product_count,
-            COALESCE(SUM(quantity), 0)::int                                      AS total_units,
-            COALESCE(SUM(quantity * unit_cost), 0)::text                         AS stock_value,
-            COUNT(*) FILTER (WHERE quantity <= 0)::int                           AS out_of_stock,
-            COUNT(*) FILTER (WHERE quantity > 0 AND quantity <= reorder_level)::int AS low_stock
+            COUNT(*)::int                                            AS product_count,
+            COALESCE(SUM(stock_quantity), 0)::int                    AS total_units,
+            COALESCE(SUM(stock_quantity * cost_price), 0)::text      AS stock_value,
+            COUNT(*) FILTER (WHERE stock_quantity <= 0)::int         AS out_of_stock,
+            COUNT(*) FILTER (
+              WHERE stock_quantity > 0 AND stock_quantity <= minimum_stock
+            )::int                                                   AS low_stock
           FROM products
-          WHERE is_active = true
+          WHERE status = 'ACTIVE'
         `,
         prisma.order.count({ where: { status: { in: ["DRAFT", "CONFIRMED"] } } }),
         prisma.purchase.count({ where: { status: { in: ["DRAFT", "ORDERED"] } } }),
-        prisma.stockMovement.findMany({
+        prisma.stockTransaction.findMany({
           take: 5,
           orderBy: { createdAt: "desc" },
           select: {
             id: true,
             type: true,
             quantity: true,
-            quantityAfter: true,
+            newStock: true,
             createdAt: true,
             product: { select: { name: true, sku: true } },
           },
@@ -108,7 +111,7 @@ export async function loadDashboard(): Promise<DashboardResult> {
           id: movement.id,
           type: movement.type,
           quantity: movement.quantity,
-          quantityAfter: movement.quantityAfter,
+          newStock: movement.newStock,
           createdAt: movement.createdAt,
           productName: movement.product.name,
           productSku: movement.product.sku,

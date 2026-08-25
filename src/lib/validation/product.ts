@@ -47,10 +47,15 @@ export const productSchema = z.object({
     .trim()
     .max(1000, "Description must be 1000 characters or fewer")
     .optional(),
-  unitCost: requiredNumber("Unit cost"),
-  unitPrice: requiredNumber("Unit price"),
-  quantity: requiredWholeNumber("Opening stock"),
-  reorderLevel: requiredWholeNumber("Reorder level"),
+  category: z
+    .string()
+    .trim()
+    .min(1, "Category is required")
+    .max(64, "Category must be 64 characters or fewer"),
+  costPrice: requiredNumber("Cost price"),
+  sellingPrice: requiredNumber("Selling price"),
+  stockQuantity: requiredWholeNumber("Opening stock"),
+  minimumStock: requiredWholeNumber("Minimum stock"),
 });
 
 export type ProductInput = z.infer<typeof productSchema>;

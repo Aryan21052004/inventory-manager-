@@ -51,8 +51,21 @@ Then edit `.env.local`:
 npm run db:migrate
 ```
 
-An initial migration is already committed at `prisma/migrations/0_init`, so this
-applies it and generates the typed client.
+The migrations are already committed under `prisma/migrations`, so this applies
+them and generates the typed client.
+
+### 3a. Load the sample data (optional)
+
+```bash
+npm run db:seed
+```
+
+Prisma 7 does not run this as part of `db:reset`, so run it yourself after a
+reset. It fills the database with a small, self-consistent warehouse: 2 users, 5
+suppliers, 10 products, 5 customers, 6 purchase orders, 7 sales orders, and the
+26 stock transactions that explain every unit on hand. Two products are left
+below their minimum stock so the low-stock views have something to show. The
+seed clears the tables first, so it is safe to re-run.
 
 ### 4. Run it
 
@@ -89,6 +102,8 @@ and lists whatever setup steps are still outstanding.
 | `npm run db:deploy`   | Apply pending migrations (production)              |
 | `npm run db:push`     | Push the schema without a migration (prototyping)  |
 | `npm run db:studio`   | Prisma Studio                                      |
+| `npm run db:seed`     | Load the sample data (clears the tables first)     |
+| `npm run db:reset`    | Drop and re-migrate; seed separately after it      |
 | `npm run db:generate` | Regenerate the Prisma client                       |
 
 ## Project structure
@@ -96,7 +111,8 @@ and lists whatever setup steps are still outstanding.
 ```
 prisma/
   schema.prisma          Database schema
-  migrations/0_init/     Initial migration
+  migrations/            Migration history
+  seed.ts                Sample data
 src/
   app/
     (app)/               Authenticated pages, wrapped in the dashboard shell
@@ -131,15 +147,24 @@ src/
 
 A few decisions worth knowing before extending this.
 
-**Stock is a ledger, not a number.** `Product.quantity` is the single source of
-truth for stock on hand, and every write to it must be paired with a
-`StockMovement` row in the same transaction. The movement records a signed delta
-and the resulting balance, so any quantity can be explained by replaying its
-history.
+**Stock is a ledger, not a number.** `Product.stockQuantity` is the single source
+of truth for stock on hand, and every write to it must be paired with a
+`StockTransaction` row in the same transaction. Each transaction records the size
+of the move, its direction, and both the previous and resulting balance, so any
+quantity can be explained by replaying its history. The ledger is append-only: a
+mistake is corrected with a `REVERSAL` row pointing at the transaction it undoes,
+never by editing or deleting one.
 
 **Derived values are never stored.** Stock status (in stock / low / out) is
-computed from `quantity` against `reorderLevel` rather than persisted, so it
+computed from `stockQuantity` against `minimumStock` rather than persisted, so it
 cannot drift from the numbers it describes.
+
+**The database refuses invalid rows, not just invalid relationships.** Alongside
+the foreign keys, the migration adds check constraints: money is never negative,
+a line always moves at least one unit, `total = subtotal - discount + tax` on
+every order, a line total always equals quantity times price, and a stock
+transaction's `previousStock`, `quantity` and `newStock` have to add up. Prisma's
+schema language cannot express these, so they live in the migration SQL.
 
 **Authorisation follows the route tree.** Access is checked with
 `auth.protect()` in the `(app)` layout rather than by path matching in the
@@ -152,8 +177,9 @@ passes through messages we wrote and replaces everything else with a generic
 line, logging the original server-side. A Prisma error naming a column never
 reaches the browser.
 
-**Money is `Decimal`.** Prices and costs are `DECIMAL(14,2)` in Postgres and are
-formatted from their string representation, so nothing rounds through a float.
+**Money is `Decimal`.** Prices, costs and totals are `DECIMAL(12,2)` in Postgres
+and are formatted from their string representation, so nothing rounds through a
+float.
 
 ## What is not built yet
 
@@ -163,7 +189,7 @@ Each page lists its own planned scope. The largest remaining piece is the
 
 - Confirming an order deducts the ordered quantity from stock
 - Receiving a purchase adds the received quantity to stock
-- Both write a `StockMovement` in the same transaction as the quantity change
+- Both write a `StockTransaction` in the same transaction as the quantity change
 - Confirmation is refused when stock is insufficient
 - Cancelling a confirmed order returns the stock
 
