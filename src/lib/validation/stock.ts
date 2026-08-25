@@ -48,6 +48,11 @@ export const stockMovementSchema = z
      */
     quantity,
     reference: stockReferenceSchema,
+    /**
+     * Why the move happened. Optional in general — a STOCK_OUT that points at
+     * an order is already explained by the order — but mandatory for the two
+     * types that have no document behind them, which is checked below.
+     */
     note: z.string().trim().max(500).optional(),
   })
   .superRefine((input, ctx) => {
@@ -58,6 +63,21 @@ export const stockMovementSchema = z
         code: "custom",
         path: ["quantity"],
         message: `${input.type} quantity must be positive — the type already says which way the stock moves.`,
+      });
+    }
+
+    /*
+     * ADJUSTMENT and REVERSAL overwrite what the system believes without a
+     * document to justify it. A reason is the only thing that will ever explain
+     * such a row to whoever reads the ledger afterwards, and it cannot be
+     * reconstructed later — so it is required at the point the movement is
+     * recorded, not requested afterwards.
+     */
+    if (!directional && !input.note?.trim()) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["note"],
+        message: `A ${input.type} needs a reason — it is the only record of why stock changed.`,
       });
     }
   });

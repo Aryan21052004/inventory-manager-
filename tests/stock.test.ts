@@ -151,6 +151,7 @@ describe("authorisation", () => {
         type: "ADJUSTMENT",
         quantity: -40,
         reference: { type: "MANUAL" },
+        note: "Stock count correction",
       }),
     ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
 
@@ -172,6 +173,7 @@ describe("authorisation", () => {
         type: "REVERSAL",
         quantity: -5,
         reference: { type: "STOCK_TRANSACTION", id: "whatever" },
+        note: "Undoing an earlier mistake",
       }),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
@@ -185,6 +187,7 @@ describe("authorisation", () => {
       type: "ADJUSTMENT",
       quantity: -40,
       reference: { type: "MANUAL" },
+      note: "Stock count correction",
     });
 
     expect(transaction.createdBy).toBe(admin.id);
@@ -255,6 +258,24 @@ describe("the ledger itself", () => {
         reference: { type: "MANUAL", id: "sneaky" },
       } as unknown as StockMovementInput),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("refuses an ADJUSTMENT with no reason", async () => {
+    await signInWithRole("ADMIN");
+    const product = await createProduct(10);
+
+    // The two types with no document behind them are the ones the ledger can
+    // never explain on its own, so the reason is not optional for them.
+    await expect(
+      recordStockMovement({
+        productId: product.id,
+        type: "ADJUSTMENT",
+        quantity: -1,
+        reference: { type: "MANUAL" },
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    expect(await prisma.stockTransaction.count()).toBe(0);
   });
 
   it("reports a missing product rather than inventing one", async () => {

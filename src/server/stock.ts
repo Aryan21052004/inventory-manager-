@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { StockTransaction } from "@/generated/prisma/client";
+import type { Prisma, StockTransaction } from "@/generated/prisma/client";
 import type { StockTransactionType } from "@/generated/prisma/enums";
 import { AppError, InsufficientStockError, NotFoundError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
@@ -105,6 +105,7 @@ export async function recordStockMovement(
         referenceType: movement.reference.type,
         referenceId:
           movement.reference.type === "MANUAL" ? null : movement.reference.id,
+        note: movement.note ?? null,
         // The whole point: from the session, not from the caller.
         createdBy: user.id,
       },
@@ -116,5 +117,49 @@ export async function recordStockMovement(
     });
 
     return { transaction, previousStock, newStock };
+  });
+}
+
+/**
+ * The opening balance of a product that has just been created.
+ *
+ * This is the one stock write that does not lock the product row, and it is
+ * safe for exactly one reason: the row was created earlier in `tx` and has not
+ * been committed, so no other transaction can see it, let alone move stock
+ * against it. There is no read-modify-write to protect — the previous balance
+ * is zero by construction, because the row did not exist a moment ago.
+ *
+ * It exists so that a product created with stock on hand still gets a ledger
+ * row explaining that stock, in the same transaction as the product itself.
+ * A catalogue item whose quantity has no movement behind it is the one hole
+ * the audit trail must not have.
+ *
+ * Do not reach for this anywhere else. For a product that already exists, the
+ * balance has to be read under a lock, which is what `recordStockMovement`
+ * does.
+ */
+export async function recordOpeningStock(
+  tx: Prisma.TransactionClient,
+  params: { productId: string; quantity: number; userId: string },
+): Promise<void> {
+  if (params.quantity <= 0) return;
+
+  await tx.stockTransaction.create({
+    data: {
+      productId: params.productId,
+      type: "STOCK_IN",
+      quantity: params.quantity,
+      previousStock: 0,
+      newStock: params.quantity,
+      referenceType: "MANUAL",
+      referenceId: null,
+      note: "Opening stock recorded when the product was created",
+      createdBy: params.userId,
+    },
+  });
+
+  await tx.product.update({
+    where: { id: params.productId },
+    data: { stockQuantity: params.quantity },
   });
 }

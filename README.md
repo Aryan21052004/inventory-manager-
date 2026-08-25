@@ -3,9 +3,10 @@
 Stock control for products, orders, purchases and suppliers, built as a
 production-shaped Next.js application.
 
-> **Status: foundation build.** The structure, layout, database schema, and
-> shared UI are in place. The feature modules behind each page are scaffolded
-> but not implemented — see [What is not built yet](#what-is-not-built-yet).
+> **Status: products and inventory.** The foundation, Clerk authentication, and
+> the products + inventory module are built. Orders, purchases, customers,
+> suppliers and reports are still scaffolded pages — see
+> [What is not built yet](#what-is-not-built-yet).
 
 ## Stack
 
@@ -119,7 +120,9 @@ src/
   app/
     (app)/               Authenticated pages, wrapped in the dashboard shell
       dashboard/         Live stock snapshot
-      products/          + new-product-dialog.tsx
+      products/          List, detail, create/edit, stock adjustment
+        actions.ts       Server actions (thin — logic lives in src/server)
+        [id]/            Product detail, movement history, orders, purchases
       orders/  purchases/  customers/  suppliers/
       stock-movements/  reports/  settings/
       layout.tsx         Dashboard chrome + the authorisation boundary
@@ -132,17 +135,21 @@ src/
   components/
     layout/              Shell: sidebar, header, mobile drawer, user menu
     ui/                  Button, Card, Table, Dialog, Select, Badge,
-                         Skeleton, EmptyState, ErrorState, StatCard, Toaster…
+                         Skeleton, EmptyState, ErrorState, StatCard,
+                         Pagination, StockStatusBadge, Toaster…
   lib/
     env.ts               Validated environment configuration
     prisma.ts            Prisma singleton + connection health check
     errors.ts            AppError types and safe error normalisation
     format.ts            Locale-pinned currency, number and date formatters
     nav.ts               Single source of truth for navigation
+    product-query.ts     The products list's URL state, parsed and serialised
+    stock-status.ts      The derived in-stock / low / out rule, in one place
     validation/          Zod schemas shared by forms and server actions
   server/
     auth.ts              Clerk session to local user, and role checks
     dashboard.ts         Server-side read models
+    products.ts          Catalogue reads and writes; no next/* imports
     stock.ts             The only way stock is allowed to change
 tests/                   Integration tests (real Postgres, mocked Clerk)
   proxy.ts               Clerk auth context (Next 16 `proxy` convention)
@@ -223,11 +230,74 @@ reaches the browser.
 and are formatted from their string representation, so nothing rounds through a
 float.
 
+## Products and inventory
+
+The catalogue and the stock engine behind it, built on the rules above.
+
+**Every figure is queried, none are hardcoded.** The list filters, sorts and
+pages in Postgres against the query string, so the browser receives one page of
+rows rather than the catalogue plus the code to sift it. The state lives in the
+URL, which makes a filtered view something you can bookmark or send someone.
+
+**Stock status is derived, in one place and two languages.** `stockStatus()` in
+`src/lib/stock-status.ts` is the rule; `stockStatusWhere()` in
+`src/server/products.ts` is the same rule as a SQL filter, because a page of
+products has to be narrowed in the database rather than after loading all of
+them. They cannot share an implementation, so a test asserts they agree rather
+than assuming it.
+
+**Editing a product cannot change its stock.** `updateProductSchema` has no
+`stockQuantity` field, so there is nothing for a tampered request to land on.
+Stock moves only through the engine: a new product's opening balance is written
+as a `STOCK_IN` in the same transaction that creates it, and a correction after
+that is an ADMIN-only `ADJUSTMENT` with a mandatory reason.
+
+**An adjustment is a count and a direction, never a signed number.** That is how
+the operation is described out loud — "twenty fewer than the system thinks" —
+and the sign is derived once on the way to the ledger. The server authenticates
+the Clerk session, resolves the local user through `clerkId`, checks the ADMIN
+role against our database, locks the product row `FOR UPDATE`, refuses a result
+below zero, then writes the new quantity and the `ADJUSTMENT` row together. The
+row lock is what makes simultaneous adjustments safe; without it two requests
+read the same balance and the second overwrites the first.
+
+**Server actions are thin.** `src/app/(app)/products/actions.ts` turns a
+`FormData` into an object, revalidates, and converts a thrown error into
+something a form can show. Every rule — who may write, what a duplicate SKU
+does, that stock never moves without a ledger row — is in `src/server`, so it
+holds however the operation is invoked and can be tested without faking a
+request.
+
+## Tests
+
+```bash
+npm test
+```
+
+Integration tests against a real PostgreSQL database, derived from
+`DATABASE_URL` with `_test` appended and created and migrated automatically.
+Clerk is the only thing mocked, because reaching a real identity provider from
+a test would make the suite depend on a network and an account.
+
+Real Postgres because most of what is worth proving here is Postgres behaviour:
+that the unique index rejects a duplicate SKU, that a filter comparing two
+columns returns what the derived status says it should, that a `Restrict`
+foreign key stops a delete, and that `FOR UPDATE` holds under genuinely
+concurrent adjustments. A mocked Prisma client would only prove the mock agreed
+with the test.
+
+| File                             | Covers                                       |
+| -------------------------------- | -------------------------------------------- |
+| `tests/auth.test.ts`             | Clerk-to-database identity, roles, races      |
+| `tests/stock.test.ts`            | The stock engine: attribution, ledger, limits |
+| `tests/products.test.ts`         | Catalogue CRUD, validation, search, filters   |
+| `tests/stock-adjustment.test.ts` | Adjustments, permissions, concurrency         |
+
 ## What is not built yet
 
-The nine pages exist and are navigable; the modules behind them are not written.
-Each page lists its own planned scope. The largest remaining piece is the
-**automatic stock engine**:
+Products and inventory are complete. The remaining pages are navigable and each
+lists its own planned scope. The largest outstanding piece is the **automatic
+stock engine** for documents:
 
 - Confirming an order deducts the ordered quantity from stock
 - Receiving a purchase adds the received quantity to stock
@@ -235,5 +305,9 @@ Each page lists its own planned scope. The largest remaining piece is the
 - Confirmation is refused when stock is insufficient
 - Cancelling a confirmed order returns the stock
 
-Also outstanding: CRUD for every entity, the Clerk-to-database user sync webhook,
-role-based access control, reporting queries, and CSV export.
+The mechanism those need already exists — `recordStockMovement` in
+`src/server/stock.ts` locks, validates and writes the ledger row — so what is
+missing is the document lifecycle around it, not the stock handling.
+
+Also outstanding: CRUD for orders, purchases, customers and suppliers; the
+Clerk-to-database user sync webhook; reporting queries; and CSV export.

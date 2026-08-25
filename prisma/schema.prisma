@@ -336,6 +336,13 @@ model StockTransaction {
   referenceType StockReferenceType @default(MANUAL) @map("reference_type")
   referenceId   String?            @map("reference_id")
 
+  /// Why the move happened, in the operator's words. Mandatory for a manual
+  /// ADJUSTMENT — a correction with no stated reason is the one entry in this
+  /// ledger nobody can audit — and left null for movements a document already
+  /// explains. The requirement is enforced in `recordStockMovement` rather than
+  /// as a check constraint, so the message can name the field.
+  note String?
+
   createdAt DateTime @default(now()) @map("created_at")
 
   /// Restrict: a product that has moved stock has history, and history is not

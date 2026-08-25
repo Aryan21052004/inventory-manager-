@@ -1,62 +1,127 @@
+import { Suspense } from "react";
 import type { Metadata } from "next";
-import { Package } from "lucide-react";
+import { AlertTriangle, Boxes, PackageX, Wallet } from "lucide-react";
 
-import { NewProductDialog } from "@/app/(app)/products/new-product-dialog";
-import { ModulePlaceholder } from "@/components/module-placeholder";
+import { NewProductButton } from "@/app/(app)/products/new-product-button";
+import { ProductFilters } from "@/app/(app)/products/product-filters";
+import { ProductsTable } from "@/app/(app)/products/products-table";
 import { Card, CardContent } from "@/components/ui/card";
-import { EmptyState } from "@/components/ui/empty-state";
+import { PageHeader } from "@/components/ui/page-header";
+import { StatCard } from "@/components/ui/stat-card";
+import { TableSkeleton } from "@/components/ui/skeleton";
+import { formatCurrency, formatNumber } from "@/lib/format";
 import {
-  Table,
-  TableBody,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  parseProductListParams,
+  toSearchParams,
+  type RawSearchParams,
+} from "@/lib/product-query";
+import { getCurrentUser } from "@/server/auth";
+import { loadCategories, loadProductStats, loadSuppliers } from "@/server/products";
 
 export const metadata: Metadata = { title: "Products" };
 
-export default function ProductsPage() {
+/**
+ * The catalogue.
+ *
+ * A server component reading its state out of the query string. That is what
+ * keeps the whole thing honest: the filters, the sort and the page are in the
+ * URL, the query runs in Postgres, and the browser receives one page of rows —
+ * not the catalogue plus the code to sift it. Every figure on this page is
+ * read from the database; nothing is hardcoded.
+ *
+ * The role decides what the page offers, and only that. `canManage` hides the
+ * admin controls from a STAFF user; it does not protect them. Each action
+ * behind those controls re-checks the role on the server against our own
+ * database, because hiding a button stops nobody who can call the action
+ * directly.
+ */
+
+// The list reflects live stock, so this page must not be captured at build time.
+export const dynamic = "force-dynamic";
+
+export default async function ProductsPage({
+  searchParams,
+}: {
+  searchParams: Promise<RawSearchParams>;
+}) {
+  const params = parseProductListParams(await searchParams);
+
+  const [user, stats, categories, suppliers] = await Promise.all([
+    getCurrentUser(),
+    loadProductStats(),
+    loadCategories(),
+    loadSuppliers(),
+  ]);
+
+  const canManage = user?.role === "ADMIN";
+
   return (
-    <ModulePlaceholder
-      title="Products"
-      description="Your catalogue, with cost, price, and stock on hand for every item."
-      icon={Package}
-      actions={<NewProductDialog />}
-      planned={[
-        "Create, edit, archive and restore catalogue items",
-        "Search, category filters, and sortable columns",
-        "Derived stock status: in stock, low, out of stock",
-        "Per-product movement history and stock valuation",
-        "Category and supplier assignment",
-        "Bulk import from CSV",
-      ]}
-    >
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title="Products"
+        description="Your catalogue, with cost, price, and stock on hand for every item."
+        actions={
+          canManage ? (
+            <NewProductButton categories={categories} suppliers={suppliers} />
+          ) : null
+        }
+      />
+
+      {stats.ok ? (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard
+            label="Products"
+            value={formatNumber(stats.data.total)}
+            hint="Items in the catalogue"
+            icon={Boxes}
+          />
+          <StatCard
+            label="Low stock"
+            value={formatNumber(stats.data.lowStock)}
+            hint="At or below the minimum"
+            icon={AlertTriangle}
+            tone={stats.data.lowStock > 0 ? "warning" : "default"}
+          />
+          <StatCard
+            label="Out of stock"
+            value={formatNumber(stats.data.outOfStock)}
+            hint="Nothing on hand"
+            icon={PackageX}
+            tone={stats.data.outOfStock > 0 ? "destructive" : "default"}
+          />
+          <StatCard
+            label="Stock value"
+            value={formatCurrency(stats.data.stockValue)}
+            hint="Valued at unit cost"
+            icon={Wallet}
+            tone="success"
+          />
+        </div>
+      ) : null}
+
       <Card>
         <CardContent className="p-0">
-          {/* The header row shows the eventual shape of the table; rows arrive
-              with the products module. */}
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>SKU</TableHead>
-                <TableHead>Product</TableHead>
-                <TableHead>Category</TableHead>
-                <TableHead className="text-right">On hand</TableHead>
-                <TableHead className="text-right">Unit cost</TableHead>
-                <TableHead className="text-right">Unit price</TableHead>
-                <TableHead>Status</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody />
-          </Table>
+          <ProductFilters params={params} categories={categories} />
 
-          <EmptyState
-            icon={Package}
-            title="No products yet"
-            description="Add your first product to start tracking stock. The form is live — saving arrives with the products module."
-          />
+          {/*
+            Keyed on the query string so a filter change remounts the boundary
+            and the skeleton appears again. Without the key React would keep the
+            resolved children on screen while the new query ran, and changing a
+            filter would look like nothing had happened.
+          */}
+          <Suspense
+            key={toSearchParams(params).toString()}
+            fallback={<TableSkeleton rows={params.pageSize > 10 ? 10 : 6} columns={7} />}
+          >
+            <ProductsTable
+              params={params}
+              categories={categories}
+              suppliers={suppliers}
+              canManage={canManage}
+            />
+          </Suspense>
         </CardContent>
       </Card>
-    </ModulePlaceholder>
+    </div>
   );
 }
