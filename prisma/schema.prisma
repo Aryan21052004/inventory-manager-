@@ -1,0 +1,310 @@
+// Inventory Manager — database schema.
+//
+// Scope note: this is the foundation, not the finished domain model. It covers
+// the entities the app already navigates to and the relationships the stock
+// engine will need. Anything speculative (multi-warehouse, batches/lots, tax
+// rules, price tiers) is deliberately left out until the feature that needs it.
+//
+// The one invariant worth stating up front: Product.quantity is the single
+// source of truth for stock on hand, and every change to it must be written
+// alongside a StockMovement row in the same transaction. StockMovement is the
+// audit log that explains how a quantity got to be what it is.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// Application roles. Authentication is handled by Clerk; authorisation is
+/// ours, so the role lives here rather than in Clerk metadata.
+enum UserRole {
+  ADMIN
+  MANAGER
+  STAFF
+  VIEWER
+}
+
+/// Sales order lifecycle. Stock leaves the building on CONFIRMED, which is the
+/// point the stock engine deducts it.
+enum OrderStatus {
+  DRAFT
+  CONFIRMED
+  FULFILLED
+  CANCELLED
+}
+
+/// Purchase order lifecycle. Stock arrives on RECEIVED, which is the point the
+/// stock engine adds it.
+enum PurchaseStatus {
+  DRAFT
+  ORDERED
+  RECEIVED
+  CANCELLED
+}
+
+/// Why a quantity changed. Every StockMovement carries one.
+enum MovementType {
+  PURCHASE
+  SALE
+  ADJUSTMENT
+  RETURN_IN
+  RETURN_OUT
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+/// A local mirror of a Clerk user. Clerk owns identity (email, password, MFA);
+/// this row owns everything the app needs to join on or authorise against.
+model User {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique @map("clerk_id")
+  email     String   @unique
+  name      String?
+  imageUrl  String?  @map("image_url")
+  role      UserRole @default(STAFF)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  stockMovements StockMovement[]
+
+  @@index([role])
+  @@map("users")
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  email     String?
+  phone     String?
+  address   String?
+  notes     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  orders Order[]
+
+  @@index([name])
+  @@map("customers")
+}
+
+model Supplier {
+  id          String   @id @default(cuid())
+  name        String
+  contactName String?  @map("contact_name")
+  email       String?
+  phone       String?
+  address     String?
+  notes       String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  products  Product[]
+  purchases Purchase[]
+
+  @@index([name])
+  @@map("suppliers")
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+model Category {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  products Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id          String  @id @default(cuid())
+  sku         String  @unique
+  name        String
+  description String?
+  location    String?
+
+  /// What we pay for one unit.
+  unitCost Decimal @map("unit_cost") @db.Decimal(14, 2)
+
+  /// What we sell one unit for.
+  unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
+
+  /// Stock on hand. Never write this directly — go through the stock engine so
+  /// a StockMovement is recorded in the same transaction.
+  quantity Int @default(0)
+
+  /// At or below this level the product counts as low stock. Derived status is
+  /// never stored, so it cannot drift from the quantity it describes.
+  reorderLevel Int @default(0) @map("reorder_level")
+
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  categoryId String?   @map("category_id")
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  supplierId String?   @map("supplier_id")
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+
+  orderItems     OrderItem[]
+  purchaseItems  PurchaseItem[]
+  stockMovements StockMovement[]
+
+  @@index([name])
+  @@index([categoryId])
+  @@index([supplierId])
+  @@map("products")
+}
+
+// ---------------------------------------------------------------------------
+// Sales
+// ---------------------------------------------------------------------------
+
+model Order {
+  id          String      @id @default(cuid())
+  orderNumber String      @unique @map("order_number")
+  status      OrderStatus @default(DRAFT)
+  orderDate   DateTime    @default(now()) @map("order_date")
+  confirmedAt DateTime?   @map("confirmed_at")
+  notes       String?
+
+  /// Sum of the line totals, denormalised so lists and reports do not have to
+  /// aggregate items on every read. Recalculated whenever items change.
+  total Decimal @default(0) @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  customerId String?   @map("customer_id")
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  items          OrderItem[]
+  stockMovements StockMovement[]
+
+  @@index([status])
+  @@index([customerId])
+  @@index([orderDate])
+  @@map("orders")
+}
+
+model OrderItem {
+  id String @id @default(cuid())
+
+  quantity Int
+
+  /// Copied from the product at the time of sale — the order must not change
+  /// retrospectively when someone edits the price list.
+  unitPrice Decimal @map("unit_price") @db.Decimal(14, 2)
+  lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
+
+  orderId   String  @map("order_id")
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+// ---------------------------------------------------------------------------
+// Purchasing
+// ---------------------------------------------------------------------------
+
+model Purchase {
+  id             String         @id @default(cuid())
+  purchaseNumber String         @unique @map("purchase_number")
+  status         PurchaseStatus @default(DRAFT)
+  orderDate      DateTime       @default(now()) @map("order_date")
+  receivedAt     DateTime?      @map("received_at")
+  notes          String?
+
+  total Decimal @default(0) @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  supplierId String?   @map("supplier_id")
+  supplier   Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+
+  items          PurchaseItem[]
+  stockMovements StockMovement[]
+
+  @@index([status])
+  @@index([supplierId])
+  @@index([orderDate])
+  @@map("purchases")
+}
+
+model PurchaseItem {
+  id String @id @default(cuid())
+
+  quantity Int
+
+  /// Copied from the product at the time of purchase, for the same reason
+  /// OrderItem copies the price.
+  unitCost  Decimal @map("unit_cost") @db.Decimal(14, 2)
+  lineTotal Decimal @map("line_total") @db.Decimal(14, 2)
+
+  purchaseId String   @map("purchase_id")
+  purchase   Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  productId  String   @map("product_id")
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([purchaseId])
+  @@index([productId])
+  @@map("purchase_items")
+}
+
+// ---------------------------------------------------------------------------
+// Stock ledger
+// ---------------------------------------------------------------------------
+
+/// One row per change to a product quantity — the audit trail behind the
+/// automatic stock adjustments. `quantity` is a signed delta (negative for a
+/// sale) and `quantityAfter` is the resulting stock on hand, recorded so a
+/// historical balance can be read back without replaying the whole ledger.
+model StockMovement {
+  id            String       @id @default(cuid())
+  type          MovementType
+  quantity      Int
+  quantityAfter Int          @map("quantity_after")
+  note          String?
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// Set when the movement was caused by confirming an order or receiving a
+  /// purchase; null for a manual adjustment.
+  orderId    String?   @map("order_id")
+  order      Order?    @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  purchaseId String?   @map("purchase_id")
+  purchase   Purchase? @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+
+  /// Who triggered it. Null for system-generated movements such as seeding.
+  createdById String? @map("created_by_id")
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([productId, createdAt])
+  @@index([type])
+  @@index([createdAt])
+  @@map("stock_movements")
+}

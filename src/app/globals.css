@@ -1,0 +1,162 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/*
+ * Design tokens.
+ *
+ * Every colour in the app comes from this file. Components reference semantic
+ * names (`bg-card`, `text-muted-foreground`) rather than raw palette values, so
+ * the light and dark themes stay in step and a palette change is a one-file
+ * edit rather than a find-and-replace across the codebase.
+ *
+ * Dark mode is driven by a `.dark` class on <html>, set before first paint by
+ * the inline script in the root layout.
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.625rem;
+
+  /* Surfaces */
+  --background: oklch(0.985 0.002 265);
+  --foreground: oklch(0.21 0.024 265);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.21 0.024 265);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.024 265);
+
+  /* Brand */
+  --primary: oklch(0.51 0.19 266);
+  --primary-foreground: oklch(0.99 0 0);
+
+  /* Neutrals */
+  --secondary: oklch(0.968 0.004 265);
+  --secondary-foreground: oklch(0.28 0.025 265);
+  --muted: oklch(0.968 0.004 265);
+  --muted-foreground: oklch(0.55 0.022 265);
+  --accent: oklch(0.955 0.008 265);
+  --accent-foreground: oklch(0.28 0.025 265);
+
+  /* Status */
+  --destructive: oklch(0.58 0.21 27);
+  --destructive-foreground: oklch(0.99 0 0);
+  --success: oklch(0.6 0.14 158);
+  --success-foreground: oklch(0.99 0 0);
+  --warning: oklch(0.72 0.16 72);
+  --warning-foreground: oklch(0.24 0.04 72);
+
+  /* Lines and focus */
+  --border: oklch(0.922 0.006 265);
+  --input: oklch(0.922 0.006 265);
+  --ring: oklch(0.51 0.19 266);
+
+  /* Sidebar reads as a distinct surface from the content area */
+  --sidebar: oklch(1 0 0);
+  --sidebar-foreground: oklch(0.32 0.022 265);
+  --sidebar-accent: oklch(0.965 0.008 265);
+  --sidebar-accent-foreground: oklch(0.24 0.03 265);
+  --sidebar-border: oklch(0.922 0.006 265);
+}
+
+.dark {
+  --background: oklch(0.17 0.016 265);
+  --foreground: oklch(0.96 0.004 265);
+  --card: oklch(0.213 0.019 265);
+  --card-foreground: oklch(0.96 0.004 265);
+  --popover: oklch(0.213 0.019 265);
+  --popover-foreground: oklch(0.96 0.004 265);
+
+  --primary: oklch(0.68 0.16 264);
+  --primary-foreground: oklch(0.17 0.03 265);
+
+  --secondary: oklch(0.27 0.021 265);
+  --secondary-foreground: oklch(0.96 0.004 265);
+  --muted: oklch(0.27 0.021 265);
+  --muted-foreground: oklch(0.7 0.018 265);
+  --accent: oklch(0.29 0.024 265);
+  --accent-foreground: oklch(0.96 0.004 265);
+
+  --destructive: oklch(0.65 0.19 25);
+  --destructive-foreground: oklch(0.99 0 0);
+  --success: oklch(0.68 0.14 158);
+  --success-foreground: oklch(0.17 0.03 158);
+  --warning: oklch(0.78 0.15 72);
+  --warning-foreground: oklch(0.2 0.04 72);
+
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.68 0.16 264);
+
+  --sidebar: oklch(0.196 0.018 265);
+  --sidebar-foreground: oklch(0.9 0.008 265);
+  --sidebar-accent: oklch(0.27 0.021 265);
+  --sidebar-accent-foreground: oklch(0.98 0.004 265);
+  --sidebar-border: oklch(1 0 0 / 10%);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /*
+   * Tabular figures everywhere numbers are compared vertically. Without this,
+   * proportional digits make a column of quantities look ragged.
+   */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  /* Keeps long tables scrollable inside their card instead of widening the page. */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+}
