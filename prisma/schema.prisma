@@ -59,11 +59,16 @@ enum OrderStatus {
   CANCELLED
 }
 
-/// Purchase order lifecycle. Stock arrives on RECEIVED, which is the point the
-/// stock engine adds it.
+/// Purchase order lifecycle.
+///
+/// RECEIVED is the only status that moves stock: it is the point the goods are
+/// physically in and the engine adds them. DRAFT and PENDING are both "not yet
+/// arrived" — a draft is still being written, a pending purchase has been
+/// placed with the supplier and is in transit — and neither touches inventory.
+/// CANCELLED takes back whatever was added, once.
 enum PurchaseStatus {
   DRAFT
-  ORDERED
+  PENDING
   RECEIVED
   CANCELLED
 }
@@ -127,6 +132,7 @@ model User {
   stockTransactions StockTransaction[]
   certificates      Certificate[]
   ordersCreated     Order[]            @relation("OrderCreatedBy")
+  purchasesCreated  Purchase[]         @relation("PurchaseCreatedBy")
 
   @@index([role])
   @@map("users")
@@ -311,14 +317,28 @@ model Purchase {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  /// When the goods arrived, and when the purchase was called off. `receivedAt`
+  /// is the moment stock was added. Like the order timestamps, these are for
+  /// display and for reading a purchase's life back — the stock ledger, not
+  /// these columns, is what decides whether inventory actually moved.
+  receivedAt  DateTime? @map("received_at")
+  cancelledAt DateTime? @map("cancelled_at")
+
   supplierId String   @map("supplier_id")
   supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  /// Who raised the purchase, resolved from the Clerk session on the server.
+  /// Null for seeded rows, and nulled rather than cascaded if the user is later
+  /// removed — the purchase still happened.
+  createdBy     String? @map("created_by")
+  createdByUser User?   @relation("PurchaseCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   items PurchaseItem[]
 
   @@index([status])
   @@index([supplierId])
   @@index([purchaseDate])
+  @@index([createdBy])
   @@map("purchases")
 }
 

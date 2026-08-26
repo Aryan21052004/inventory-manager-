@@ -1,64 +1,113 @@
+import { Suspense } from "react";
 import type { Metadata } from "next";
-import { Plus, Warehouse } from "lucide-react";
+import Link from "next/link";
+import { CircleDashed, Plus, Truck, Warehouse, Wallet } from "lucide-react";
 
-import { ModulePlaceholder } from "@/components/module-placeholder";
+import { PurchaseFilters } from "@/app/(app)/purchases/purchase-filters";
+import { PurchasesTable } from "@/app/(app)/purchases/purchases-table";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { EmptyState } from "@/components/ui/empty-state";
+import { PageHeader } from "@/components/ui/page-header";
+import { StatCard } from "@/components/ui/stat-card";
+import { TableSkeleton } from "@/components/ui/skeleton";
+import { formatCurrency, formatNumber } from "@/lib/format";
 import {
-  Table,
-  TableBody,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  parsePurchaseListParams,
+  toPurchaseSearchParams,
+  type RawSearchParams,
+} from "@/lib/purchase-query";
+import { loadPurchaseStats, loadSupplierOptions } from "@/server/purchases";
 
 export const metadata: Metadata = { title: "Purchases" };
 
-export default function PurchasesPage() {
+// Live data — must not be captured at build time.
+export const dynamic = "force-dynamic";
+
+/**
+ * The purchase book.
+ *
+ * Reads its state from the query string, like the products and orders lists, so
+ * a filtered view is bookmarkable and the browser is handed one page of rows.
+ * Every figure comes from the database; nothing here is hardcoded.
+ *
+ * No role gate: raising and receiving purchases is ordinary work both roles do,
+ * and the server checks authentication on every action regardless.
+ */
+export default async function PurchasesPage({
+  searchParams,
+}: {
+  searchParams: Promise<RawSearchParams>;
+}) {
+  const params = parsePurchaseListParams(await searchParams);
+
+  const [stats, suppliers] = await Promise.all([
+    loadPurchaseStats(),
+    loadSupplierOptions(),
+  ]);
+
   return (
-    <ModulePlaceholder
-      title="Purchases"
-      description="Restocking orders raised with suppliers, and the goods received against them."
-      icon={Warehouse}
-      actions={
-        <Button disabled>
-          <Plus />
-          New purchase
-        </Button>
-      }
-      planned={[
-        "Raise a purchase order against a supplier",
-        "Receiving a purchase adds stock automatically",
-        "Partial receipts against an outstanding order",
-        "Update unit cost from the received price",
-        "Purchase status pipeline: draft, ordered, received, cancelled",
-        "Suggested reorder list from low-stock products",
-      ]}
-    >
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title="Purchases"
+        description="Restocking and incoming goods. Receiving a purchase adds its quantities to inventory."
+        actions={
+          <Button asChild>
+            <Link href="/purchases/new">
+              <Plus />
+              New purchase
+            </Link>
+          </Button>
+        }
+      />
+
+      {stats.ok ? (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard
+            label="Purchases"
+            value={formatNumber(stats.data.total)}
+            hint="All time"
+            icon={Warehouse}
+          />
+          <StatCard
+            label="Drafts"
+            value={formatNumber(stats.data.draft)}
+            hint="Not yet placed"
+            icon={CircleDashed}
+          />
+          <StatCard
+            label="On order"
+            value={formatCurrency(stats.data.pendingValue)}
+            hint={`${formatNumber(stats.data.pending)} awaiting delivery`}
+            icon={Truck}
+            tone={stats.data.pending > 0 ? "warning" : "default"}
+          />
+          <StatCard
+            label="Received value"
+            value={formatCurrency(stats.data.receivedValue)}
+            hint="Goods booked into stock"
+            icon={Wallet}
+            tone="success"
+          />
+        </div>
+      ) : null}
+
       <Card>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Purchase</TableHead>
-                <TableHead>Supplier</TableHead>
-                <TableHead>Raised</TableHead>
-                <TableHead className="text-right">Items</TableHead>
-                <TableHead className="text-right">Total</TableHead>
-                <TableHead>Status</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody />
-          </Table>
+          <PurchaseFilters params={params} suppliers={suppliers} />
 
-          <EmptyState
-            icon={Warehouse}
-            title="No purchases yet"
-            description="Marking a purchase as received will add the received quantity to stock automatically."
-          />
+          {/*
+            Keyed on the query string so a filter change remounts the boundary
+            and the skeleton appears again — otherwise React keeps the resolved
+            children on screen and changing a filter looks like nothing happened.
+          */}
+          <Suspense
+            key={toPurchaseSearchParams(params).toString()}
+            fallback={<TableSkeleton rows={6} columns={7} />}
+          >
+            <PurchasesTable params={params} />
+          </Suspense>
         </CardContent>
       </Card>
-    </ModulePlaceholder>
+    </div>
   );
 }

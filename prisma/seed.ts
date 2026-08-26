@@ -347,7 +347,7 @@ const PURCHASES = [
     // the purchasing screens have an open order to render.
     number: "PO-2026-0006",
     supplier: "meridian",
-    status: "ORDERED",
+    status: "PENDING",
     daysAgo: 3,
     lines: [{ product: "paper-a4", quantity: 200 }],
   },

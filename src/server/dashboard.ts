@@ -87,7 +87,11 @@ export async function loadDashboard(): Promise<DashboardResult> {
         prisma.order.count({
           where: { status: { in: ["DRAFT", "PENDING", "CONFIRMED"] } },
         }),
-        prisma.purchase.count({ where: { status: { in: ["DRAFT", "ORDERED"] } } }),
+        // Goods not yet on the shelf: still being written, or placed with the
+        // supplier and in transit.
+        prisma.purchase.count({
+          where: { status: { in: ["DRAFT", "PENDING"] } },
+        }),
         prisma.stockTransaction.findMany({
           take: 5,
           orderBy: { createdAt: "desc" },
