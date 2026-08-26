@@ -8,7 +8,7 @@ Written for whoever picks this up next — a new developer, or a new session. It
 covers what exists, the rules the code is built around, and the things that will
 waste your afternoon if nobody tells you.
 
-**Last updated:** 26 August 2026, after the Purchases module.
+**Last updated:** 26 August 2026, after adding the Stock Movements test suite.
 
 ---
 
@@ -22,8 +22,8 @@ waste your afternoon if nobody tells you.
 | Products & inventory | Done | `/products`, `/products/[id]` |
 | Certificates | Done | on the product detail page |
 | Orders | Done | `/orders`, `/orders/new`, `/orders/[id]`, `/orders/[id]/edit` |
-| Purchases | **Done, uncommitted** | `/purchases`, `/purchases/new`, `/purchases/[id]`, `/purchases/[id]/edit` |
-| Stock movements | **Placeholder** | `/stock-movements` renders a hardcoded empty state |
+| Purchases | Done | `/purchases`, `/purchases/new`, `/purchases/[id]`, `/purchases/[id]/edit` |
+| Stock movements | Done | `/stock-movements` |
 | Suppliers | **Placeholder** | `/suppliers` |
 | Customers | **Placeholder** | `/customers` |
 | Reports | **Placeholder** | `/reports` |
@@ -32,7 +32,8 @@ waste your afternoon if nobody tells you.
 ### Commit history
 
 ```
-(uncommitted)  Purchases module
+eeb1e8e        feat: add stock movements ledger page
+79555db        feat: add purchases with automatic stock receipt
 e0b9655        feat: add order editing
 1eaaa61        feat: add orders with automatic stock deduction
 bfa5eef        feat: add product certificates and remove tax
@@ -43,8 +44,12 @@ ffb2ce6        Make Clerk the sole authentication provider
 03536e4        Scaffold inventory manager foundation
 ```
 
-Branch: `db/inventory-domain-model`. There is **no git remote** — everything is
-local. `master` is still back at `03536e4`; all real work is on the branch.
+**Current branch:** `db/inventory-domain-model`
+**Latest commit:** `eeb1e8e` — plus one commit adding the stock movements tests
+and this update, which is the tip once it lands.
+
+There is **no git remote** — everything is local. `master` is still back at
+`03536e4`; all real work is on the branch.
 
 ---
 
@@ -57,7 +62,8 @@ because of one of them.
 every write to it is paired with a `StockTransaction` row in the same database
 transaction. Nothing writes the quantity directly. If the two ever disagreed,
 the ledger is what tells the truth — which is why the "Inventory Impact" panels
-on orders and purchases read from the ledger, not from the document's status.
+on orders and purchases, as well as the `/stock-movements` ledger, read from the
+ledger, not from the document's status.
 
 **There is one stock engine.** `src/server/stock.ts` exposes `lockProduct`,
 `lockProducts` and `applyStockMovement`. Orders, purchases and manual
@@ -103,9 +109,9 @@ prisma/
 src/
   app/
     (app)/               Authenticated pages — the auth boundary is its layout
-      products/  orders/  purchases/     Built modules
-      dashboard/ settings/               Built
-      stock-movements/ suppliers/ customers/ reports/   Placeholders
+      products/  orders/  purchases/  stock-movements/   Built modules
+      dashboard/ settings/                               Built
+      suppliers/ customers/ reports/                     Placeholders
     api/certificates/[id]/file/          Authenticated certificate download
   components/
     layout/              Shell: sidebar, header, mobile drawer, user menu
@@ -114,11 +120,12 @@ src/
     env.ts               Validated environment, read once at import
     errors.ts            AppError + toSafeError (nothing leaks to the browser)
     *-status.ts          Derived status rules: stock, certificate, order, purchase
-    *-query.ts           List URL state, parsed and serialised
+    *-query.ts           List URL state: product, order, purchase, stock-movement
     validation/          Zod schemas shared by forms and server actions
   server/
     auth.ts              Clerk session → local user, role checks
     stock.ts             The only way stock changes
+    stock-movements.ts   Read model over StockTransaction ledger
     products.ts  orders.ts  purchases.ts  certificates.ts  dashboard.ts
     storage/             Swappable file storage (interface + local driver)
 tests/                   Integration tests against a real Postgres
@@ -158,8 +165,8 @@ stage so far.
 
 ## 5. Testing
 
-252 tests across 8 files, all against a **real PostgreSQL** database. Clerk is
-the only thing mocked.
+**297 tests across 9 files**, all against a **real PostgreSQL** database. Clerk
+is the only thing mocked.
 
 Real Postgres because most of what is worth proving *is* Postgres: that a unique
 index rejects a duplicate SKU, that a `Restrict` foreign key stops a delete,
@@ -177,6 +184,7 @@ mock had been written to agree with the test.
 | `tests/order-totals.test.ts` | Total arithmetic, and that tax is gone |
 | `tests/orders.test.ts` | Orders: deduction, cancellation, editing, concurrency |
 | `tests/purchases.test.ts` | Purchases: receiving, reversal, retired products |
+| `tests/stock-movements.test.ts` | Ledger read model: filters, sorting, paging, stats |
 
 The concurrency tests are the ones to keep. They fire genuinely simultaneous
 requests and assert that exactly one wins — they would pass trivially against a
@@ -190,8 +198,8 @@ read-then-write implementation run serially, and fail the moment it ships.
 reloads your source, but the Prisma client's runtime metadata is initialised
 once at process start, and `src/lib/prisma.ts` deliberately caches the client on
 `globalThis` so hot reloads do not exhaust the connection pool. Symptom: a
-`PrismaClientValidationError` naming a column you just added. Fix: kill the dev
-server and start it again. This has bitten twice.
+`PrismaClientValidationError` or `Database not reachable` error. Fix: stop the
+dev server (`Ctrl + C`) and start it again (`npm run dev`).
 
 **New accounts are STAFF.** `syncUser` gives every new Clerk account the STAFF
 role, because signing up must not be a route to ADMIN. Creating and editing
@@ -218,46 +226,72 @@ holding work you want to keep.
 
 ---
 
-## 7. What is not built
+## 7. Known limitations in what *is* built
 
-**`/stock-movements` is a placeholder.** This is the most visible gap: the
-ledger is being written correctly by orders, purchases and adjustments, but the
-page that should show it has no database queries at all and renders "No
-movements recorded" regardless. Movements are currently visible on the
-dashboard, on each product's detail page, and on order and purchase detail
-pages. Building the real page is a contained piece of work: a read model over
-`StockTransaction` with filters by product, type and date range, plus the
-manual adjustment dialog (which already exists on the product page and can be
-reused).
+Things that work, with an edge worth knowing about.
 
-**`/suppliers`, `/customers`, `/reports` are placeholders.** Supplier
-information and purchase history are shown on the purchase detail page, and
-customer history on the order detail page, which covers the immediate need — but
-neither entity has a list or detail page of its own, and neither can be created
-through the UI. Both are seeded.
+**Stock movements has no reference-type filter.** `MovementListParams` carries a
+search term, a product, a movement type and a date range — that is all. A row's
+`referenceType` is surfaced and rendered (with a link for orders and purchases),
+but you cannot filter the ledger down to "only order movements". Adding one
+means a field on `MovementListParams`, a clause in `buildWhere`, and a control
+in the filter bar; the tests already pin the rows such a filter would have to
+select.
+
+**The movement stats tiles ignore the filters.** `loadMovementStats` aggregates
+the whole ledger, so the tiles describe the warehouse rather than the current
+view. That is deliberate and tested — but it does mean the numbers do not move
+when you filter, which reads oddly the first time.
+
+**Read models carry no role check.** `listMovements`, `listProducts`,
+`listOrders` and `listPurchases` all rely on `auth.protect()` in the `(app)`
+layout rather than checking a role themselves. That is the established pattern,
+not an oversight, and `tests/stock-movements.test.ts` pins it so a change is
+deliberate. Write paths do check, in `requireRole`.
+
+**Cancelling a received purchase can be refused.** If the goods have since been
+sold, taking them back would drive stock below zero, so the whole cancellation
+rolls back. Correct, but it means a received purchase is not always cancellable.
+
+**Orders cannot be edited after confirmation, and purchases not after receipt.**
+Both are deliberate — the document and the stock movement behind it have to keep
+matching — but there is no "amend a confirmed order" workflow at all. Cancel and
+re-raise is the only route.
+
+---
+
+## 8. What is not built
+
+**`/suppliers`, `/customers`, `/reports` are placeholders.**
+- **Suppliers (`/suppliers`):** Supplier information and purchase history are
+  shown on the purchase detail page, and suppliers can be chosen on products.
+  A standalone supplier CRUD list/detail module is still placeholder.
+- **Customers (`/customers`):** Customer information and order history are
+  shown on the order detail page, and customers can be chosen on orders.
+  A standalone customer CRUD list/detail module is still placeholder.
+- **Reports (`/reports`):** Valuation, movement, low-stock/dead-stock, and
+  supplier spend summaries across date ranges with CSV export.
 
 **Other gaps.** No user management UI. No Clerk webhook, so a name or email
 changed in Clerk leaves a stale local mirror and a deletion is invisible
 (`src/server/auth.ts` explains the trade-off). No partial receipts on purchases,
 no returns workflow — `COMPLETED → CANCELLED` on an order is deliberately
-refused because the goods have shipped. No CSV export.
+refused because the goods have shipped.
 
 ---
 
-## 8. If you are picking up the Purchases module
+## 9. Next development steps
 
-It is complete and verified but **not committed**. Before committing: run the
-four checks, confirm `git status` shows only the purchases files, and use a
-message describing the module.
+The most logical next steps for the application:
 
-What it does: `receivePurchase` is the mirror of `confirmOrder` — lock the
-purchase row, check the transition, validate every line, lock the product rows
-sorted by id, write a `STOCK_IN` each, flip the status, all in one transaction.
-Cancelling a received purchase writes `REVERSAL` rows, reading what to take back
-from the ledger rather than the lines, and is idempotent.
-
-The one behaviour worth knowing: cancelling a received purchase whose goods have
-since been sold is **refused**, because taking them back would drive stock below
-zero. That is correct — the units are gone and a cancellation cannot un-sell
-them — and the whole cancellation rolls back rather than reversing halfway.
-There is a test for it.
+1. **Suppliers module (`/suppliers`)**:
+   - Follow the `products`/`orders` pattern: `src/lib/supplier-query.ts`,
+     `src/server/suppliers.ts`, server actions for CRUD, list table with
+     contact details, and supplier detail page linking to products and purchases.
+2. **Customers module (`/customers`)**:
+   - Same pattern: `src/lib/customer-query.ts`, `src/server/customers.ts`,
+     server actions for CRUD, list table, and customer detail page linking to
+     lifetime orders.
+3. **Reports module (`/reports`)**:
+   - Aggregates over `Product`, `StockTransaction`, `Order`, and `Purchase`
+     with date range filtering and CSV export.
