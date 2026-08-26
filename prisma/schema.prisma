@@ -43,12 +43,19 @@ enum ProductStatus {
   DISCONTINUED
 }
 
-/// Sales order lifecycle. Stock leaves the building on CONFIRMED, which is the
-/// point the stock engine deducts it.
+/// Sales order lifecycle.
+///
+/// CONFIRMED is the only status that moves stock: it is the point the goods are
+/// committed and the engine deducts them. DRAFT and PENDING are both "not yet
+/// committed" — a draft is still being edited, a pending order is finished but
+/// waiting on something (approval, payment) — and neither touches inventory.
+/// COMPLETED means the goods have shipped; the stock left on CONFIRMED and is
+/// not deducted a second time. CANCELLED returns whatever was deducted, once.
 enum OrderStatus {
   DRAFT
+  PENDING
   CONFIRMED
-  FULFILLED
+  COMPLETED
   CANCELLED
 }
 
@@ -119,6 +126,7 @@ model User {
 
   stockTransactions StockTransaction[]
   certificates      Certificate[]
+  ordersCreated     Order[]            @relation("OrderCreatedBy")
 
   @@index([role])
   @@map("users")
@@ -229,17 +237,35 @@ model Order {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  /// When the order reached each terminal-ish state.
+  ///
+  /// `confirmedAt` is the moment stock was deducted, which makes it the one
+  /// worth having: the status alone says an order *is* confirmed, and these say
+  /// when it became so. They are written by the engine, never by a client, and
+  /// exist for display and for reading an order's life back afterwards — the
+  /// stock ledger, not these columns, is what decides whether inventory moved.
+  confirmedAt DateTime? @map("confirmed_at")
+  completedAt DateTime? @map("completed_at")
+  cancelledAt DateTime? @map("cancelled_at")
+
   /// Required: an order without a customer is not a state this app has a use
   /// for. Restrict, so a customer with history cannot be deleted — deactivate
   /// them instead.
   customerId String   @map("customer_id")
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
+  /// Who raised the order, resolved from the Clerk session on the server. Null
+  /// for seeded rows, and nulled rather than cascaded if the user is later
+  /// removed — the order still happened.
+  createdBy     String? @map("created_by")
+  createdByUser User?   @relation("OrderCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
   items OrderItem[]
 
   @@index([status])
   @@index([customerId])
   @@index([createdAt])
+  @@index([createdBy])
   @@map("orders")
 }
 

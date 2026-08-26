@@ -365,7 +365,7 @@ const ORDERS = [
   {
     number: "SO-2026-0001",
     customer: "brightline",
-    status: "FULFILLED",
+    status: "COMPLETED",
     daysAgo: 21,
     discountPct: 0,
     lines: [
@@ -376,7 +376,7 @@ const ORDERS = [
   {
     number: "SO-2026-0002",
     customer: "calder",
-    status: "FULFILLED",
+    status: "COMPLETED",
     daysAgo: 16,
     discountPct: 5,
     lines: [
@@ -388,7 +388,7 @@ const ORDERS = [
   {
     number: "SO-2026-0003",
     customer: "penrose",
-    status: "FULFILLED",
+    status: "COMPLETED",
     daysAgo: 12,
     discountPct: 10,
     lines: [
@@ -399,7 +399,7 @@ const ORDERS = [
   {
     number: "SO-2026-0004",
     customer: "quayside",
-    status: "CONFIRMED",
+    status: "PENDING",
     daysAgo: 6,
     discountPct: 0,
     lines: [
@@ -444,8 +444,13 @@ const ORDERS = [
 /** An order's status decides whether its lines ever touched stock. */
 const ORDER_MOVES_STOCK: Record<OrderStatus, boolean> = {
   DRAFT: false,
+  // Finished but not committed — waiting on approval or payment. Nothing has
+  // left the building yet.
+  PENDING: false,
+  // The one status that moves stock.
   CONFIRMED: true,
-  FULFILLED: true,
+  // Already deducted on CONFIRMED, and not deducted again on the way here.
+  COMPLETED: true,
   CANCELLED: false,
 };
 

@@ -1,5 +1,6 @@
-import { Show, SignInButton, UserButton } from "@clerk/nextjs";
+import { Show, SignInButton } from "@clerk/nextjs";
 
+import { ClientUserButton } from "@/components/layout/client-user-button";
 import { SetupModeMenu } from "@/components/layout/setup-mode-menu";
 import { Button } from "@/components/ui/button";
 
@@ -17,6 +18,10 @@ import { Button } from "@/components/ui/button";
  * than shipping both branches and choosing in the browser. That is why this
  * file has no "use client" and why the header takes it as a prop instead of
  * importing it: a client component cannot render an async server one.
+ *
+ * The account button inside the signed-in branch is the one piece that cannot
+ * be server-rendered; it is isolated in its own client component so the rest of
+ * this stays on the server.
  */
 function UserMenu({ authEnabled }: { authEnabled: boolean }) {
   if (!authEnabled) {
@@ -38,14 +43,15 @@ function UserMenu({ authEnabled }: { authEnabled: boolean }) {
         </SignInButton>
       }
     >
-      <UserButton
-        appearance={{
-          elements: {
-            avatarBox: "size-8",
-            userButtonPopoverCard: "shadow-lg",
-          },
-        }}
-      />
+      {/*
+        Clerk's UserButton is deliberately not server-rendered — it only emits
+        its host element once the browser SDK has loaded, which the server can
+        never be. See ClientUserButton for the full explanation.
+
+        The signed-out branch needs no such treatment: SignInButton renders its
+        child regardless of load state, so both sides agree.
+      */}
+      <ClientUserButton />
     </Show>
   );
 }

@@ -8,6 +8,7 @@ import {
   stockDelta,
   stockMovementSchema,
   type StockMovementInput,
+  type StockReference,
 } from "@/lib/validation/stock";
 import { requireRole, requireUser } from "@/server/auth";
 
@@ -45,6 +46,140 @@ export interface RecordedMovement {
   newStock: number;
 }
 
+export interface LockedProduct {
+  id: string;
+  name: string;
+  stockQuantity: number;
+}
+
+/**
+ * Takes a row lock on one product and reads its balance.
+ *
+ * `FOR UPDATE`, because read-then-write is a race otherwise: two concurrent
+ * movements on one product would both read the same balance and the second
+ * would write a `previousStock` that was already stale, breaking the chain the
+ * ledger depends on. Locking makes them queue.
+ *
+ * One product per call, deliberately. Callers that need several — an order
+ * with several lines — lock them one at a time **in a consistent order** (see
+ * `lockProducts`), which is what stops two orders holding half of each other's
+ * rows and deadlocking. A single `WHERE id = ANY(...) FOR UPDATE` would be one
+ * round trip instead of several, but the order in which it takes the locks is a
+ * property of the query plan rather than something the caller controls.
+ */
+export async function lockProduct(
+  tx: Prisma.TransactionClient,
+  productId: string,
+): Promise<LockedProduct> {
+  const rows = await tx.$queryRaw<
+    { id: string; name: string; stock_quantity: number }[]
+  >`
+    SELECT id, name, stock_quantity
+    FROM products
+    WHERE id = ${productId}
+    FOR UPDATE
+  `;
+
+  const product = rows[0];
+  if (!product) throw new NotFoundError("Product");
+
+  return {
+    id: product.id,
+    name: product.name,
+    stockQuantity: product.stock_quantity,
+  };
+}
+
+/**
+ * Locks several products, in a fixed order.
+ *
+ * The order is what matters. Two orders touching products A and B, one locking
+ * A then B and the other B then A, will deadlock the moment they overlap:
+ * each holds what the other needs next. Sorting the ids first means every
+ * transaction in the system reaches for the same rows in the same sequence, so
+ * one simply waits for the other instead.
+ *
+ * Sorted by id rather than by anything meaningful, because the only requirement
+ * is that the sequence is total and identical everywhere.
+ */
+export async function lockProducts(
+  tx: Prisma.TransactionClient,
+  productIds: readonly string[],
+): Promise<Map<string, LockedProduct>> {
+  const ordered = [...new Set(productIds)].sort();
+  const locked = new Map<string, LockedProduct>();
+
+  for (const productId of ordered) {
+    locked.set(productId, await lockProduct(tx, productId));
+  }
+
+  return locked;
+}
+
+export interface StockWrite {
+  product: LockedProduct;
+  type: StockTransactionType;
+  /** Signed. Negative takes stock away. */
+  delta: number;
+  reference: StockReference;
+  note?: string | undefined;
+  /** The local user id, always resolved from the session by the caller. */
+  userId: string | null;
+}
+
+/**
+ * Writes one movement: the ledger row and the new balance, together.
+ *
+ * Takes a transaction client rather than opening its own, so a caller that has
+ * to move several products at once — confirming an order — can do all of it
+ * inside a single transaction. That is the whole reason this is separate from
+ * `recordStockMovement`: either every line of an order is deducted or none is,
+ * and that is only true if one transaction spans them.
+ *
+ * The product must already be locked. This function does not lock, because the
+ * caller has to take all its locks in a consistent order before writing any of
+ * them; locking here would put the locks in whatever order the writes happened
+ * to run.
+ */
+export async function applyStockMovement(
+  tx: Prisma.TransactionClient,
+  write: StockWrite,
+): Promise<RecordedMovement> {
+  const previousStock = write.product.stockQuantity;
+  const newStock = previousStock + write.delta;
+
+  if (newStock < 0) {
+    throw new InsufficientStockError(
+      write.product.name,
+      Math.abs(write.delta),
+      previousStock,
+    );
+  }
+
+  const transaction = await tx.stockTransaction.create({
+    data: {
+      productId: write.product.id,
+      type: write.type,
+      // The column stores the size of the move; `type` carries the direction.
+      quantity: Math.abs(write.delta),
+      previousStock,
+      newStock,
+      referenceType: write.reference.type,
+      referenceId:
+        write.reference.type === "MANUAL" ? null : write.reference.id,
+      note: write.note ?? null,
+      createdBy: write.userId,
+    },
+  });
+
+  await tx.product.update({
+    where: { id: write.product.id },
+    data: { stockQuantity: newStock },
+  });
+
+  return { transaction, previousStock, newStock };
+}
+
 export async function recordStockMovement(
   input: StockMovementInput,
 ): Promise<RecordedMovement> {
@@ -65,58 +200,17 @@ export async function recordStockMovement(
   const delta = stockDelta(movement);
 
   return prisma.$transaction(async (tx) => {
-    /*
-     * FOR UPDATE, because read-then-write is a race otherwise: two concurrent
-     * movements on one product would both read the same balance and the second
-     * would write a `previousStock` that was already stale, breaking the chain
-     * the ledger depends on. Locking the row makes them queue.
-     */
-    const locked = await tx.$queryRaw<
-      { id: string; name: string; stock_quantity: number }[]
-    >`
-      SELECT id, name, stock_quantity
-      FROM products
-      WHERE id = ${movement.productId}
-      FOR UPDATE
-    `;
+    const product = await lockProduct(tx, movement.productId);
 
-    const product = locked[0];
-    if (!product) throw new NotFoundError("Product");
-
-    const previousStock = product.stock_quantity;
-    const newStock = previousStock + delta;
-
-    if (newStock < 0) {
-      throw new InsufficientStockError(
-        product.name,
-        Math.abs(delta),
-        previousStock,
-      );
-    }
-
-    const transaction = await tx.stockTransaction.create({
-      data: {
-        productId: product.id,
-        type: movement.type,
-        // The column stores the size of the move; `type` carries the direction.
-        quantity: Math.abs(delta),
-        previousStock,
-        newStock,
-        referenceType: movement.reference.type,
-        referenceId:
-          movement.reference.type === "MANUAL" ? null : movement.reference.id,
-        note: movement.note ?? null,
-        // The whole point: from the session, not from the caller.
-        createdBy: user.id,
-      },
+    return applyStockMovement(tx, {
+      product,
+      type: movement.type,
+      delta,
+      reference: movement.reference,
+      note: movement.note,
+      // The whole point: from the session, not from the caller.
+      userId: user.id,
     });
-
-    await tx.product.update({
-      where: { id: product.id },
-      data: { stockQuantity: newStock },
-    });
-
-    return { transaction, previousStock, newStock };
   });
 }
 

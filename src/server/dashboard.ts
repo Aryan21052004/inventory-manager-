@@ -81,7 +81,12 @@ export async function loadDashboard(): Promise<DashboardResult> {
           FROM products
           WHERE status = 'ACTIVE'
         `,
-        prisma.order.count({ where: { status: { in: ["DRAFT", "CONFIRMED"] } } }),
+        // Everything not yet shipped or abandoned. PENDING belongs here too:
+        // it is an order that is finished and waiting, which is exactly the
+        // kind of commitment this figure is counting.
+        prisma.order.count({
+          where: { status: { in: ["DRAFT", "PENDING", "CONFIRMED"] } },
+        }),
         prisma.purchase.count({ where: { status: { in: ["DRAFT", "ORDERED"] } } }),
         prisma.stockTransaction.findMany({
           take: 5,

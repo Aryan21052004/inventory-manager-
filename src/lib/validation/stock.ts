@@ -84,6 +84,9 @@ export const stockMovementSchema = z
 
 export type StockMovementInput = z.infer<typeof stockMovementSchema>;
 
+/** What a movement points at. Exported so the stock engine can take one. */
+export type StockReference = z.infer<typeof stockReferenceSchema>;
+
 /**
  * The signed change a movement makes to stock on hand.
  *
