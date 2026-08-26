@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -17,6 +18,7 @@ import { toast } from "sonner";
 import {
   createOrderAction,
   searchOrderProductsAction,
+  updateOrderAction,
 } from "@/app/(app)/orders/actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -68,6 +70,16 @@ import { cn } from "@/lib/utils";
  * only. Confirmation is where stock is truly checked, under a row lock, because
  * the number displayed here was true when the page loaded and may not be by the
  * time anyone clicks.
+ *
+ * The same component builds a new order and edits an existing one. They differ
+ * only in where the lines start and which action receives them, so splitting
+ * them would mean two copies of a product search, a line table and a totals
+ * panel kept in step by hand.
+ *
+ * Editing never touches inventory, and cannot: `updateOrder` writes lines and
+ * money, and the stock engine is not reachable from it. Quantities move only
+ * when an order is confirmed. Editing is also refused server-side for anything
+ * past PENDING, whatever this component allows.
  */
 
 export interface CustomerOption {
@@ -80,10 +92,16 @@ export interface ProductOption {
   id: string;
   name: string;
   sku: string;
+  /** The product's price now — what the server will recalculate the line from. */
   sellingPrice: string;
   stockQuantity: number;
   minimumStock: number;
   stockStatus: StockStatus;
+  /**
+   * False only for a line already on an order whose product has since been
+   * retired. Search results are always active.
+   */
+  isActive: boolean;
 }
 
 interface OrderLine {
@@ -91,18 +109,31 @@ interface OrderLine {
   quantity: number;
 }
 
+/** An order being edited, as the page hands it over. */
+export interface ExistingOrder {
+  id: string;
+  orderNumber: string;
+  customerId: string;
+  discount: string;
+  lines: OrderLine[];
+}
+
 function OrderBuilder({
   customers,
   initialProducts,
+  order,
 }: {
   customers: CustomerOption[];
   initialProducts: ProductOption[];
+  /** Absent when raising a new order; present when editing one. */
+  order?: ExistingOrder;
 }) {
   const router = useRouter();
+  const editing = order !== undefined;
 
-  const [customerId, setCustomerId] = useState<string>("");
-  const [lines, setLines] = useState<OrderLine[]>([]);
-  const [discount, setDiscount] = useState("0.00");
+  const [customerId, setCustomerId] = useState<string>(order?.customerId ?? "");
+  const [lines, setLines] = useState<OrderLine[]>(order?.lines ?? []);
+  const [discount, setDiscount] = useState(order?.discount ?? "0.00");
   const [submitting, setSubmitting] = useState(false);
 
   const [search, setSearch] = useState("");
@@ -178,25 +209,41 @@ function OrderBuilder({
     (line) => line.quantity > line.product.stockQuantity,
   );
 
+  /*
+   * A line whose product has been retired since the order was raised. The
+   * server refuses to save one, so the form refuses too — with a message
+   * naming the product, rather than letting the save fail after the fact.
+   */
+  const retired = lines.filter((line) => !line.product.isActive);
+
   const canSubmit =
-    customerId !== "" && lines.length > 0 && !discountTooLarge && !submitting;
+    customerId !== "" &&
+    lines.length > 0 &&
+    !discountTooLarge &&
+    retired.length === 0 &&
+    !submitting;
+
+  const submission = () => ({
+    customerId,
+    items: lines.map((line) => ({
+      productId: line.product.id,
+      quantity: line.quantity,
+    })),
+    // Sent as a plain amount. Every other figure — unit prices, line totals,
+    // the subtotal, the grand total — is recomputed on the server from prices
+    // read there, so none of them travel from here.
+    discount: String(discountCents / 100),
+  });
 
   async function submit(confirm: boolean) {
     if (!canSubmit) return;
 
     setSubmitting(true);
 
-    const result = await createOrderAction(
-      {
-        customerId,
-        items: lines.map((line) => ({
-          productId: line.product.id,
-          quantity: line.quantity,
-        })),
-        discount: String(discountCents / 100),
-      },
-      confirm,
-    );
+    const result =
+      editing && order
+        ? await updateOrderAction(order.id, submission())
+        : await createOrderAction(submission(), confirm);
 
     setSubmitting(false);
 
@@ -207,6 +254,9 @@ function OrderBuilder({
 
     toast.success(result.message);
     router.push(`/orders/${result.orderId}`);
+    // The detail page is server-rendered and cached; without this it can show
+    // the pre-edit lines for a moment after the redirect.
+    router.refresh();
   }
 
   return (
@@ -388,6 +438,11 @@ function OrderBuilder({
                           <span className="font-mono text-xs text-muted-foreground">
                             {line.product.sku}
                           </span>
+                          {line.product.isActive ? null : (
+                            <Badge variant="destructive" className="mt-1">
+                              No longer active
+                            </Badge>
+                          )}
                         </TableCell>
                         <TableCell
                           className={cn(
@@ -501,6 +556,19 @@ function OrderBuilder({
               </div>
             </dl>
 
+            {retired.length > 0 ? (
+              <p className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs leading-relaxed text-destructive">
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+                <span>
+                  {retired.length === 1
+                    ? `${retired[0]!.product.name} is no longer active and cannot be sold.`
+                    : `${retired.length} products on this order are no longer active.`}{" "}
+                  Remove{" "}
+                  {retired.length === 1 ? "that line" : "those lines"} to save.
+                </span>
+              </p>
+            ) : null}
+
             {overStock.length > 0 ? (
               <p className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs leading-relaxed text-warning">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
@@ -508,33 +576,57 @@ function OrderBuilder({
                   {overStock.length === 1
                     ? `${overStock[0]!.product.name} has fewer units on hand than this order asks for.`
                     : `${overStock.length} lines ask for more than is on hand.`}{" "}
-                  You can still save a draft; confirming will be refused until
-                  stock is available.
+                  {editing
+                    ? "You can still save; confirming will be refused until stock is available."
+                    : "You can still save a draft; confirming will be refused until stock is available."}
                 </span>
               </p>
             ) : null}
 
             <div className="flex flex-col gap-2">
-              <Button
-                type="button"
-                onClick={() => submit(true)}
-                disabled={!canSubmit || overStock.length > 0}
-              >
-                {submitting ? <Loader2 className="animate-spin" /> : null}
-                Save and confirm
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => submit(false)}
-                disabled={!canSubmit}
-              >
-                Save as draft
-              </Button>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                Confirming deducts stock immediately and writes a movement
-                against your account. A draft changes nothing.
-              </p>
+              {editing ? (
+                <>
+                  <Button
+                    type="button"
+                    onClick={() => submit(false)}
+                    disabled={!canSubmit}
+                  >
+                    {submitting ? <Loader2 className="animate-spin" /> : null}
+                    {submitting ? "Saving…" : "Save changes"}
+                  </Button>
+                  <Button type="button" variant="outline" asChild>
+                    <Link href={`/orders/${order.id}`}>Cancel</Link>
+                  </Button>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Saving rewrites this order&apos;s lines and totals. It does
+                    not touch inventory — stock moves only when the order is
+                    confirmed.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <Button
+                    type="button"
+                    onClick={() => submit(true)}
+                    disabled={!canSubmit || overStock.length > 0}
+                  >
+                    {submitting ? <Loader2 className="animate-spin" /> : null}
+                    Save and confirm
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => submit(false)}
+                    disabled={!canSubmit}
+                  >
+                    Save as draft
+                  </Button>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Confirming deducts stock immediately and writes a movement
+                    against your account. A draft changes nothing.
+                  </p>
+                </>
+              )}
             </div>
           </CardContent>
         </Card>

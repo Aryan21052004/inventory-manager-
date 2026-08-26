@@ -1173,3 +1173,514 @@ describe("the orders list", () => {
     expect(numbers.size).toBe(5);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Editing an order
+// ---------------------------------------------------------------------------
+
+describe("editing an order", () => {
+  it("rewrites the lines of a DRAFT order", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const a = await product("E-1", 100, "10.00");
+    const b = await product("E-2", 100, "25.00");
+
+    const order = await draftOrder(customer.id, [
+      { productId: a.id, quantity: 2 },
+    ]);
+
+    await updateOrder(order.id, {
+      customerId: customer.id,
+      items: [
+        // Quantity changed on the line that stays…
+        { productId: a.id, quantity: 5 },
+        // …and a product added.
+        { productId: b.id, quantity: 3 },
+      ],
+      discount: "0",
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    expect(row.items).toHaveLength(2);
+    expect(
+      Object.fromEntries(row.items.map((i) => [i.productId, i.quantity])),
+    ).toEqual({ [a.id]: 5, [b.id]: 3 });
+
+    // 5 × 10.00 + 3 × 25.00
+    expect(row.subtotal.toString()).toBe("125");
+    expect(row.total.toString()).toBe("125");
+    expect(row.status).toBe("DRAFT");
+  });
+
+  it("removes a product when it is left off", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const a = await product("E-3", 100, "10.00");
+    const b = await product("E-4", 100, "10.00");
+
+    const order = await draftOrder(customer.id, [
+      { productId: a.id, quantity: 1 },
+      { productId: b.id, quantity: 1 },
+    ]);
+
+    await updateOrder(order.id, {
+      customerId: customer.id,
+      items: [{ productId: a.id, quantity: 1 }],
+      discount: "0",
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    expect(row.items).toHaveLength(1);
+    expect(row.items[0]!.productId).toBe(a.id);
+    expect(row.subtotal.toString()).toBe("10");
+  });
+
+  it("edits a PENDING order", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("E-5", 100, "10.00");
+
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 1 },
+    ]);
+    await setOrderStatus(order.id, "PENDING");
+
+    await updateOrder(order.id, {
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 4 }],
+      discount: "0",
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    expect(row.status).toBe("PENDING");
+    expect(row.items[0]!.quantity).toBe(4);
+    expect(row.subtotal.toString()).toBe("40");
+  });
+
+  it("changes the customer and the discount", async () => {
+    await signInWithRole("STAFF");
+    const first = await createCustomer("First Customer");
+    const second = await createCustomer("Second Customer");
+    const part = await product("E-6", 100, "100.00");
+
+    const order = await draftOrder(first.id, [
+      { productId: part.id, quantity: 10 },
+    ]);
+
+    await updateOrder(order.id, {
+      customerId: second.id,
+      items: [{ productId: part.id, quantity: 10 }],
+      discount: "250",
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+    });
+
+    expect(row.customerId).toBe(second.id);
+    expect(row.subtotal.toString()).toBe("1000");
+    expect(row.discount.toString()).toBe("250");
+    // Subtotal minus discount, with nothing else in between.
+    expect(row.total.toString()).toBe("750");
+    expect(Number(row.total)).toBe(Number(row.subtotal) - Number(row.discount));
+    expect(Object.keys(row)).not.toContain("tax");
+  });
+
+  it("refuses a customer that does not exist", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("E-7", 100);
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 1 },
+    ]);
+
+    await expect(
+      updateOrder(order.id, {
+        customerId: "no-such-customer",
+        items: [{ productId: part.id, quantity: 1 }],
+        discount: "0",
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      details: { field: "customerId" },
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+    });
+    expect(row.customerId).toBe(customer.id);
+  });
+});
+
+describe("editing recalculates money on the server", () => {
+  it("uses the product's current price, not the one the client sent", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("R-1", 100, "10.00");
+
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 2 },
+    ]);
+
+    // The catalogue price moves after the order was raised.
+    await prisma.product.update({
+      where: { id: part.id },
+      data: { sellingPrice: "30.00" },
+    });
+
+    await updateOrder(order.id, {
+      customerId: customer.id,
+      // A price and totals of the client's choosing, all ignored.
+      items: [
+        { productId: part.id, quantity: 2, unitPrice: "0.01", total: "0.02" },
+      ],
+      discount: "0",
+      subtotal: "0.02",
+      total: "0.02",
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    expect(row.items[0]!.unitPrice.toString()).toBe("30");
+    expect(row.items[0]!.total.toString()).toBe("60");
+    expect(row.subtotal.toString()).toBe("60");
+    expect(row.total.toString()).toBe("60");
+  });
+
+  it("ignores a createdBy the client tried to send", async () => {
+    const actor = await signInWithRole("STAFF");
+    const somebodyElse = await prisma.user.create({
+      data: {
+        clerkId: "user_edit_victim",
+        name: "Victim",
+        email: "editvictim@example.com",
+        role: "ADMIN",
+      },
+    });
+    const customer = await createCustomer();
+    const part = await product("R-2", 100);
+
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 1 },
+    ]);
+
+    await updateOrder(order.id, {
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 2 }],
+      discount: "0",
+      createdBy: somebodyElse.id,
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+    });
+
+    // Authorship belongs to whoever raised it, and is not an editable field.
+    expect(row.createdBy).toBe(actor.id);
+    expect(row.createdBy).not.toBe(somebodyElse.id);
+  });
+});
+
+describe("editing never touches inventory", () => {
+  it("leaves stock and the ledger alone", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const a = await product("N-1", 200);
+    const b = await product("N-2", 200);
+
+    const order = await draftOrder(customer.id, [
+      { productId: a.id, quantity: 10 },
+    ]);
+
+    await updateOrder(order.id, {
+      customerId: customer.id,
+      items: [
+        { productId: a.id, quantity: 150 },
+        { productId: b.id, quantity: 75 },
+      ],
+      discount: "0",
+    });
+
+    // Nothing is committed until the order is confirmed, so the quantities on
+    // the lines are just numbers on a document.
+    expect(await stockOf(a.id)).toBe(200);
+    expect(await stockOf(b.id)).toBe(200);
+    expect(await prisma.stockTransaction.count()).toBe(0);
+  });
+
+  it("lets a draft ask for more than exists, and refuses it at confirmation", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("N-3", 5);
+
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 1 },
+    ]);
+
+    // A draft may plan for stock that has not arrived; editing checks no
+    // balances because it commits nothing.
+    await updateOrder(order.id, {
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 500 }],
+      discount: "0",
+    });
+
+    expect(await stockOf(part.id)).toBe(5);
+    expect(await prisma.stockTransaction.count()).toBe(0);
+
+    // The refusal comes at confirmation, where stock is actually checked.
+    await expect(confirmOrder(order.id)).rejects.toMatchObject({
+      code: "INSUFFICIENT_STOCK",
+    });
+    expect(await stockOf(part.id)).toBe(5);
+  });
+});
+
+describe("orders that cannot be edited", () => {
+  async function orderInState(
+    sku: string,
+    state: "CONFIRMED" | "COMPLETED" | "CANCELLED",
+  ) {
+    const customer = await createCustomer();
+    const part = await product(sku, 200, "10.00");
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 10 },
+    ]);
+
+    if (state === "CANCELLED") {
+      await cancelOrder(order.id);
+    } else {
+      await confirmOrder(order.id);
+      if (state === "COMPLETED") await completeOrder(order.id);
+    }
+
+    return { order, part, customer };
+  }
+
+  for (const state of ["CONFIRMED", "COMPLETED", "CANCELLED"] as const) {
+    it(`refuses to edit a ${state} order`, async () => {
+      await signInWithRole("STAFF");
+      const { order, part, customer } = await orderInState(`X-${state}`, state);
+
+      const stockBefore = await stockOf(part.id);
+      const ledgerBefore = await prisma.stockTransaction.count();
+
+      await expect(
+        updateOrder(order.id, {
+          customerId: customer.id,
+          items: [{ productId: part.id, quantity: 999 }],
+          discount: "0",
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+
+      // The lines are untouched…
+      const row = await prisma.order.findUniqueOrThrow({
+        where: { id: order.id },
+        include: { items: true },
+      });
+      expect(row.items[0]!.quantity).toBe(10);
+      expect(row.subtotal.toString()).toBe("100");
+
+      // …and so is inventory.
+      expect(await stockOf(part.id)).toBe(stockBefore);
+      expect(await prisma.stockTransaction.count()).toBe(ledgerBefore);
+    });
+  }
+
+  it("refuses an unauthenticated edit", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("X-ANON", 100);
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 1 },
+    ]);
+
+    signOut();
+
+    await expect(
+      updateOrder(order.id, {
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 9 }],
+        discount: "0",
+      }),
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+    expect(row.items[0]!.quantity).toBe(1);
+  });
+});
+
+describe("editing rejects the same bad input as creating", () => {
+  async function editableOrder(sku: string, price = "10.00") {
+    const customer = await createCustomer();
+    const part = await product(sku, 100, price);
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 1 },
+    ]);
+    return { order, part, customer };
+  }
+
+  it("rejects duplicate product lines", async () => {
+    await signInWithRole("STAFF");
+    const { order, part, customer } = await editableOrder("D-1");
+
+    await expect(
+      updateOrder(order.id, {
+        customerId: customer.id,
+        items: [
+          { productId: part.id, quantity: 1 },
+          { productId: part.id, quantity: 2 },
+        ],
+        discount: "0",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+    expect(row.items).toHaveLength(1);
+  });
+
+  it("rejects zero, negative and fractional quantities", async () => {
+    await signInWithRole("STAFF");
+    const { order, part, customer } = await editableOrder("D-2");
+
+    for (const quantity of [0, -3, 2.5]) {
+      await expect(
+        updateOrder(order.id, {
+          customerId: customer.id,
+          items: [{ productId: part.id, quantity }],
+          discount: "0",
+        }),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    }
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+    expect(row.items[0]!.quantity).toBe(1);
+  });
+
+  it("rejects an empty order", async () => {
+    await signInWithRole("STAFF");
+    const { order, customer } = await editableOrder("D-3");
+
+    await expect(
+      updateOrder(order.id, {
+        customerId: customer.id,
+        items: [],
+        discount: "0",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+    expect(row.items).toHaveLength(1);
+  });
+
+  it("rejects a discount larger than the subtotal", async () => {
+    await signInWithRole("STAFF");
+    const { order, part, customer } = await editableOrder("D-4", "10.00");
+
+    await expect(
+      updateOrder(order.id, {
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 1 }],
+        discount: "500",
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      details: { field: "discount" },
+    });
+  });
+
+  it("rejects a negative discount", async () => {
+    await signInWithRole("STAFF");
+    const { order, part, customer } = await editableOrder("D-5");
+
+    await expect(
+      updateOrder(order.id, {
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 1 }],
+        discount: "-10",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("rejects a product that is no longer active", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const active = await product("D-6", 100);
+    const retired = await seedProduct({
+      sku: "D-7",
+      name: "Retired Part",
+      stockQuantity: 100,
+      minimumStock: 0,
+    });
+
+    const order = await draftOrder(customer.id, [
+      { productId: active.id, quantity: 1 },
+    ]);
+
+    // Retired after the order was raised — the edit must not save it.
+    await prisma.product.update({
+      where: { id: retired.id },
+      data: { status: "DISCONTINUED" },
+    });
+
+    await expect(
+      updateOrder(order.id, {
+        customerId: customer.id,
+        items: [
+          { productId: active.id, quantity: 1 },
+          { productId: retired.id, quantity: 1 },
+        ],
+        discount: "0",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+    expect(row.items).toHaveLength(1);
+  });
+
+  it("rejects a product that no longer exists", async () => {
+    await signInWithRole("STAFF");
+    const { order, part, customer } = await editableOrder("D-8");
+
+    await expect(
+      updateOrder(order.id, {
+        customerId: customer.id,
+        items: [
+          { productId: part.id, quantity: 1 },
+          { productId: "no-such-product", quantity: 1 },
+        ],
+        discount: "0",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+});

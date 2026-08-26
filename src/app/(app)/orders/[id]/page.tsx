@@ -7,6 +7,7 @@ import {
   History,
   Mail,
   MapPin,
+  Pencil,
   Phone,
   ShoppingCart,
   TrendingDown,
@@ -37,6 +38,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatCurrency, formatDateTime, formatNumber } from "@/lib/format";
+import { isEditable } from "@/lib/order-status";
 import { getOrderDetail, type OrderDetail } from "@/server/orders";
 import { cn } from "@/lib/utils";
 
@@ -107,15 +109,31 @@ export default async function OrderDetailPage({
           title={order.orderNumber}
           description={`Raised ${formatDateTime(order.createdAt)}${order.createdByName ? ` by ${order.createdByName}` : ""} for ${order.customerName}.`}
           actions={
-            <OrderActions
-              orderId={order.id}
-              status={order.status}
-              lines={order.lines.map((line) => ({
-                productName: line.productName,
-                quantity: line.quantity,
-                currentStock: line.currentStock,
-              }))}
-            />
+            <>
+              {/*
+                Only offered while the order has committed nothing. The edit
+                page and `updateOrder` both re-check this — hiding the button is
+                a courtesy, not the control.
+              */}
+              {isEditable(order.status) ? (
+                <Button variant="outline" asChild>
+                  <Link href={`/orders/${order.id}/edit`}>
+                    <Pencil />
+                    Edit order
+                  </Link>
+                </Button>
+              ) : null}
+
+              <OrderActions
+                orderId={order.id}
+                status={order.status}
+                lines={order.lines.map((line) => ({
+                  productName: line.productName,
+                  quantity: line.quantity,
+                  currentStock: line.currentStock,
+                }))}
+              />
+            </>
           }
         />
       </div>

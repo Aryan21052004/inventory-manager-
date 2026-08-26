@@ -167,10 +167,21 @@ export interface OrderProductOption {
   id: string;
   name: string;
   sku: string;
+  /**
+   * The product's price *now*. The order builder previews with this because
+   * `updateOrder` recalculates from it — showing the price stored on an
+   * existing line would preview a total the save would not produce.
+   */
   sellingPrice: string;
   stockQuantity: number;
   minimumStock: number;
   stockStatus: StockStatus;
+  /**
+   * Always true for search results, which only return ACTIVE products. It can
+   * be false for a line already on an order whose product was retired since —
+   * the builder flags it, and the server refuses to save it.
+   */
+  isActive: boolean;
 }
 
 export type Result<T> = { ok: true; data: T } | { ok: false; error: SafeError };
@@ -398,9 +409,54 @@ export async function searchOrderProducts(
       stockQuantity: row.stockQuantity,
       minimumStock: row.minimumStock,
       stockStatus: stockStatus(row),
+      isActive: true,
     }));
   } catch (error) {
     toSafeError(error, "searchOrderProducts");
+    return [];
+  }
+}
+
+/**
+ * Products by id, whatever their status.
+ *
+ * The edit page needs these for the lines already on an order, and one of them
+ * may have been retired since the order was raised. Filtering it out here would
+ * make the line silently vanish from the form and the save would quietly drop
+ * it; loading it with `isActive: false` lets the builder show it, flag it, and
+ * make the person decide.
+ */
+export async function loadOrderProducts(
+  ids: readonly string[],
+): Promise<OrderProductOption[]> {
+  if (ids.length === 0) return [];
+
+  try {
+    const rows = await prisma.product.findMany({
+      where: { id: { in: [...ids] } },
+      select: {
+        id: true,
+        name: true,
+        sku: true,
+        sellingPrice: true,
+        stockQuantity: true,
+        minimumStock: true,
+        status: true,
+      },
+    });
+
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      sku: row.sku,
+      sellingPrice: row.sellingPrice.toString(),
+      stockQuantity: row.stockQuantity,
+      minimumStock: row.minimumStock,
+      stockStatus: stockStatus(row),
+      isActive: row.status === "ACTIVE",
+    }));
+  } catch (error) {
+    toSafeError(error, "loadOrderProducts");
     return [];
   }
 }
@@ -1110,6 +1166,21 @@ export async function updateOrder(
       throw new AppError(
         "CONFLICT",
         `A ${existing.status.toLowerCase()} order cannot be edited. Its stock has already been committed.`,
+      );
+    }
+
+    // Checked rather than trusted, exactly as on create. The column is a
+    // foreign key, so a bad id would be caught either way — but as a constraint
+    // violation the user cannot read, instead of a message naming the field.
+    const customer = await tx.customer.findUnique({
+      where: { id: order.customerId },
+      select: { id: true },
+    });
+
+    if (!customer) {
+      throw badRequest(
+        "customerId",
+        "That customer no longer exists. Pick another.",
       );
     }
 

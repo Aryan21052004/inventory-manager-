@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
-import { OrderBuilder } from "@/app/(app)/orders/new/order-builder";
+import { OrderBuilder } from "@/app/(app)/orders/order-builder";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { loadCustomers, searchOrderProducts } from "@/server/orders";
