@@ -23,12 +23,33 @@ export const dynamic = "force-dynamic";
  * Both roles can raise an order — it is ordinary work. The server re-checks
  * authentication on every action regardless of what this page allowed.
  */
-export default async function NewOrderPage() {
+export default async function NewOrderPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const requested = await searchParams;
+  const requestedCustomer = Array.isArray(requested["customer"])
+    ? requested["customer"][0]
+    : requested["customer"];
+
   const [customers, products] = await Promise.all([
     loadCustomers(),
     // A first page of products so the picker is useful before anyone types.
     searchOrderProducts("", 20),
   ]);
+
+  /*
+   * The shortcut from a customer's record. Checked against the list rather than
+   * trusted: a URL is user input, and preselecting an id the dropdown does not
+   * contain — a deleted customer, an archived one, a typo — would leave the
+   * form showing a blank picker that claims to have a selection.
+   */
+  const preselected = customers.some(
+    (customer) => customer.id === requestedCustomer,
+  )
+    ? requestedCustomer
+    : undefined;
 
   return (
     <div className="flex flex-col gap-6">
@@ -46,7 +67,11 @@ export default async function NewOrderPage() {
         />
       </div>
 
-      <OrderBuilder customers={customers} initialProducts={products} />
+      <OrderBuilder
+        customers={customers}
+        initialProducts={products}
+        initialCustomerId={preselected}
+      />
     </div>
   );
 }

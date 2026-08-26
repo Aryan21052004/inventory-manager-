@@ -533,7 +533,7 @@ async function main(): Promise<void> {
     const row = await prisma.product.create({
       data: {
         ...product,
-        costPrice: money(costPriceCents),
+        standardCost: money(costPriceCents),
         sellingPrice: money(sellingPriceCents),
         status: status as ProductStatus,
         stockQuantity: 0,
@@ -803,6 +803,92 @@ async function main(): Promise<void> {
       data: { stockQuantity: quantity },
     });
   }
+
+  // --- Costed lots -------------------------------------------------------
+  /*
+   * What the stock on hand cost, batch by batch.
+   *
+   * Built by the same rule the backfill migration uses on a real database:
+   * attribute the closing balance to received purchases newest-first, because
+   * FIFO consumes the oldest units and what remains is therefore what arrived
+   * last. Anything the purchase history cannot account for — stock adjusted in
+   * by hand — becomes an uncosted lot rather than being valued at a figure
+   * nobody paid.
+   *
+   * That leaves the seeded database with a genuine mix of costed and uncosted
+   * inventory, which is the state a real one is in after the migration, and
+   * exercises the "margin known for some units only" paths that would otherwise
+   * never be seen in development.
+   */
+  let costedLots = 0;
+  let uncostedLots = 0;
+
+  for (const product of PRODUCTS) {
+    const productId = productIds.get(product.key)!;
+    let remaining = onHand.get(product.key)!;
+    if (remaining <= 0) continue;
+
+    const receipts = await prisma.purchaseItem.findMany({
+      where: { productId, purchase: { status: "RECEIVED" } },
+      orderBy: [{ purchase: { purchaseDate: "desc" } }, { id: "desc" }],
+      select: {
+        quantity: true,
+        unitCost: true,
+        purchase: { select: { id: true, purchaseDate: true } },
+      },
+    });
+
+    for (const receipt of receipts) {
+      if (remaining <= 0) break;
+      const take = Math.min(remaining, receipt.quantity);
+
+      const stockIn = await prisma.stockTransaction.findFirst({
+        where: {
+          productId,
+          type: "STOCK_IN",
+          referenceType: "PURCHASE",
+          referenceId: receipt.purchase.id,
+        },
+        select: { id: true },
+      });
+
+      await prisma.stockLot.create({
+        data: {
+          productId,
+          unitCost: receipt.unitCost,
+          costSource: "PURCHASE",
+          quantityReceived: take,
+          quantityRemaining: take,
+          sourceType: "PURCHASE",
+          sourceId: receipt.purchase.id,
+          receivedAt: receipt.purchase.purchaseDate,
+          stockTransactionId: stockIn?.id ?? null,
+        },
+      });
+
+      remaining -= take;
+      costedLots += 1;
+    }
+
+    if (remaining > 0) {
+      await prisma.stockLot.create({
+        data: {
+          productId,
+          unitCost: null,
+          costSource: "UNKNOWN",
+          quantityReceived: remaining,
+          quantityRemaining: remaining,
+          sourceType: "MANUAL",
+          sourceId: null,
+          receivedAt: daysAgo(30, 8),
+          stockTransactionId: null,
+        },
+      });
+      uncostedLots += 1;
+    }
+  }
+
+  console.log(`  ${costedLots} costed lots, ${uncostedLots} uncosted`);
 
   console.log("\nStock on hand:");
   for (const product of PRODUCTS) {

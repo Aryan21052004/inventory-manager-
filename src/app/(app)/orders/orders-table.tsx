@@ -113,7 +113,12 @@ async function OrdersTable({ params }: { params: OrderListParams }) {
               </TableCell>
 
               <TableCell className="max-w-[14rem] truncate">
-                {order.customerName}
+                <Link
+                  href={`/customers/${order.customerId}`}
+                  className="hover:text-primary hover:underline"
+                >
+                  {order.customerName}
+                </Link>
               </TableCell>
 
               <TableCell className="text-muted-foreground">

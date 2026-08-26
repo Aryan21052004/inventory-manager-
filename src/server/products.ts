@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { Prisma } from "@/generated/prisma/client";
-import type { ProductStatus } from "@/generated/prisma/enums";
+import type { LotCostSource, ProductStatus } from "@/generated/prisma/enums";
 import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/errors";
 import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
 import { prisma } from "@/lib/prisma";
@@ -61,7 +61,8 @@ export interface ProductListItem {
   /** Carried so the edit dialog can prefill without a second round trip. */
   description: string | null;
   category: string;
-  costPrice: string;
+  /** Planning reference only — never what the stock cost. Null when unset. */
+  standardCost: string | null;
   sellingPrice: string;
   stockQuantity: number;
   minimumStock: number;
@@ -86,8 +87,21 @@ export interface ProductStats {
   total: number;
   lowStock: number;
   outOfStock: number;
-  /** Stock at cost, as a string — see the note about Decimal above. */
+  /**
+   * Stock at actual acquisition cost, summed over the lots still holding units.
+   *
+   * Covers only the units whose cost is known. It is not the value of all stock
+   * on hand, and presenting it as though it were would understate inventory —
+   * so it always travels with `uncostedUnits` below, and the UI is obliged to
+   * show the two together.
+   */
   stockValue: string;
+  /**
+   * Units on hand whose acquisition cost was never established — stock that
+   * predates lot costing, or was adjusted in without one. Not valued at zero,
+   * not valued at a guess: excluded from `stockValue` and counted here.
+   */
+  uncostedUnits: number;
 }
 
 export interface ProductMovement {
@@ -126,13 +140,35 @@ export interface ProductPurchaseLine {
   purchaseDate: Date;
 }
 
+/**
+ * A batch of stock on hand, with what it cost and where it came from.
+ *
+ * Listed oldest-first because that is the order FIFO will consume them, which
+ * makes the table on the product page a straight answer to "what will the next
+ * sale cost us" rather than a reference list.
+ */
+export interface ProductLot {
+  id: string;
+  /** Null when the acquisition cost was never established. */
+  unitCost: string | null;
+  costSource: LotCostSource;
+  quantityReceived: number;
+  quantityRemaining: number;
+  receivedAt: Date;
+  /** The purchase this batch arrived on, when there was one. */
+  sourceType: string;
+  sourceId: string | null;
+  purchaseNumber: string | null;
+}
+
 export interface ProductDetail {
   id: string;
   name: string;
   sku: string;
   description: string | null;
   category: string;
-  costPrice: string;
+  /** Planning reference only — never what the stock cost. Null when unset. */
+  standardCost: string | null;
   sellingPrice: string;
   stockQuantity: number;
   minimumStock: number;
@@ -145,6 +181,14 @@ export interface ProductDetail {
   movements: ProductMovement[];
   recentOrders: ProductOrderLine[];
   recentPurchases: ProductPurchaseLine[];
+  /** The batches still holding stock, oldest first — FIFO consumption order. */
+  lots: ProductLot[];
+  /** Value of the units on hand whose cost is known. */
+  stockValue: string;
+  /** Units on hand whose cost is known — the coverage of `stockValue`. */
+  costedUnits: number;
+  /** Units on hand with no established cost. Never valued, always disclosed. */
+  uncostedUnits: number;
 
   /** The product's current certificate, or null if it has none. */
   certificate: CertificateView | null;
@@ -182,7 +226,7 @@ const SORT_COLUMNS: Record<Exclude<ProductSortKey, "supplier">, string> = {
   name: "name",
   sku: "sku",
   category: "category",
-  costPrice: "costPrice",
+  standardCost: "standardCost",
   sellingPrice: "sellingPrice",
   stockQuantity: "stockQuantity",
   minimumStock: "minimumStock",
@@ -279,7 +323,7 @@ export async function listProducts(
           sku: true,
           description: true,
           category: true,
-          costPrice: true,
+          standardCost: true,
           sellingPrice: true,
           stockQuantity: true,
           minimumStock: true,
@@ -300,7 +344,7 @@ export async function listProducts(
           sku: row.sku,
           description: row.description,
           category: row.category,
-          costPrice: row.costPrice.toString(),
+          standardCost: row.standardCost?.toString() ?? null,
           sellingPrice: row.sellingPrice.toString(),
           stockQuantity: row.stockQuantity,
           minimumStock: row.minimumStock,
@@ -333,18 +377,45 @@ interface StatsRow {
   low_stock: number;
   out_of_stock: number;
   stock_value: string;
+  uncosted_units: number;
 }
 
 export async function loadProductStats(): Promise<Result<ProductStats>> {
   try {
+    /*
+     * Valuation comes from the lots, not from a column on the product.
+     *
+     * The old form of this query was `SUM(stock_quantity * cost_price)`, which
+     * asserted that every unit on hand was bought at the same price — the
+     * assumption this whole change set exists to remove. A part bought at
+     * ₹8,000, then ₹9,500, then ₹7,800 has no single cost, and multiplying the
+     * balance by whichever figure was last typed into the catalogue produced a
+     * number that was wrong in a way nobody could see.
+     *
+     * The two lot subqueries are uncorrelated, so Postgres evaluates each once
+     * rather than per product row. Units with no known cost are deliberately
+     * absent from the value and counted separately: excluding them understates
+     * the total, which is why the count travels alongside and the tile shows
+     * both. Valuing them at zero, or at a guess, would misstate it instead —
+     * and invisibly.
+     */
     const rows = await prisma.$queryRaw<StatsRow[]>`
       SELECT
-        COUNT(*)::int                                       AS total,
+        COUNT(*)::int                                    AS total,
         COUNT(*) FILTER (
           WHERE stock_quantity > 0 AND stock_quantity <= minimum_stock
-        )::int                                              AS low_stock,
-        COUNT(*) FILTER (WHERE stock_quantity <= 0)::int    AS out_of_stock,
-        COALESCE(SUM(stock_quantity * cost_price), 0)::text AS stock_value
+        )::int                                           AS low_stock,
+        COUNT(*) FILTER (WHERE stock_quantity <= 0)::int AS out_of_stock,
+        COALESCE((
+          SELECT SUM(l.quantity_remaining * l.unit_cost)
+          FROM stock_lots l
+          WHERE l.quantity_remaining > 0 AND l.unit_cost IS NOT NULL
+        ), 0)::text                                      AS stock_value,
+        COALESCE((
+          SELECT SUM(l.quantity_remaining)
+          FROM stock_lots l
+          WHERE l.quantity_remaining > 0 AND l.unit_cost IS NULL
+        ), 0)::int                                       AS uncosted_units
       FROM products
     `;
 
@@ -353,6 +424,7 @@ export async function loadProductStats(): Promise<Result<ProductStats>> {
       low_stock: 0,
       out_of_stock: 0,
       stock_value: "0",
+      uncosted_units: 0,
     };
 
     return {
@@ -362,6 +434,7 @@ export async function loadProductStats(): Promise<Result<ProductStats>> {
         lowStock: totals.low_stock,
         outOfStock: totals.out_of_stock,
         stockValue: totals.stock_value,
+        uncostedUnits: totals.uncosted_units,
       },
     };
   } catch (error) {
@@ -428,6 +501,7 @@ export async function getProductDetail(
       tradedCount,
       certificate,
       certificateHistory,
+      lots,
     ] = await Promise.all([
         prisma.stockTransaction.findMany({
           where: { productId: id },
@@ -477,7 +551,67 @@ export async function getProductDetail(
           ),
         getCurrentCertificate(id),
         getCertificateHistory(id),
+        /*
+         * The batches still holding stock, in the order FIFO will take them.
+         * Oldest first, which for a product carrying pre-costing stock means
+         * the uncosted units appear at the top — they are genuinely the oldest,
+         * and they are what the next sale will draw against.
+         */
+        prisma.stockLot.findMany({
+          where: { productId: id, quantityRemaining: { gt: 0 } },
+          orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+          select: {
+            id: true,
+            unitCost: true,
+            costSource: true,
+            quantityReceived: true,
+            quantityRemaining: true,
+            receivedAt: true,
+            sourceType: true,
+            sourceId: true,
+          },
+        }),
       ]);
+
+    /*
+     * Value what is known and count what is not. Deliberately two figures: a
+     * single "stock value" covering only some of the units would understate
+     * the shelf while looking authoritative, and valuing the unknown units at
+     * zero or at `standardCost` would misstate it invisibly.
+     */
+    let stockValueCents = 0;
+    let costedUnits = 0;
+    let uncostedUnits = 0;
+
+    for (const lot of lots) {
+      if (lot.unitCost === null) {
+        uncostedUnits += lot.quantityRemaining;
+      } else {
+        costedUnits += lot.quantityRemaining;
+        stockValueCents +=
+          Math.round(Number(lot.unitCost) * 100) * lot.quantityRemaining;
+      }
+    }
+
+    // Purchase numbers for the lots that came from a delivery, in one query
+    // rather than one per lot.
+    const purchaseIds = [
+      ...new Set(
+        lots
+          .filter((lot) => lot.sourceType === "PURCHASE" && lot.sourceId)
+          .map((lot) => lot.sourceId!),
+      ),
+    ];
+
+    const purchaseNumbers = new Map<string, string>();
+
+    if (purchaseIds.length > 0) {
+      const rows = await prisma.purchase.findMany({
+        where: { id: { in: purchaseIds } },
+        select: { id: true, purchaseNumber: true },
+      });
+      for (const row of rows) purchaseNumbers.set(row.id, row.purchaseNumber);
+    }
 
     return {
       ok: true,
@@ -487,7 +621,7 @@ export async function getProductDetail(
         sku: product.sku,
         description: product.description,
         category: product.category,
-        costPrice: product.costPrice.toString(),
+        standardCost: product.standardCost?.toString() ?? null,
         sellingPrice: product.sellingPrice.toString(),
         stockQuantity: product.stockQuantity,
         minimumStock: product.minimumStock,
@@ -536,6 +670,22 @@ export async function getProductDetail(
           total: line.total.toString(),
           purchaseDate: line.purchase.purchaseDate,
         })),
+        lots: lots.map((lot) => ({
+          id: lot.id,
+          unitCost: lot.unitCost?.toString() ?? null,
+          costSource: lot.costSource,
+          quantityReceived: lot.quantityReceived,
+          quantityRemaining: lot.quantityRemaining,
+          receivedAt: lot.receivedAt,
+          sourceType: lot.sourceType,
+          sourceId: lot.sourceId,
+          purchaseNumber: lot.sourceId
+            ? (purchaseNumbers.get(lot.sourceId) ?? null)
+            : null,
+        })),
+        stockValue: (stockValueCents / 100).toFixed(2),
+        costedUnits,
+        uncostedUnits,
       },
     };
   } catch (error) {
@@ -653,7 +803,7 @@ export async function createProduct(
           name: data.name,
           description: data.description,
           category: data.category,
-          costPrice: data.costPrice.toFixed(2),
+          standardCost: data.standardCost?.toFixed(2) ?? null,
           sellingPrice: data.sellingPrice.toFixed(2),
           // Zero, then moved by the ledger — never written straight from input.
           stockQuantity: 0,
@@ -671,6 +821,16 @@ export async function createProduct(
         productId: product.id,
         quantity: data.stockQuantity,
         userId: user.id,
+        /*
+         * Only what the operator actually entered. Blank stays blank and the
+         * opening lot is UNKNOWN — `standardCost` is a planning figure and is
+         * never substituted in here, because a guess written into an
+         * acquisition cost is indistinguishable from a real one afterwards.
+         */
+        unitCostCents:
+          data.openingStockUnitCost === null
+            ? null
+            : Math.round(data.openingStockUnitCost * 100),
       });
 
       return product;
@@ -726,7 +886,7 @@ export async function updateProduct(
         name: data.name,
         description: data.description,
         category: data.category,
-        costPrice: data.costPrice.toFixed(2),
+        standardCost: data.standardCost?.toFixed(2) ?? null,
         sellingPrice: data.sellingPrice.toFixed(2),
         minimumStock: data.minimumStock,
         status: data.status,
@@ -794,6 +954,21 @@ export async function deleteProduct(id: string): Promise<{ name: string }> {
       );
     }
 
+    /*
+     * The valuation layer first, then the ledger it hangs off, then the
+     * product. Both foreign keys are Restrict, so this order is not a
+     * preference — a lot pointing at a deleted STOCK_IN, or a consumption
+     * pointing at a deleted lot, is a state the database will not allow to
+     * exist, and doing this in the wrong order fails loudly rather than
+     * silently orphaning anything.
+     *
+     * Safe only because of the check above: a product that has never appeared
+     * on an order or a purchase has no history worth keeping, and its lots
+     * describe opening stock that is about to stop existing. Anything that has
+     * traded is refused before reaching here and gets discontinued instead.
+     */
+    await tx.stockLotConsumption.deleteMany({ where: { lot: { productId: id } } });
+    await tx.stockLot.deleteMany({ where: { productId: id } });
     await tx.stockTransaction.deleteMany({ where: { productId: id } });
     // The certificates go with it through `onDelete: Cascade` — a certificate
     // describes one product and has no meaning without it.

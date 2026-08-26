@@ -21,7 +21,12 @@ import {
   type PurchaseFieldErrors,
 } from "@/lib/validation/purchase";
 import { requireUser } from "@/server/auth";
-import { applyStockMovement, lockProducts } from "@/server/stock";
+import {
+  applyStockMovement,
+  createLot,
+  drainPurchaseLots,
+  lockProducts,
+} from "@/server/stock";
 
 /**
  * Everything the purchases module does to the database.
@@ -170,8 +175,12 @@ export interface PurchaseProductOption {
   id: string;
   name: string;
   sku: string;
-  /** The catalogue cost, offered as a default — the supplier's invoice wins. */
-  costPrice: string;
+  /**
+   * The planning reference, used only to prefill a new line's unit cost. What
+   * the operator types on the line is what gets recorded and what the lot ends
+   * up costing; this is a starting point, not an authority.
+   */
+  standardCost: string | null;
   stockQuantity: number;
   minimumStock: number;
   stockStatus: StockStatus;
@@ -387,7 +396,7 @@ export async function searchPurchaseProducts(
         id: true,
         name: true,
         sku: true,
-        costPrice: true,
+        standardCost: true,
         stockQuantity: true,
         minimumStock: true,
       },
@@ -397,7 +406,7 @@ export async function searchPurchaseProducts(
       id: row.id,
       name: row.name,
       sku: row.sku,
-      costPrice: row.costPrice.toString(),
+      standardCost: row.standardCost?.toString() ?? null,
       stockQuantity: row.stockQuantity,
       minimumStock: row.minimumStock,
       stockStatus: stockStatus(row),
@@ -840,6 +849,55 @@ function assertTransition(from: PurchaseStatus, to: PurchaseStatus): void {
 }
 
 /**
+ * Refuses to cancel a delivery whose goods have already moved on.
+ *
+ * A lot with fewer units left than it received has been drawn from: sold on an
+ * order, or adjusted away. Those units cannot come back — the order shipped —
+ * and the only ways to make the reversal balance would be to take the shortfall
+ * out of some other batch, corrupting the cost history of a delivery that had
+ * nothing to do with this one, or to leave the valuation layer disagreeing with
+ * the ledger. Refusing is the honest third option.
+ *
+ * The message names the products and the quantities, because "this cannot be
+ * cancelled" without saying what moved is not something an operator can act on.
+ * Called with the product rows already locked, which is what makes the check
+ * and the reversal atomic together.
+ */
+async function assertPurchaseLotsIntact(
+  tx: Prisma.TransactionClient,
+  purchaseId: string,
+  purchaseNumber: string,
+): Promise<void> {
+  const lots = await tx.stockLot.findMany({
+    where: { sourceType: "PURCHASE", sourceId: purchaseId },
+    select: {
+      quantityReceived: true,
+      quantityRemaining: true,
+      product: { select: { name: true } },
+    },
+    orderBy: { id: "asc" },
+  });
+
+  const consumed = lots.filter(
+    (lot) => lot.quantityRemaining < lot.quantityReceived,
+  );
+
+  if (consumed.length === 0) return;
+
+  const detail = consumed
+    .map((lot) => {
+      const gone = lot.quantityReceived - lot.quantityRemaining;
+      return `${lot.product.name} (${gone} of ${lot.quantityReceived})`;
+    })
+    .join(", ");
+
+  throw new AppError(
+    "CONFLICT",
+    `Purchase ${purchaseNumber} cannot be cancelled because some of the stock it delivered has already been used: ${detail}. Those units have left on an order or been adjusted away, and taking them back from a different delivery would misstate what that stock cost. Reverse the orders that consumed them first, or record a stock adjustment instead — nothing has been changed.`,
+  );
+}
+
+/**
  * Receives a purchase: the moment goods land and stock rises.
  *
  * One database transaction, in this order:
@@ -878,6 +936,10 @@ export async function receivePurchase(
       select: {
         productId: true,
         quantity: true,
+        // What was actually paid. This is the figure that becomes the lot's
+        // cost, and the reason the same part bought three times at three
+        // prices stays three distinguishable batches.
+        unitCost: true,
         product: { select: { name: true, status: true } },
       },
     });
@@ -906,18 +968,41 @@ export async function receivePurchase(
     );
 
     const movements: PurchaseTransitionOutcome["movements"] = [];
+    const receivedAt = new Date();
 
     for (const item of items) {
       const product = locked.get(item.productId)!;
 
-      const { previousStock, newStock } = await applyStockMovement(tx, {
-        product,
-        type: "STOCK_IN",
-        // Positive: goods coming in.
-        delta: item.quantity,
+      const { transaction, previousStock, newStock } = await applyStockMovement(
+        tx,
+        {
+          product,
+          type: "STOCK_IN",
+          // Positive: goods coming in.
+          delta: item.quantity,
+          reference: { type: "PURCHASE", id: purchaseId },
+          note: `Purchase ${purchase.purchaseNumber} received`,
+          // From the session, resolved through clerkId. Never from the client.
+          userId: user.id,
+        },
+      );
+
+      /*
+       * The cost of this delivery, frozen against the units it brought in.
+       *
+       * One lot per line, never merged with an existing batch even when the
+       * product and price match — two deliveries are two batches with two sets
+       * of paperwork. `receivedAt` is shared across the lines so a single
+       * delivery sorts as one arrival in the FIFO queue.
+       */
+      await createLot(tx, {
+        productId: product.id,
+        stockTransactionId: transaction.id,
+        quantity: item.quantity,
+        unitCostCents: toCents(Number(item.unitCost)),
+        costSource: "PURCHASE",
         reference: { type: "PURCHASE", id: purchaseId },
-        note: `Purchase ${purchase.purchaseNumber} received`,
-        // From the session, resolved through clerkId. Never from the client.
+        receivedAt,
         userId: user.id,
       });
 
@@ -932,7 +1017,7 @@ export async function receivePurchase(
 
     const updated = await tx.purchase.update({
       where: { id: purchaseId },
-      data: { status: "RECEIVED", receivedAt: new Date() },
+      data: { status: "RECEIVED", receivedAt },
       select: { id: true, purchaseNumber: true, status: true },
     });
 
@@ -953,11 +1038,15 @@ export async function receivePurchase(
  * and if the two ever disagreed the ledger would be right. The reversal
  * quantities are the STOCK_IN rows netted against any REVERSAL already written.
  *
- * One failure mode is worth knowing about: if the goods have since been sold,
- * taking them back would drive stock negative, and `applyStockMovement` refuses
- * it. That is the correct answer — the units are gone, and a cancellation
- * cannot un-sell them — and the whole cancellation rolls back rather than
- * leaving inventory half-reversed.
+ * Cancellation is refused outright once any of the delivered units have been
+ * consumed — sold on an order, or adjusted away. The quantity check alone would
+ * not catch this: a later delivery can top the balance back up, so there would
+ * be enough stock on the shelf to reverse against while the units that actually
+ * arrived on *this* purchase are long gone. Taking the difference from another
+ * batch would work arithmetically and be a lie — it would consume a lot bought
+ * at a different price and silently corrupt the cost history of a delivery that
+ * has nothing to do with this one. So the lots this purchase created are
+ * checked first, and an untouched delivery is the only kind that can be undone.
  */
 export async function cancelPurchase(
   purchaseId: string,
@@ -1009,11 +1098,21 @@ export async function cancelPurchase(
 
       const locked = await lockProducts(tx, productIds);
 
+      /*
+       * Every line checked before any line is written, in the same shape as
+       * `receivePurchase` validates before adding. The check sits *after*
+       * `lockProducts` on purpose: any transaction that could consume these
+       * lots must take the product row lock first, so holding it is what makes
+       * the check and the reversal that follows a single atomic decision rather
+       * than a race.
+       */
+      await assertPurchaseLotsIntact(tx, purchaseId, purchase.purchaseNumber);
+
       for (const productId of [...productIds].sort()) {
         const quantity = outstanding.get(productId)!;
         const product = locked.get(productId)!;
 
-        const { previousStock, newStock } = await applyStockMovement(tx, {
+        const { transaction, previousStock, newStock } = await applyStockMovement(tx, {
           product,
           type: "REVERSAL",
           // Negative: taking back what was added.
@@ -1023,6 +1122,14 @@ export async function cancelPurchase(
             ? `Purchase ${purchase.purchaseNumber} cancelled — ${reason.trim()}`
             : `Purchase ${purchase.purchaseNumber} cancelled`,
           userId: user.id,
+        });
+
+        // The batch goes with the stock. Drawn to zero rather than deleted, so
+        // the record that this delivery arrived and was sent back survives.
+        await drainPurchaseLots(tx, {
+          purchaseId,
+          reversalTransactionId: transaction.id,
+          productId: product.id,
         });
 
         movements.push({
@@ -1172,7 +1279,7 @@ export async function loadPurchaseProducts(
         id: true,
         name: true,
         sku: true,
-        costPrice: true,
+        standardCost: true,
         stockQuantity: true,
         minimumStock: true,
         status: true,
@@ -1183,7 +1290,7 @@ export async function loadPurchaseProducts(
       id: row.id,
       name: row.name,
       sku: row.sku,
-      costPrice: row.costPrice.toString(),
+      standardCost: row.standardCost?.toString() ?? null,
       stockQuantity: row.stockQuantity,
       minimumStock: row.minimumStock,
       stockStatus: stockStatus(row),

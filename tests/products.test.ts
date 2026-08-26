@@ -47,7 +47,7 @@ function productForm(overrides: Record<string, string> = {}) {
     sku: "KEY-001",
     description: "Tenkeyless, brown switches",
     category: "Peripherals",
-    costPrice: "45.00",
+    standardCost: "45.00",
     sellingPrice: "89.99",
     stockQuantity: "25",
     minimumStock: "5",
@@ -79,7 +79,7 @@ describe("creating a product", () => {
     expect(product.category).toBe("Peripherals");
     expect(product.description).toBe("Tenkeyless, brown switches");
     // Money round-trips through Decimal, not through a float.
-    expect(product.costPrice.toString()).toBe("45");
+    expect(product.standardCost?.toString()).toBe("45");
     expect(product.sellingPrice.toString()).toBe("89.99");
     expect(product.minimumStock).toBe(5);
     expect(product.status).toBe("ACTIVE");
@@ -212,7 +212,7 @@ describe("SKU uniqueness", () => {
         name: "Mine",
         sku: "TAKEN-001",
         category: "General",
-        costPrice: "1.00",
+        standardCost: "1.00",
         sellingPrice: "2.00",
         minimumStock: "1",
         status: "ACTIVE",
@@ -242,15 +242,15 @@ describe("input validation", () => {
     });
   });
 
-  it("rejects a negative cost price", async () => {
+  it("rejects a negative standard cost", async () => {
     await signInWithRole("ADMIN");
 
     await expect(
-      createProduct(productForm({ costPrice: "-1.00" })),
+      createProduct(productForm({ standardCost: "-1.00" })),
     ).rejects.toMatchObject({
       code: "BAD_REQUEST",
-      message: "Cost price cannot be negative",
-      details: { field: "costPrice" },
+      message: "Standard cost cannot be negative",
+      details: { field: "standardCost" },
     });
 
     expect(await prisma.product.count()).toBe(0);
@@ -311,8 +311,25 @@ describe("input validation", () => {
     // `Number("")` is 0. A schema that coerced before checking would accept a
     // cleared price as free.
     await expect(
-      createProduct(productForm({ costPrice: "" })),
-    ).rejects.toMatchObject({ message: "Cost price is required" });
+      createProduct(productForm({ sellingPrice: "" })),
+    ).rejects.toMatchObject({ message: "Selling price is required" });
+  });
+
+  it("treats a blank standard cost as unknown rather than as zero", async () => {
+    await signInWithRole("ADMIN");
+
+    // The distinction the whole costing layer rests on. Zero is a cost — it
+    // says the units were free. Null says nobody knows. A schema that coerced
+    // a cleared field to 0 would erase that difference at the door.
+    const created = await createProduct(
+      productForm({ standardCost: "", stockQuantity: "0" }),
+    );
+
+    const product = await prisma.product.findUniqueOrThrow({
+      where: { id: created.id },
+    });
+
+    expect(product.standardCost).toBeNull();
   });
 });
 
@@ -331,7 +348,7 @@ describe("editing a product", () => {
       sku: "EDIT-002",
       description: "Now with a description",
       category: "Accessories",
-      costPrice: "9.99",
+      standardCost: "9.99",
       sellingPrice: "19.99",
       minimumStock: "12",
       status: "INACTIVE",
@@ -361,7 +378,7 @@ describe("editing a product", () => {
       name: product.name,
       sku: product.sku,
       category: product.category,
-      costPrice: "5.00",
+      standardCost: "5.00",
       sellingPrice: "12.50",
       minimumStock: "10",
       status: "ACTIVE",
@@ -387,7 +404,7 @@ describe("editing a product", () => {
         name: "Renamed by staff",
         sku: "EDIT-004",
         category: "General",
-        costPrice: "1.00",
+        standardCost: "1.00",
         sellingPrice: "2.00",
         minimumStock: "0",
         status: "ACTIVE",
@@ -408,7 +425,7 @@ describe("editing a product", () => {
         name: "Ghost",
         sku: "GHOST-001",
         category: "General",
-        costPrice: "1.00",
+        standardCost: "1.00",
         sellingPrice: "2.00",
         minimumStock: "0",
         status: "ACTIVE",
@@ -570,9 +587,24 @@ describe("stock status", () => {
   });
 
   it("counts low and out-of-stock products for the summary tiles", async () => {
-    await seedProduct({ sku: "T-1", stockQuantity: 40, minimumStock: 10, costPrice: "2.00" });
-    await seedProduct({ sku: "T-2", stockQuantity: 10, minimumStock: 10, costPrice: "3.00" });
-    await seedProduct({ sku: "T-3", stockQuantity: 0, minimumStock: 10, costPrice: "4.00" });
+    await seedProduct({
+      sku: "T-1",
+      stockQuantity: 40,
+      minimumStock: 10,
+      lotUnitCost: "2.00",
+    });
+    await seedProduct({
+      sku: "T-2",
+      stockQuantity: 10,
+      minimumStock: 10,
+      lotUnitCost: "3.00",
+    });
+    await seedProduct({
+      sku: "T-3",
+      stockQuantity: 0,
+      minimumStock: 10,
+      lotUnitCost: "4.00",
+    });
 
     const result = await loadProductStats();
     if (!result.ok) throw new Error("expected stats to load");
@@ -580,8 +612,33 @@ describe("stock status", () => {
     expect(result.data.total).toBe(3);
     expect(result.data.lowStock).toBe(1);
     expect(result.data.outOfStock).toBe(1);
-    // 40 × 2.00 + 10 × 3.00 + 0 × 4.00
+    // Valued from the lots, not from a catalogue column: 40 × 2.00 + 10 × 3.00.
+    // T-3 holds nothing, so its cost contributes nothing.
     expect(Number(result.data.stockValue)).toBe(110);
+    expect(result.data.uncostedUnits).toBe(0);
+  });
+
+  it("values only the units whose cost is known, and counts the rest", async () => {
+    // The figure that used to be quietly wrong. Stock with no established
+    // acquisition cost is excluded from the value rather than being multiplied
+    // by whatever the catalogue happened to say.
+    await seedProduct({
+      sku: "V-1",
+      stockQuantity: 10,
+      lotUnitCost: "8000.00",
+    });
+    await seedProduct({
+      sku: "V-2",
+      stockQuantity: 5,
+      standardCost: "9999.00",
+      lotUnitCost: null,
+    });
+
+    const result = await loadProductStats();
+    if (!result.ok) throw new Error("expected stats to load");
+
+    expect(Number(result.data.stockValue)).toBe(80_000);
+    expect(result.data.uncostedUnits).toBe(5);
   });
 });
 

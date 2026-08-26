@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { Prisma } from "@/generated/prisma/client";
+import type { CustomerStatus } from "@/generated/prisma/enums";
 import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
 import {
   AppError,
@@ -28,7 +29,12 @@ import {
   type OrderFieldErrors,
 } from "@/lib/validation/order";
 import { requireUser } from "@/server/auth";
-import { applyStockMovement, lockProducts } from "@/server/stock";
+import {
+  allocateFifo,
+  applyStockMovement,
+  lockProducts,
+  returnToLots,
+} from "@/server/stock";
 
 /**
  * Everything the orders module does to the database.
@@ -98,6 +104,15 @@ export interface OrderDetailLine {
   quantity: number;
   unitPrice: string;
   total: string;
+  /**
+   * What these units cost us, frozen at confirmation. Null before the order is
+   * confirmed, and null again once it is cancelled.
+   *
+   * Covers `costedQuantity` units, which is not always all of them — see the
+   * note on `OrderItem.costedQuantity` in the schema.
+   */
+  costTotal: string | null;
+  costedQuantity: number;
   /** Stock on hand now, for context — not what was deducted. */
   currentStock: number;
   stockStatus: StockStatus;
@@ -160,6 +175,12 @@ export interface CustomerOption {
   id: string;
   name: string;
   email: string | null;
+  /**
+   * Almost always ACTIVE — the picker asks for active customers. It can be
+   * INACTIVE for exactly one entry: the customer already on the order being
+   * edited, who is kept in the list so an old draft still shows who it is for.
+   */
+  status: CustomerStatus;
 }
 
 /** A product as the order builder's search results present it. */
@@ -350,11 +371,35 @@ export async function loadOrderStats(): Promise<Result<OrderStats>> {
   }
 }
 
-export async function loadCustomers(): Promise<CustomerOption[]> {
+/**
+ * Customers that can be picked for an order.
+ *
+ * Only ACTIVE ones, for the same reason the product picker only offers active
+ * products: an archived customer has been taken out of circulation deliberately
+ * and offering them is how they end up sold to again.
+ *
+ * `includeId` is the exception, and it exists for editing. An order that was
+ * raised before its customer was archived still belongs to that customer, and
+ * the edit form has to be able to display them — dropping them from the list
+ * would leave the form showing no customer at all and quietly reassign the
+ * order on save. Their status comes back with them so the builder can say what
+ * it is looking at.
+ *
+ * Note what this does *not* do: nothing here decides whether an order may be
+ * saved. `createOrder` and `updateOrder` check the customer themselves, and
+ * they check that the customer exists rather than that they are active —
+ * archiving must not make an existing draft unsaveable.
+ */
+export async function loadCustomers(
+  includeId?: string | null,
+): Promise<CustomerOption[]> {
   try {
     return await prisma.customer.findMany({
+      where: includeId
+        ? { OR: [{ status: "ACTIVE" }, { id: includeId }] }
+        : { status: "ACTIVE" },
       orderBy: { name: "asc" },
-      select: { id: true, name: true, email: true },
+      select: { id: true, name: true, email: true, status: true },
     });
   } catch (error) {
     toSafeError(error, "loadCustomers");
@@ -601,6 +646,8 @@ export async function getOrderDetail(
             quantity: item.quantity,
             unitPrice: item.unitPrice.toString(),
             total: item.total.toString(),
+            costTotal: item.costTotal?.toString() ?? null,
+            costedQuantity: item.costedQuantity,
             currentStock: item.product.stockQuantity,
             stockStatus: stockStatus(item.product),
             certificateType: certificate?.certificateType ?? null,
@@ -833,6 +880,15 @@ export interface OrderTransitionOutcome {
     previousStock: number;
     newStock: number;
   }[];
+  /**
+   * Units this transition drew from stock whose acquisition cost is unknown.
+   *
+   * Present so a confirmation can say so at the moment it happens — "5 units
+   * drawn from uncosted stock" — rather than leaving somebody to discover a
+   * partial margin in a report weeks later. Informational only: it never
+   * blocks, because quantity was available and the sale is legitimate.
+   */
+  uncostedUnits?: number;
   /** True when the call found the work already done and changed nothing. */
   alreadyInState: boolean;
 }
@@ -912,7 +968,8 @@ export async function confirmOrder(
 
     const items = await tx.orderItem.findMany({
       where: { orderId },
-      select: { productId: true, quantity: true },
+      // `id` so the resolved cost can be written back to the line.
+      select: { id: true, productId: true, quantity: true },
     });
 
     if (items.length === 0) {
@@ -941,18 +998,51 @@ export async function confirmOrder(
     }
 
     const movements: OrderTransitionOutcome["movements"] = [];
+    let uncostedUnits = 0;
 
     for (const item of items) {
       const product = locked.get(item.productId)!;
 
-      const { previousStock, newStock } = await applyStockMovement(tx, {
-        product,
-        type: "STOCK_OUT",
-        delta: -item.quantity,
-        reference: { type: "ORDER", id: orderId },
-        note: `Order ${order.orderNumber} confirmed`,
-        // From the session, resolved through clerkId. Never from the client.
-        userId: user.id,
+      const { transaction, previousStock, newStock } = await applyStockMovement(
+        tx,
+        {
+          product,
+          type: "STOCK_OUT",
+          delta: -item.quantity,
+          reference: { type: "ORDER", id: orderId },
+          note: `Order ${order.orderNumber} confirmed`,
+          // From the session, resolved through clerkId. Never from the client.
+          userId: user.id,
+        },
+      );
+
+      /*
+       * What these units cost us, resolved now and frozen.
+       *
+       * Costing runs after the movement, never before it, and cannot refuse
+       * one: the stock has already legitimately left. FIFO draws the oldest
+       * batches first, and if some of those predate this system the draw comes
+       * back partially costed — 10 of 15 units, say — which is recorded as
+       * exactly that rather than being averaged into a whole-line figure that
+       * would read as complete.
+       */
+      const allocation = await allocateFifo(tx, {
+        productId: product.id,
+        quantity: item.quantity,
+        stockTransactionId: transaction.id,
+      });
+
+      uncostedUnits += allocation.uncostedQuantity;
+
+      await tx.orderItem.update({
+        where: { id: item.id },
+        data: {
+          costTotal:
+            allocation.costedQuantity === 0
+              ? null
+              : centsToDecimalString(allocation.costTotalCents),
+          costedQuantity: allocation.costedQuantity,
+        },
       });
 
       movements.push({
@@ -970,7 +1060,7 @@ export async function confirmOrder(
       select: { id: true, orderNumber: true, status: true },
     });
 
-    return { ...updated, movements, alreadyInState: false };
+    return { ...updated, movements, uncostedUnits, alreadyInState: false };
   });
 }
 
@@ -1043,7 +1133,7 @@ export async function cancelOrder(
     if (holdsDeductedStock(order.status)) {
       const ledger = await tx.stockTransaction.findMany({
         where: { referenceType: "ORDER", referenceId: orderId },
-        select: { productId: true, type: true, quantity: true },
+        select: { id: true, productId: true, type: true, quantity: true },
       });
 
       // Net what left against anything already returned, so a partially
@@ -1058,6 +1148,11 @@ export async function cancelOrder(
         );
       }
 
+      // The movements whose lot draws are being undone.
+      const outboundIds = ledger
+        .filter((row) => row.type === "STOCK_OUT")
+        .map((row) => row.id);
+
       const productIds = [...outstanding.entries()]
         .filter(([, quantity]) => quantity > 0)
         .map(([productId]) => productId);
@@ -1068,16 +1163,29 @@ export async function cancelOrder(
         const quantity = outstanding.get(productId)!;
         const product = locked.get(productId)!;
 
-        const { previousStock, newStock } = await applyStockMovement(tx, {
-          product,
-          type: "REVERSAL",
-          // Positive: putting units back.
-          delta: quantity,
-          reference: { type: "ORDER", id: orderId },
-          note: reason?.trim()
-            ? `Order ${order.orderNumber} cancelled — ${reason.trim()}`
-            : `Order ${order.orderNumber} cancelled`,
-          userId: user.id,
+        const { transaction, previousStock, newStock } =
+          await applyStockMovement(tx, {
+            product,
+            type: "REVERSAL",
+            // Positive: putting units back.
+            delta: quantity,
+            reference: { type: "ORDER", id: orderId },
+            note: reason?.trim()
+              ? `Order ${order.orderNumber} cancelled — ${reason.trim()}`
+              : `Order ${order.orderNumber} cancelled`,
+            userId: user.id,
+          });
+
+        /*
+         * Back to the batches they came out of, at the price those batches
+         * cost. Never into a new lot at today's price: cancel an order placed
+         * when the part cost ₹8,000 and the units belong to the ₹8,000 batch
+         * again, whatever the most recent delivery was priced at.
+         */
+        await returnToLots(tx, {
+          sourceTransactionIds: outboundIds,
+          reversalTransactionId: transaction.id,
+          productId: product.id,
         });
 
         movements.push({
@@ -1088,6 +1196,17 @@ export async function cancelOrder(
           newStock,
         });
       }
+
+      /*
+       * The sale did not happen, so it has no cost of sale. Cleared rather than
+       * left in place: a cancelled order carrying COGS would be counted by any
+       * report that sums cost over line items, and the stock it describes is
+       * back on the shelf waiting to be sold to somebody else.
+       */
+      await tx.orderItem.updateMany({
+        where: { orderId },
+        data: { costTotal: null, costedQuantity: 0 },
+      });
     }
 
     const updated = await tx.order.update({

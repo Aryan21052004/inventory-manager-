@@ -54,6 +54,36 @@ const price = (label: string) =>
   );
 
 /**
+ * Money that may legitimately be absent.
+ *
+ * A blank field becomes null, not zero — and the difference is the point. Zero
+ * is a cost: it says these units were free. Null says nobody knows what they
+ * cost, which for stock that predates this system is usually the truth. The
+ * whole costing layer is built to carry that distinction all the way to the
+ * screen, and it would be undone here if an empty input quietly became 0.00.
+ */
+const optionalPrice = (label: string) =>
+  z
+    .string()
+    .trim()
+    // A field the form did not render at all is as absent as one left blank.
+    .optional()
+    .transform((value) => (value === undefined || value === "" ? null : value))
+    .refine(
+      (value) => value === null || Number.isFinite(Number(value)),
+      `${label} must be a number`,
+    )
+    .transform((value) => (value === null ? null : Number(value)))
+    .refine(
+      (value) => value === null || value >= 0,
+      `${label} cannot be negative`,
+    )
+    .refine(
+      (value) => value === null || value <= 9_999_999_999.99,
+      `${label} is too large`,
+    );
+
+/**
  * A quantity, bounded to a 32-bit integer because the column is an `Int`. Past
  * that Postgres raises an out-of-range error, which the UI would have to report
  * as a generic failure.
@@ -108,7 +138,15 @@ const productFields = {
     .trim()
     .min(1, "Category is required")
     .max(64, "Category must be 64 characters or fewer"),
-  costPrice: price("Cost price"),
+  /**
+   * A planning figure. Optional, and never treated as what the stock cost.
+   *
+   * It used to be required, which meant every product form had to produce a
+   * cost whether anyone knew one or not — manufacturing the fake data this
+   * redesign exists to remove. Actual acquisition cost is recorded per receipt
+   * on StockLot; see the note on `Product.standardCost` in the schema.
+   */
+  standardCost: optionalPrice("Standard cost"),
   sellingPrice: price("Selling price"),
   minimumStock: quantity("Minimum stock"),
   supplierId,
@@ -123,6 +161,21 @@ const productFields = {
 export const createProductSchema = z.object({
   ...productFields,
   stockQuantity: quantity("Initial stock"),
+  /**
+   * What the opening stock actually cost per unit, if it is known.
+   *
+   * Deliberately a separate field from `standardCost`, and deliberately not
+   * defaulted from it. They answer different questions: standard cost is what
+   * we expect to pay next time, this is what we paid for the units being
+   * entered right now. Filling this in from the planning figure would turn an
+   * estimate into a recorded acquisition cost, and once written the two are
+   * indistinguishable.
+   *
+   * Left blank, the opening stock becomes an UNKNOWN lot and reports as
+   * uncosted for as long as those units last. That is the honest answer for
+   * inventory whose paperwork nobody can find.
+   */
+  openingStockUnitCost: optionalPrice("Opening stock unit cost"),
 });
 
 /** Editing deliberately cannot touch stock. See the note at the top. */

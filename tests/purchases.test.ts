@@ -44,14 +44,20 @@ beforeEach(async () => {
   await resetDatabase();
 });
 
-/** A product with a known balance and a round cost. */
+/**
+ * A product with a known balance and a round cost.
+ *
+ * The opening balance is deliberately uncosted — it was conjured into existence
+ * by the fixture, not bought — so anything these tests assert about cost comes
+ * from purchases they actually receive.
+ */
 async function product(sku: string, stockQuantity: number, cost = "10.00") {
   return seedProduct({
     sku,
     name: `Part ${sku}`,
     stockQuantity,
     minimumStock: 0,
-    costPrice: cost,
+    standardCost: cost,
   });
 }
 
@@ -390,9 +396,18 @@ describe("cancelling a received purchase", () => {
     await confirmOrder(order.id);
     expect(await stockOf(part.id)).toBe(0);
 
-    // Cancelling the delivery now would mean un-selling those units.
+    /*
+     * Cancelling the delivery now would mean un-selling those units.
+     *
+     * This used to surface as INSUFFICIENT_STOCK, from the reversal being
+     * refused for driving the balance negative. It is now caught earlier and
+     * more precisely: the lot this purchase created has been drawn from, which
+     * is true whether or not the shelf happens to hold enough units — a later
+     * delivery could easily have topped the balance back up, and reversing
+     * against *that* batch would misstate what it cost.
+     */
     await expect(cancelPurchase(purchase.id)).rejects.toMatchObject({
-      code: "INSUFFICIENT_STOCK",
+      code: "CONFLICT",
     });
 
     // And the refusal leaves everything as it was — no half reversal.

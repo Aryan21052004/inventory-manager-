@@ -86,6 +86,11 @@ export interface CustomerOption {
   id: string;
   name: string;
   email: string | null;
+  /**
+   * INACTIVE only for the customer already on an order being edited — the
+   * picker is otherwise a list of active customers. See `loadCustomers`.
+   */
+  status: "ACTIVE" | "INACTIVE";
 }
 
 export interface ProductOption {
@@ -122,16 +127,25 @@ function OrderBuilder({
   customers,
   initialProducts,
   order,
+  initialCustomerId,
 }: {
   customers: CustomerOption[];
   initialProducts: ProductOption[];
   /** Absent when raising a new order; present when editing one. */
   order?: ExistingOrder;
+  /**
+   * A customer to start with, from `/orders/new?customer=…` — the shortcut on a
+   * customer's record. The page only passes one it found in `customers`, so
+   * this can never select something the dropdown does not contain.
+   */
+  initialCustomerId?: string;
 }) {
   const router = useRouter();
   const editing = order !== undefined;
 
-  const [customerId, setCustomerId] = useState<string>(order?.customerId ?? "");
+  const [customerId, setCustomerId] = useState<string>(
+    order?.customerId ?? initialCustomerId ?? "",
+  );
   const [lines, setLines] = useState<OrderLine[]>(order?.lines ?? []);
   const [discount, setDiscount] = useState(order?.discount ?? "0.00");
   const [submitting, setSubmitting] = useState(false);
@@ -269,11 +283,17 @@ function OrderBuilder({
           </CardHeader>
           <CardContent>
             {customers.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                There are no customers yet. An order needs one, and this module
-                does not create customers on the fly — a mistyped name would
-                otherwise become a second customer record.
-              </p>
+              <div className="flex flex-col items-start gap-3">
+                <p className="text-sm text-muted-foreground">
+                  There are no customers to pick from. An order needs one, and
+                  this form does not create them on the fly — a mistyped name
+                  would otherwise become a second customer record. Add one in
+                  the customers directory, or bring an archived customer back.
+                </p>
+                <Button variant="outline" size="sm" asChild>
+                  <Link href="/customers">Go to customers</Link>
+                </Button>
+              </div>
             ) : (
               <Field label="Customer" htmlFor="customer">
                 <Select value={customerId} onValueChange={setCustomerId}>
@@ -631,17 +651,25 @@ function OrderBuilder({
           </CardContent>
         </Card>
 
-        {customerId ? (
-          <SelectedCustomer
-            customer={customers.find((entry) => entry.id === customerId)!}
-          />
-        ) : null}
+        <SelectedCustomer
+          customer={customers.find((entry) => entry.id === customerId)}
+        />
       </div>
     </div>
   );
 }
 
-function SelectedCustomer({ customer }: { customer: CustomerOption }) {
+/**
+ * The selected customer, or nothing when none is chosen.
+ *
+ * Takes an optional customer rather than asserting one was found. The list can
+ * legitimately not contain the selected id — an archived customer is only
+ * included when the page asked for them by id — and a non-null assertion here
+ * would turn that into a crash on a page someone is in the middle of editing.
+ */
+function SelectedCustomer({ customer }: { customer?: CustomerOption }) {
+  if (!customer) return null;
+
   return (
     <Card>
       <CardHeader>
@@ -657,6 +685,13 @@ function SelectedCustomer({ customer }: { customer: CustomerOption }) {
         ) : (
           <Badge variant="muted">No email on file</Badge>
         )}
+        {/* Only ever an order raised before they were archived. Saying so beats
+            leaving someone to wonder why this name is not in the dropdown. */}
+        {customer.status === "INACTIVE" ? (
+          <Badge variant="muted" className="mt-1 w-fit">
+            Archived customer
+          </Badge>
+        ) : null}
       </CardContent>
     </Card>
   );

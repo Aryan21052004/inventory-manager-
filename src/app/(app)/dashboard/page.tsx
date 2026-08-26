@@ -86,7 +86,11 @@ function DashboardContent({ snapshot }: { snapshot: DashboardSnapshot }) {
         <StatCard
           label="Stock value"
           value={formatCurrency(snapshot.stockValue)}
-          hint="Valued at unit cost"
+          hint={
+            snapshot.uncostedUnits > 0
+              ? `Excludes ${formatNumber(snapshot.uncostedUnits)} ${snapshot.uncostedUnits === 1 ? "unit" : "units"} of unknown cost`
+              : "Valued at actual acquisition cost"
+          }
           icon={Wallet}
           tone="success"
         />

@@ -73,7 +73,8 @@ export interface ProductFormValues {
   sku: string;
   description: string | null;
   category: string;
-  costPrice: string;
+  /** Planning reference only, and null when nobody has set one. */
+  standardCost: string | null;
   sellingPrice: string;
   stockQuantity: number;
   minimumStock: number;
@@ -281,19 +282,20 @@ function ProductFormDialog({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field
-              label="Cost price"
-              htmlFor={id("costPrice")}
-              hint="What you pay per unit."
-              error={errors.costPrice}
+              label="Standard cost (reference)"
+              htmlFor={id("standardCost")}
+              hint="A planning figure — prefills purchase lines. Not used to value stock. Leave blank if unknown."
+              error={errors.standardCost}
             >
               <Input
-                id={id("costPrice")}
-                name="costPrice"
+                id={id("standardCost")}
+                name="standardCost"
                 type="number"
                 step="0.01"
                 min="0"
-                defaultValue={product?.costPrice ?? "0.00"}
-                aria-invalid={Boolean(errors.costPrice)}
+                placeholder="Optional"
+                defaultValue={product?.standardCost ?? ""}
+                aria-invalid={Boolean(errors.standardCost)}
                 className="tabular"
               />
             </Field>
@@ -335,6 +337,37 @@ function ProductFormDialog({
                   step="1"
                   defaultValue="0"
                   aria-invalid={Boolean(errors.stockQuantity)}
+                  className="tabular"
+                />
+              </Field>
+            )}
+
+            {/*
+              Only when creating, and deliberately separate from the standard
+              cost above. This is what the opening units actually cost; that is
+              what we expect to pay next time. Left blank the opening stock is
+              recorded as uncosted, which is the honest state for inventory
+              whose paperwork nobody can find — the alternative, quietly reusing
+              the planning figure, would turn an estimate into a recorded
+              acquisition cost that no later reader could tell apart from a real
+              one.
+            */}
+            {editing ? null : (
+              <Field
+                label="Opening stock unit cost"
+                htmlFor={id("openingStockUnitCost")}
+                hint="What the initial stock actually cost per unit. Leave blank if unknown — it will be recorded as uncosted rather than guessed."
+                error={errors.openingStockUnitCost}
+              >
+                <Input
+                  id={id("openingStockUnitCost")}
+                  name="openingStockUnitCost"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="Optional"
+                  defaultValue=""
+                  aria-invalid={Boolean(errors.openingStockUnitCost)}
                   className="tabular"
                 />
               </Field>

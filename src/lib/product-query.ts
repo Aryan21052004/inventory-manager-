@@ -18,7 +18,7 @@ export const PRODUCT_SORT_KEYS = [
   "name",
   "sku",
   "category",
-  "costPrice",
+  "standardCost",
   "sellingPrice",
   "stockQuantity",
   "minimumStock",

@@ -1,7 +1,10 @@
 import "server-only";
 
 import type { Prisma, StockTransaction } from "@/generated/prisma/client";
-import type { StockTransactionType } from "@/generated/prisma/enums";
+import type {
+  LotCostSource,
+  StockTransactionType,
+} from "@/generated/prisma/enums";
 import { AppError, InsufficientStockError, NotFoundError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
 import {
@@ -182,6 +185,16 @@ export async function applyStockMovement(
 
 export async function recordStockMovement(
   input: StockMovementInput,
+  /**
+   * What the incoming units cost, in cents, for a movement that adds stock.
+   *
+   * Optional, and ignored for outbound movements — those are costed from the
+   * lots they draw against, not from anything a caller supplies. Omitting it on
+   * an inbound movement creates an UNKNOWN lot: an operator counting extra
+   * units onto a shelf usually cannot say what they cost, and recording that
+   * honestly is better than attaching a number nobody can source.
+   */
+  unitCostCents?: number | null,
 ): Promise<RecordedMovement> {
   const parsed = stockMovementSchema.safeParse(input);
 
@@ -202,7 +215,7 @@ export async function recordStockMovement(
   return prisma.$transaction(async (tx) => {
     const product = await lockProduct(tx, movement.productId);
 
-    return applyStockMovement(tx, {
+    const recorded = await applyStockMovement(tx, {
       product,
       type: movement.type,
       delta,
@@ -211,6 +224,36 @@ export async function recordStockMovement(
       // The whole point: from the session, not from the caller.
       userId: user.id,
     });
+
+    /*
+     * Direction decides. Stock coming in becomes a lot; stock going out is
+     * drawn from the lots already there, oldest first. A manual movement has no
+     * document to consult, so there is nothing more subtle to do — and doing
+     * nothing at all would break the invariant that a product's lots sum to its
+     * quantity the moment anybody adjusted a count.
+     */
+    if (delta > 0) {
+      const costed = unitCostCents !== null && unitCostCents !== undefined;
+
+      await createLot(tx, {
+        productId: product.id,
+        stockTransactionId: recorded.transaction.id,
+        quantity: delta,
+        unitCostCents: costed ? unitCostCents! : null,
+        costSource: costed ? "ADJUSTMENT" : "UNKNOWN",
+        reference: movement.reference,
+        receivedAt: recorded.transaction.createdAt,
+        userId: user.id,
+      });
+    } else {
+      await allocateFifo(tx, {
+        productId: product.id,
+        quantity: Math.abs(delta),
+        stockTransactionId: recorded.transaction.id,
+      });
+    }
+
+    return recorded;
   });
 }
 
@@ -234,11 +277,29 @@ export async function recordStockMovement(
  */
 export async function recordOpeningStock(
   tx: Prisma.TransactionClient,
-  params: { productId: string; quantity: number; userId: string },
+  params: {
+    productId: string;
+    quantity: number;
+    userId: string;
+    /**
+     * What the opening stock actually cost, in cents, if anybody knows.
+     *
+     * Optional and genuinely so. This is stock that arrived before the system
+     * was watching, and the honest answer is often that nobody can say what it
+     * cost. Leaving it out creates an UNKNOWN lot, which reports as uncosted
+     * for as long as those units survive.
+     *
+     * It is emphatically *not* defaulted from `Product.standardCost`. That
+     * field is a planning figure someone typed; using it here would turn a
+     * guess into a recorded acquisition cost, and once written the two are
+     * indistinguishable.
+     */
+    unitCostCents?: number | null;
+  },
 ): Promise<void> {
   if (params.quantity <= 0) return;
 
-  await tx.stockTransaction.create({
+  const transaction = await tx.stockTransaction.create({
     data: {
       productId: params.productId,
       type: "STOCK_IN",
@@ -256,4 +317,365 @@ export async function recordOpeningStock(
     where: { id: params.productId },
     data: { stockQuantity: params.quantity },
   });
+
+  const costed =
+    params.unitCostCents !== null && params.unitCostCents !== undefined;
+
+  await createLot(tx, {
+    productId: params.productId,
+    stockTransactionId: transaction.id,
+    quantity: params.quantity,
+    unitCostCents: costed ? params.unitCostCents! : null,
+    costSource: costed ? "OPENING" : "UNKNOWN",
+    reference: { type: "MANUAL" },
+    receivedAt: transaction.createdAt,
+    userId: params.userId,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Valuation: lots and what they cost
+// ---------------------------------------------------------------------------
+
+/**
+ * The costing layer, and the line it does not cross.
+ *
+ * Everything below writes `StockLot` and `StockLotConsumption` rows. None of it
+ * decides whether stock may move. That judgement belongs to
+ * `applyStockMovement` above — which is unchanged, still the only writer of
+ * quantities, and still the only thing that can refuse a movement. Costing runs
+ * *after* the ledger has already accepted the move, and its failure modes are
+ * "we do not know what this cost", never "this may not happen".
+ *
+ * That separation is the whole reason an order for 15 units confirms against 10
+ * costed and 5 uncosted: quantity is available, so the sale proceeds, and the
+ * cost simply comes back partial.
+ */
+
+/** Money in, money out: the ledger stores Decimal, the engine thinks in cents. */
+function centsToDecimal(cents: number): string {
+  const sign = cents < 0 ? "-" : "";
+  const absolute = Math.abs(cents);
+  return `${sign}${Math.floor(absolute / 100)}.${String(absolute % 100).padStart(2, "0")}`;
+}
+
+export interface LotSpec {
+  productId: string;
+  /** The STOCK_IN that brought these units in. One lot per movement. */
+  stockTransactionId: string;
+  quantity: number;
+  /** Null when the cost is genuinely unknown. Never a guess. */
+  unitCostCents: number | null;
+  costSource: LotCostSource;
+  reference: StockReference;
+  /** When the goods arrived — the FIFO sort key, not necessarily now. */
+  receivedAt: Date;
+  userId: string | null;
+}
+
+/**
+ * Records what a batch of arriving stock cost.
+ *
+ * One lot per receipt line, always. Never merged with an existing lot even when
+ * the product and unit cost match exactly: two deliveries are two batches with
+ * two sets of paperwork, and an aviation parts business needs to be able to say
+ * which certificate covers which units. See the note on `Certificate` in the
+ * schema.
+ */
+export async function createLot(
+  tx: Prisma.TransactionClient,
+  spec: LotSpec,
+): Promise<{ id: string }> {
+  if (spec.quantity <= 0) {
+    throw new AppError(
+      "INTERNAL",
+      "A stock lot must record at least one unit received.",
+    );
+  }
+
+  return tx.stockLot.create({
+    data: {
+      productId: spec.productId,
+      stockTransactionId: spec.stockTransactionId,
+      quantityReceived: spec.quantity,
+      // Nothing has been drawn from it yet.
+      quantityRemaining: spec.quantity,
+      unitCost:
+        spec.unitCostCents === null ? null : centsToDecimal(spec.unitCostCents),
+      costSource: spec.costSource,
+      sourceType: spec.reference.type,
+      sourceId:
+        spec.reference.type === "MANUAL" ? null : spec.reference.id,
+      receivedAt: spec.receivedAt,
+      createdBy: spec.userId,
+    },
+    select: { id: true },
+  });
+}
+
+export interface Allocation {
+  lotId: string;
+  quantity: number;
+  unitCostCents: number | null;
+}
+
+export interface AllocationResult {
+  /** How many units were drawn from lots whose cost is known. */
+  costedQuantity: number;
+  /** What those units cost, in cents. Zero when nothing was costed. */
+  costTotalCents: number;
+  /** Units drawn from lots with no known cost. */
+  uncostedQuantity: number;
+  allocations: Allocation[];
+}
+
+/**
+ * Draws `quantity` units from a product's lots, oldest first, and records what
+ * they cost.
+ *
+ * FIFO by receipt date, with the lot id breaking ties so the order is total —
+ * two lots booked in the same millisecond must still be consumed in a
+ * deterministic sequence, or two concurrent orders could disagree about which
+ * came first.
+ *
+ * The allocation order is **never** adjusted to prefer lots that happen to have
+ * a known cost. Chasing a cost figure would break both FIFO and the
+ * correspondence between a lot and the paperwork covering it. If the oldest
+ * units are uncosted then an uncosted draw is the truthful answer, and it
+ * travels back to the caller as `uncostedQuantity` rather than being smoothed
+ * away.
+ *
+ * The product row must already be locked by the caller. That lock is what makes
+ * the `FOR UPDATE` below sufficient: every route to a product's lots passes
+ * through its product row first, so no second transaction can be part-way
+ * through this loop on the same product, and no new lock ordering is
+ * introduced.
+ */
+export async function allocateFifo(
+  tx: Prisma.TransactionClient,
+  params: {
+    productId: string;
+    quantity: number;
+    /** The STOCK_OUT these units left on. */
+    stockTransactionId: string;
+  },
+): Promise<AllocationResult> {
+  const lots = await tx.$queryRaw<
+    { id: string; quantity_remaining: number; unit_cost: string | null }[]
+  >`
+    SELECT id, quantity_remaining, unit_cost::text AS unit_cost
+    FROM stock_lots
+    WHERE product_id = ${params.productId}
+      AND quantity_remaining > 0
+    ORDER BY received_at ASC, id ASC
+    FOR UPDATE
+  `;
+
+  const allocations: Allocation[] = [];
+  let outstanding = params.quantity;
+
+  for (const lot of lots) {
+    if (outstanding <= 0) break;
+
+    const take = Math.min(outstanding, lot.quantity_remaining);
+    if (take <= 0) continue;
+
+    const unitCostCents =
+      lot.unit_cost === null ? null : Math.round(Number(lot.unit_cost) * 100);
+
+    await tx.stockLot.update({
+      where: { id: lot.id },
+      data: { quantityRemaining: { decrement: take } },
+    });
+
+    await tx.stockLotConsumption.create({
+      data: {
+        lotId: lot.id,
+        stockTransactionId: params.stockTransactionId,
+        // Positive: units leaving the lot.
+        quantity: take,
+        unitCost: unitCostCents === null ? null : centsToDecimal(unitCostCents),
+        totalCost:
+          unitCostCents === null ? null : centsToDecimal(unitCostCents * take),
+      },
+    });
+
+    allocations.push({ lotId: lot.id, quantity: take, unitCostCents });
+    outstanding -= take;
+  }
+
+  /*
+   * Lots that do not cover the movement mean the invariant
+   * SUM(quantityRemaining) = stockQuantity has already been broken somewhere
+   * upstream — the ledger let a movement through that the valuation layer
+   * cannot account for. That is a bug in this system, not something the
+   * operator did wrong, so it fails loudly rather than silently costing part
+   * of a sale and calling it complete.
+   */
+  if (outstanding > 0) {
+    throw new AppError(
+      "INTERNAL",
+      "Stock lots do not cover this movement. The valuation layer is out of step with the stock ledger.",
+    );
+  }
+
+  let costedQuantity = 0;
+  let costTotalCents = 0;
+  let uncostedQuantity = 0;
+
+  for (const allocation of allocations) {
+    if (allocation.unitCostCents === null) {
+      uncostedQuantity += allocation.quantity;
+    } else {
+      costedQuantity += allocation.quantity;
+      costTotalCents += allocation.unitCostCents * allocation.quantity;
+    }
+  }
+
+  return { costedQuantity, costTotalCents, uncostedQuantity, allocations };
+}
+
+/**
+ * Puts units back where they came from.
+ *
+ * Reads the draws made against a set of movements — an order's STOCK_OUT rows,
+ * a purchase's STOCK_IN — nets them (so an already-reversed portion is not
+ * returned twice), and writes the negative consumption rows that restore the
+ * balance.
+ *
+ * Units return to **their original lot at their original cost**, never into a
+ * new lot at today's price. That is what keeps a cancellation from quietly
+ * revaluing stock: cancel an order placed when the part cost ₹8,000 and the
+ * units go back to the ₹8,000 batch, even if the most recent delivery was
+ * ₹9,500.
+ *
+ * The netting mirrors what `cancelOrder` already does at the ledger level, for
+ * the same reason: a partially reversed document must not be over-restored.
+ */
+export async function returnToLots(
+  tx: Prisma.TransactionClient,
+  params: {
+    /** The movements whose draws are being undone. */
+    sourceTransactionIds: readonly string[];
+    /** The REVERSAL now putting the units back. */
+    reversalTransactionId: string;
+    /** Limits the return to one product, for callers reversing per product. */
+    productId?: string;
+  },
+): Promise<{ returned: number }> {
+  if (params.sourceTransactionIds.length === 0) return { returned: 0 };
+
+  const rows = await tx.stockLotConsumption.findMany({
+    where: {
+      stockTransactionId: { in: [...params.sourceTransactionIds] },
+      ...(params.productId ? { lot: { productId: params.productId } } : {}),
+    },
+    select: { lotId: true, quantity: true, unitCost: true },
+  });
+
+  // Net per lot: draws minus anything already handed back.
+  const outstanding = new Map<string, number>();
+  const rates = new Map<string, string | null>();
+
+  for (const row of rows) {
+    outstanding.set(
+      row.lotId,
+      (outstanding.get(row.lotId) ?? 0) + row.quantity,
+    );
+    if (!rates.has(row.lotId)) {
+      rates.set(row.lotId, row.unitCost === null ? null : row.unitCost.toString());
+    }
+  }
+
+  let returned = 0;
+
+  // Sorted, so a reversal touching several lots takes them in a fixed order.
+  for (const lotId of [...outstanding.keys()].sort()) {
+    const quantity = outstanding.get(lotId)!;
+    if (quantity <= 0) continue;
+
+    const rate = rates.get(lotId) ?? null;
+    const unitCostCents = rate === null ? null : Math.round(Number(rate) * 100);
+
+    await tx.stockLot.update({
+      where: { id: lotId },
+      data: { quantityRemaining: { increment: quantity } },
+    });
+
+    await tx.stockLotConsumption.create({
+      data: {
+        lotId,
+        stockTransactionId: params.reversalTransactionId,
+        // Negative: units coming back into the lot.
+        quantity: -quantity,
+        unitCost: unitCostCents === null ? null : centsToDecimal(unitCostCents),
+        totalCost:
+          unitCostCents === null
+            ? null
+            : centsToDecimal(-unitCostCents * quantity),
+      },
+    });
+
+    returned += quantity;
+  }
+
+  return { returned };
+}
+
+/**
+ * Empties the lots a purchase created, when that purchase is cancelled.
+ *
+ * Distinct from `returnToLots` because it moves the other way: a cancelled
+ * delivery takes stock *off* the shelf, so its lots are drawn down to zero
+ * rather than topped back up.
+ *
+ * The lot rows are never deleted. Zeroing them through a consumption row keeps
+ * the provenance readable — the batch existed, arrived at a price, and was sent
+ * back — and keeps the append-only shape the ledger has. Deleting would erase
+ * the fact that it ever happened.
+ *
+ * Callers must have already established that every lot is intact; see
+ * `assertPurchaseLotsIntact`.
+ */
+export async function drainPurchaseLots(
+  tx: Prisma.TransactionClient,
+  params: {
+    purchaseId: string;
+    reversalTransactionId: string;
+    productId: string;
+  },
+): Promise<void> {
+  const lots = await tx.stockLot.findMany({
+    where: {
+      sourceType: "PURCHASE",
+      sourceId: params.purchaseId,
+      productId: params.productId,
+      quantityRemaining: { gt: 0 },
+    },
+    select: { id: true, quantityRemaining: true, unitCost: true },
+    orderBy: { id: "asc" },
+  });
+
+  for (const lot of lots) {
+    const unitCostCents =
+      lot.unitCost === null ? null : Math.round(Number(lot.unitCost) * 100);
+
+    await tx.stockLot.update({
+      where: { id: lot.id },
+      data: { quantityRemaining: 0 },
+    });
+
+    await tx.stockLotConsumption.create({
+      data: {
+        lotId: lot.id,
+        stockTransactionId: params.reversalTransactionId,
+        quantity: lot.quantityRemaining,
+        unitCost: unitCostCents === null ? null : centsToDecimal(unitCostCents),
+        totalCost:
+          unitCostCents === null
+            ? null
+            : centsToDecimal(unitCostCents * lot.quantityRemaining),
+      },
+    });
+  }
 }

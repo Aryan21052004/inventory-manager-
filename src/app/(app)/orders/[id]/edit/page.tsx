@@ -88,7 +88,13 @@ export default async function EditOrderPage({
    * someone decides what to do with it.
    */
   const [customers, searchResults, lineProducts] = await Promise.all([
-    loadCustomers(),
+    /*
+     * The order's own customer is requested by id as well as the active ones,
+     * so an order raised before they were archived still shows who it is for.
+     * Without that they would drop out of the picker and the form would look
+     * like it had no customer selected.
+     */
+    loadCustomers(order.customerId),
     searchOrderProducts("", 20),
     loadOrderProducts(order.lines.map((line) => line.productId)),
   ]);

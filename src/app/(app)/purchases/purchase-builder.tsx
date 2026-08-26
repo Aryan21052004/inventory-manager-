@@ -78,7 +78,7 @@ export interface ProductOption {
   name: string;
   sku: string;
   /** The catalogue cost — a default for the line, not a constraint on it. */
-  costPrice: string;
+  standardCost: string | null;
   stockQuantity: number;
   minimumStock: number;
   stockStatus: StockStatus;
@@ -161,9 +161,14 @@ function PurchaseBuilder({
 
     setLines((current) => [
       ...current,
-      // Seeded from the catalogue cost, which is the usual figure — and the one
-      // most likely to be right when nobody edits it.
-      { product, quantity: 1, unitCost: product.costPrice },
+      /*
+       * Seeded from the planning figure when there is one, and left blank when
+       * there is not. Blank rather than "0.00" on purpose: a zero that nobody
+       * meant is a lot recorded as free stock, and the whole point of this
+       * screen is that what gets typed here becomes the acquisition cost of the
+       * batch. The operator has to enter what the supplier actually charged.
+       */
+      { product, quantity: 1, unitCost: product.standardCost ?? "" },
     ]);
   }
 
@@ -354,7 +359,9 @@ function PurchaseBuilder({
                             {formatNumber(option.stockQuantity)}
                           </TableCell>
                           <TableCell className="tabular text-right font-medium">
-                            {formatCurrency(option.costPrice)}
+                            {option.standardCost === null
+                              ? "No standard cost"
+                              : formatCurrency(option.standardCost)}
                           </TableCell>
                           <TableCell className="text-right">
                             <Button

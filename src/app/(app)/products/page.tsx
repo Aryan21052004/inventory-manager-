@@ -92,7 +92,11 @@ export default async function ProductsPage({
           <StatCard
             label="Stock value"
             value={formatCurrency(stats.data.stockValue)}
-            hint="Valued at unit cost"
+            hint={
+              stats.data.uncostedUnits > 0
+                ? `Excludes ${formatNumber(stats.data.uncostedUnits)} ${stats.data.uncostedUnits === 1 ? "unit" : "units"} of unknown cost`
+                : "Valued at actual acquisition cost"
+            }
             icon={Wallet}
             tone="success"
           />

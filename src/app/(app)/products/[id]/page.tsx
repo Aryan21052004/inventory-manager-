@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import {
   ArrowLeft,
   ArrowLeftRight,
+  Layers,
   ShoppingCart,
   Truck,
   Warehouse,
@@ -132,7 +133,7 @@ export default async function ProductDetailPage({
                   sku: product.sku,
                   description: product.description,
                   category: product.category,
-                  costPrice: product.costPrice,
+                  standardCost: product.standardCost,
                   sellingPrice: product.sellingPrice,
                   stockQuantity: product.stockQuantity,
                   minimumStock: product.minimumStock,
@@ -212,10 +213,21 @@ export default async function ProductDetailPage({
                 <span className="text-sm text-muted-foreground">Unassigned</span>
               )}
             </DetailRow>
-            <DetailRow label="Cost price">
-              <span className="tabular text-sm font-medium">
-                {formatCurrency(product.costPrice)}
-              </span>
+            <DetailRow label="Standard cost (reference)">
+              {product.standardCost === null ? (
+                <span className="text-sm text-muted-foreground">Not set</span>
+              ) : (
+                <span className="tabular text-sm font-medium text-muted-foreground">
+                  {formatCurrency(product.standardCost)}
+                </span>
+              )}
+            </DetailRow>
+            <DetailRow label="Average cost on hand">
+              <AverageCost
+                value={product.stockValue}
+                costedUnits={product.costedUnits}
+                uncostedUnits={product.uncostedUnits}
+              />
             </DetailRow>
             <DetailRow label="Selling price">
               <span className="tabular text-sm font-medium">
@@ -223,7 +235,12 @@ export default async function ProductDetailPage({
               </span>
             </DetailRow>
             <DetailRow label="Margin">
-              <Margin cost={product.costPrice} price={product.sellingPrice} />
+              <Margin
+                stockValue={product.stockValue}
+                costedUnits={product.costedUnits}
+                uncostedUnits={product.uncostedUnits}
+                price={product.sellingPrice}
+              />
             </DetailRow>
             <DetailRow label="Status">
               <Badge
@@ -246,6 +263,96 @@ export default async function ProductDetailPage({
                 {formatDateTime(product.updatedAt)}
               </span>
             </DetailRow>
+          </CardContent>
+        </Card>
+
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Stock on hand by batch</CardTitle>
+            <CardDescription>
+              What each batch of this stock cost, oldest first — the order a
+              sale will consume them in.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-0">
+            {product.lots.length === 0 ? (
+              <EmptyState
+                icon={Layers}
+                title="No stock on hand"
+                description="Batches appear here once a purchase is received or opening stock is recorded."
+              />
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Received</TableHead>
+                    <TableHead>Source</TableHead>
+                    <TableHead className="text-right">Unit cost</TableHead>
+                    <TableHead className="text-right">Remaining</TableHead>
+                    <TableHead className="text-right">Value</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {product.lots.map((lot) => (
+                    <TableRow key={lot.id}>
+                      <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+                        {formatDate(lot.receivedAt)}
+                      </TableCell>
+                      <TableCell>
+                        {lot.purchaseNumber ? (
+                          <Link
+                            href={`/purchases/${lot.sourceId}`}
+                            className="font-mono text-sm underline-offset-4 hover:underline"
+                          >
+                            {lot.purchaseNumber}
+                          </Link>
+                        ) : (
+                          <Badge variant="outline">
+                            {lot.costSource === "OPENING"
+                              ? "Opening stock"
+                              : lot.costSource === "ADJUSTMENT"
+                                ? "Adjustment"
+                                : "Pre-costing stock"}
+                          </Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className="tabular text-right text-sm">
+                        {lot.unitCost === null ? (
+                          <span className="text-muted-foreground">Unknown</span>
+                        ) : (
+                          formatCurrency(lot.unitCost)
+                        )}
+                      </TableCell>
+                      <TableCell className="tabular text-right text-sm">
+                        {formatNumber(lot.quantityRemaining)}
+                        <span className="ml-1 text-xs text-muted-foreground">
+                          / {formatNumber(lot.quantityReceived)}
+                        </span>
+                      </TableCell>
+                      <TableCell className="tabular text-right text-sm">
+                        {lot.unitCost === null ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          formatCurrency(
+                            Number(lot.unitCost) * lot.quantityRemaining,
+                          )
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+            {product.uncostedUnits > 0 ? (
+              <p className="border-t px-6 py-3 text-xs text-muted-foreground">
+                {formatNumber(product.uncostedUnits)}{" "}
+                {product.uncostedUnits === 1 ? "unit has" : "units have"} no
+                recorded acquisition cost, so {product.uncostedUnits === 1 ? "it is" : "they are"}{" "}
+                excluded from the value above. Selling{" "}
+                {product.uncostedUnits === 1 ? "it" : "them"} is allowed; the
+                margin on those units simply cannot be calculated.
+              </p>
+            ) : null}
           </CardContent>
         </Card>
 
@@ -463,10 +570,14 @@ function StockSummary({ product }: { product: ProductDetail }) {
                 Value at cost
               </p>
               <p className="tabular mt-1 text-3xl font-semibold tracking-tight">
-                {formatCurrency(
-                  product.stockQuantity * Number(product.costPrice),
-                )}
+                {formatCurrency(product.stockValue)}
               </p>
+              {product.uncostedUnits > 0 ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {formatNumber(product.costedUnits)} of{" "}
+                  {formatNumber(product.stockQuantity)} units costed
+                </p>
+              ) : null}
             </div>
           </div>
 
@@ -527,23 +638,105 @@ function DetailRow({
  * Margin as both cash and a percentage. A negative one is worth pointing at:
  * it means the product is priced below what it costs.
  */
-function Margin({ cost, price }: { cost: string; price: string }) {
-  const costValue = Number(cost);
+/**
+ * The weighted average of what the stock actually on the shelf cost.
+ *
+ * A summary of the lots, not a stored figure and not an input to any COGS
+ * calculation — a sale is costed against the batches it consumes, not against
+ * this. It is here because "what is my stock worth per unit right now" is a
+ * fair question, and answering it from the lots is the only way to answer it
+ * truthfully once the same part has been bought at several prices.
+ *
+ * Covers the costed units only, and says so whenever some units are not.
+ */
+function AverageCost({
+  value,
+  costedUnits,
+  uncostedUnits,
+}: {
+  value: string;
+  costedUnits: number;
+  uncostedUnits: number;
+}) {
+  if (costedUnits === 0) {
+    return (
+      <span className="text-sm text-muted-foreground">
+        {uncostedUnits > 0 ? "Cost unknown" : "No stock on hand"}
+      </span>
+    );
+  }
+
+  const average = Number(value) / costedUnits;
+
+  return (
+    <span className="tabular text-sm font-medium">
+      {formatCurrency(average)}
+      {uncostedUnits > 0 ? (
+        <span className="ml-1.5 text-xs text-muted-foreground">
+          (over {formatNumber(costedUnits)} costed{" "}
+          {costedUnits === 1 ? "unit" : "units"})
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * Margin against what the stock on hand actually cost.
+ *
+ * This used to be `sellingPrice - costPrice`, a catalogue figure that described
+ * no real transaction: the cost half was whatever someone last typed into the
+ * product form, unrelated to what any unit in the warehouse was bought for.
+ * It is now the selling price against the average cost of the units actually
+ * held, and it declines to produce a number at all when none of them have a
+ * known cost — an unqualified margin over unpriced stock is exactly the kind of
+ * confident wrong answer this redesign set out to remove.
+ */
+function Margin({
+  stockValue,
+  costedUnits,
+  uncostedUnits,
+  price,
+}: {
+  stockValue: string;
+  costedUnits: number;
+  uncostedUnits: number;
+  price: string;
+}) {
+  if (costedUnits === 0) {
+    return (
+      <span className="text-sm text-muted-foreground">
+        {uncostedUnits > 0
+          ? "Cannot be calculated — acquisition cost unknown"
+          : "No stock on hand"}
+      </span>
+    );
+  }
+
+  const averageCost = Number(stockValue) / costedUnits;
   const priceValue = Number(price);
-  const difference = priceValue - costValue;
+  const difference = priceValue - averageCost;
   const percentage = priceValue === 0 ? 0 : (difference / priceValue) * 100;
 
   return (
-    <span
-      className={cn(
-        "tabular text-sm font-medium",
-        difference < 0 ? "text-destructive" : "text-foreground",
-      )}
-    >
-      {formatCurrency(difference)}
-      <span className="ml-1.5 text-xs text-muted-foreground">
-        ({percentage.toFixed(1)}%)
+    <span className="flex flex-col items-end gap-0.5">
+      <span
+        className={cn(
+          "tabular text-sm font-medium",
+          difference < 0 ? "text-destructive" : "text-foreground",
+        )}
+      >
+        {formatCurrency(difference)}
+        <span className="ml-1.5 text-xs text-muted-foreground">
+          ({percentage.toFixed(1)}%)
+        </span>
       </span>
+      {uncostedUnits > 0 ? (
+        <span className="text-xs text-muted-foreground">
+          Based on {formatNumber(costedUnits)} costed{" "}
+          {costedUnits === 1 ? "unit" : "units"}
+        </span>
+      ) : null}
     </span>
   );
 }

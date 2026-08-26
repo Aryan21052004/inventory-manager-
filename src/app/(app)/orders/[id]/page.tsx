@@ -38,8 +38,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatCurrency, formatDateTime, formatNumber } from "@/lib/format";
-import { isEditable } from "@/lib/order-status";
-import { getOrderDetail, type OrderDetail } from "@/server/orders";
+import { isEditable, type OrderStatus } from "@/lib/order-status";
+import { coverageNote, marginOf, totalCoverage } from "@/lib/cost-coverage";
+import {
+  getOrderDetail,
+  type OrderDetail,
+  type OrderDetailLine,
+} from "@/server/orders";
 import { cn } from "@/lib/utils";
 
 /**
@@ -164,6 +169,9 @@ export default async function OrderDetailPage({
                   </TableHead>
                   <TableHead className="text-right">Quantity</TableHead>
                   <TableHead className="text-right">Unit price</TableHead>
+                  <TableHead className="hidden text-right md:table-cell">
+                    Cost
+                  </TableHead>
                   <TableHead className="text-right">Line total</TableHead>
                 </TableRow>
               </TableHeader>
@@ -207,6 +215,9 @@ export default async function OrderDetailPage({
                     <TableCell className="tabular text-right">
                       {formatCurrency(line.unitPrice)}
                     </TableCell>
+                    <TableCell className="tabular hidden text-right text-sm md:table-cell">
+                      <LineCost line={line} />
+                    </TableCell>
                     <TableCell className="tabular text-right font-medium">
                       {formatCurrency(line.total)}
                     </TableCell>
@@ -239,6 +250,7 @@ export default async function OrderDetailPage({
                   {formatCurrency(order.total)}
                 </dd>
               </div>
+              <OrderMargin lines={order.lines} status={order.status} />
             </dl>
           </CardContent>
         </Card>
@@ -249,7 +261,12 @@ export default async function OrderDetailPage({
               <CardTitle>Customer</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
-              <p className="text-sm font-medium">{order.customerName}</p>
+              <Link
+                href={`/customers/${order.customerId}`}
+                className="text-sm font-medium hover:text-primary hover:underline"
+              >
+                {order.customerName}
+              </Link>
 
               {order.customerEmail ? (
                 <p className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -455,6 +472,132 @@ function Timeline({ order }: { order: OrderDetail }) {
             {label} {formatDateTime(at)}
           </Badge>
         ))}
+    </div>
+  );
+}
+
+/**
+ * The cost of one line, with its coverage when the two differ.
+ *
+ * Three states kept apart on purpose. An unconfirmed order has no cost of sale
+ * at all — the stock has not left, so there is nothing to cost. A line drawn
+ * entirely from stock nobody priced shows "Unknown" rather than a dash that
+ * could be read as free. And a line straddling both shows what it can vouch
+ * for, with the shortfall named underneath.
+ */
+function LineCost({ line }: { line: OrderDetailLine }) {
+  if (line.costTotal === null) {
+    return <span className="text-muted-foreground">—</span>;
+  }
+
+  const partial = line.costedQuantity < line.quantity;
+
+  return (
+    <span className="inline-flex flex-col items-end">
+      <span>{formatCurrency(line.costTotal)}</span>
+      {partial ? (
+        <span className="text-xs text-muted-foreground">
+          {formatNumber(line.costedQuantity)} of {formatNumber(line.quantity)}{" "}
+          costed
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * Gross margin on the order, over the units whose cost is known.
+ *
+ * Renders nothing at all before confirmation: an order that has not moved stock
+ * has no cost of sale, and a margin row reading "100%" against a null cost
+ * would be worse than absent.
+ *
+ * The arithmetic deliberately apportions revenue to the costed units rather
+ * than setting the whole order's revenue against a partial cost. That second
+ * form is the tempting one — total minus known cost — and it silently reports
+ * uncosted stock as pure profit. Where coverage is incomplete the shortfall is
+ * spelled out underneath in units, so the figure is never mistaken for the
+ * whole picture.
+ */
+function OrderMargin({
+  lines,
+  status,
+}: {
+  lines: OrderDetailLine[];
+  status: OrderStatus;
+}) {
+  const results = lines.map((line) =>
+    marginOf({
+      quantity: line.quantity,
+      unitPrice: Number(line.unitPrice),
+      costTotal: line.costTotal === null ? null : Number(line.costTotal),
+      costedQuantity: line.costedQuantity,
+    }),
+  );
+
+  const coverage = totalCoverage(results);
+  if (coverage.costedQuantity === 0 && coverage.quantity === 0) return null;
+
+  const cost = results.reduce((sum, result) => sum + result.cost, 0);
+  const revenue = results.reduce((sum, result) => sum + result.revenue, 0);
+  const margin = revenue - cost;
+
+  /*
+   * Nothing costed, and the two reasons for that are not the same thing.
+   *
+   * An order that has not moved stock has no cost of sale yet — it will get one
+   * when it is confirmed. An order that *has* moved stock but drew entirely
+   * from batches nobody priced will never get one, and saying "not available
+   * until confirmed" about an order sitting in COMPLETED would be flatly
+   * untrue. Every order placed before lot costing existed is in exactly that
+   * second state, so it is the common case rather than an edge one.
+   *
+   * Neither is a margin of zero, which is the one answer this must never give.
+   */
+  if (coverage.costedQuantity === 0) {
+    const moved = status === "CONFIRMED" || status === "COMPLETED";
+
+    return (
+      <div className="flex items-center justify-between gap-6 border-t border-border pt-3 text-xs text-muted-foreground">
+        <dt>Gross margin</dt>
+        <dd className="text-right">
+          {lines.length === 0
+            ? "—"
+            : moved
+              ? "Not available — the stock this order consumed has no recorded acquisition cost"
+              : "Not available until the order is confirmed"}
+        </dd>
+      </div>
+    );
+  }
+
+  const note = coverageNote(coverage);
+
+  return (
+    <div className="flex flex-col gap-1 border-t border-border pt-3">
+      <div className="flex items-center justify-between">
+        <dt className="text-muted-foreground">Cost of goods sold</dt>
+        <dd className="tabular font-medium">{formatCurrency(cost)}</dd>
+      </div>
+      <div className="flex items-center justify-between">
+        <dt className="text-muted-foreground">Gross margin</dt>
+        <dd
+          className={cn(
+            "tabular font-medium",
+            margin < 0 ? "text-destructive" : "text-success",
+          )}
+        >
+          {formatCurrency(margin)}
+          {revenue > 0 ? (
+            <span className="ml-1.5 text-xs text-muted-foreground">
+              ({((margin / revenue) * 100).toFixed(1)}%)
+            </span>
+          ) : null}
+        </dd>
+      </div>
+      {note ? (
+        <p className="pt-1 text-xs text-muted-foreground">{note}</p>
+      ) : null}
     </div>
   );
 }

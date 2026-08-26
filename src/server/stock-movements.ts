@@ -47,6 +47,33 @@ export interface MovementListItem {
   referenceLabel: string | null;
   note: string | null;
   createdByName: string | null;
+
+  /**
+   * What this movement cost, where a cost is known.
+   *
+   * Inflows carry the price the batch was booked in at; outflows carry the sum
+   * of what they drew from the batches they consumed. Null means the movement
+   * touched stock whose acquisition cost was never established — not zero, and
+   * not a figure inferred from the catalogue.
+   */
+  costTotal: string | null;
+  /**
+   * How many of `change` the cost covers. A movement can be partly costed when
+   * FIFO draws across both costed and uncosted batches, and the coverage has to
+   * travel with the money or the number reads as complete when it is not.
+   */
+  costedQuantity: number;
+  /** The batches this movement created or drew from. */
+  lots: MovementLot[];
+}
+
+/** One batch touched by a movement. */
+export interface MovementLot {
+  lotId: string;
+  quantity: number;
+  unitCost: string | null;
+  /** The purchase the batch arrived on, when there was one. */
+  purchaseNumber: string | null;
 }
 
 export interface MovementListPage {
@@ -197,9 +224,62 @@ export async function listMovements(
           productId: true,
           product: { select: { name: true, sku: true } },
           createdByUser: { select: { name: true } },
+          /*
+           * The valuation side of the movement. An inflow owns exactly one lot
+           * (`originatedLot`); an outflow points at every batch it drew from.
+           * Both are selected here rather than fetched per row — a ledger page
+           * is fifty rows, and fifty round trips to decorate them would be a
+           * poor trade for a column.
+           */
+          originatedLot: {
+            select: {
+              id: true,
+              unitCost: true,
+              quantityReceived: true,
+              sourceType: true,
+              sourceId: true,
+            },
+          },
+          lotConsumptions: {
+            select: {
+              lotId: true,
+              quantity: true,
+              unitCost: true,
+              lot: { select: { sourceType: true, sourceId: true } },
+            },
+          },
         },
       }),
     ]);
+
+    /*
+     * Purchase numbers for every batch on the page, in one query. The lot
+     * carries a purchase id; the table wants something a human recognises.
+     */
+    const purchaseIds = new Set<string>();
+
+    for (const row of rows) {
+      if (row.originatedLot?.sourceType === "PURCHASE" && row.originatedLot.sourceId) {
+        purchaseIds.add(row.originatedLot.sourceId);
+      }
+      for (const consumption of row.lotConsumptions) {
+        if (consumption.lot.sourceType === "PURCHASE" && consumption.lot.sourceId) {
+          purchaseIds.add(consumption.lot.sourceId);
+        }
+      }
+    }
+
+    const purchaseNumbers = new Map<string, string>();
+
+    if (purchaseIds.size > 0) {
+      const purchases = await prisma.purchase.findMany({
+        where: { id: { in: [...purchaseIds] } },
+        select: { id: true, purchaseNumber: true },
+      });
+      for (const purchase of purchases) {
+        purchaseNumbers.set(purchase.id, purchase.purchaseNumber);
+      }
+    }
 
     return {
       ok: true,
@@ -225,6 +305,7 @@ export async function listMovements(
           referenceLabel: referenceLabel(row.referenceType),
           note: row.note,
           createdByName: row.createdByUser?.name ?? null,
+          ...movementCost(row, purchaseNumbers),
         })),
         total,
         page: params.page,
@@ -235,6 +316,94 @@ export async function listMovements(
   } catch (error) {
     return { ok: false, error: toSafeError(error, "listMovements") };
   }
+}
+
+/**
+ * The cost of one movement, and what it covers.
+ *
+ * An inflow is costed by the batch it created; an outflow by the batches it
+ * consumed, summed. Integer cents throughout, for the same reason the rest of
+ * the system uses them — adding a column of floats loses money.
+ *
+ * A movement that drew across both costed and uncosted batches comes back
+ * partly covered rather than fully costed at whatever happened to be known, so
+ * the table can say "3 of 8 units costed" instead of quietly implying eight.
+ */
+function movementCost(
+  row: {
+    quantity: number;
+    originatedLot: {
+      id: string;
+      unitCost: Prisma.Decimal | null;
+      quantityReceived: number;
+      sourceType: StockReferenceType;
+      sourceId: string | null;
+    } | null;
+    lotConsumptions: {
+      lotId: string;
+      quantity: number;
+      unitCost: Prisma.Decimal | null;
+      lot: { sourceType: StockReferenceType; sourceId: string | null };
+    }[];
+  },
+  purchaseNumbers: Map<string, string>,
+): { costTotal: string | null; costedQuantity: number; lots: MovementLot[] } {
+  const numberFor = (
+    sourceType: StockReferenceType,
+    sourceId: string | null,
+  ) =>
+    sourceType === "PURCHASE" && sourceId
+      ? (purchaseNumbers.get(sourceId) ?? null)
+      : null;
+
+  if (row.originatedLot) {
+    const lot = row.originatedLot;
+
+    return {
+      costTotal:
+        lot.unitCost === null
+          ? null
+          : (Number(lot.unitCost) * row.quantity).toFixed(2),
+      costedQuantity: lot.unitCost === null ? 0 : row.quantity,
+      lots: [
+        {
+          lotId: lot.id,
+          quantity: row.quantity,
+          unitCost: lot.unitCost?.toString() ?? null,
+          purchaseNumber: numberFor(lot.sourceType, lot.sourceId),
+        },
+      ],
+    };
+  }
+
+  if (row.lotConsumptions.length === 0) {
+    return { costTotal: null, costedQuantity: 0, lots: [] };
+  }
+
+  let cents = 0;
+  let costedQuantity = 0;
+
+  for (const consumption of row.lotConsumptions) {
+    // Signed, so a reversal's negative rows net against the draws they undo.
+    const quantity = Math.abs(consumption.quantity);
+    if (consumption.unitCost === null) continue;
+    cents += Math.round(Number(consumption.unitCost) * 100) * quantity;
+    costedQuantity += quantity;
+  }
+
+  return {
+    costTotal: costedQuantity === 0 ? null : (cents / 100).toFixed(2),
+    costedQuantity,
+    lots: row.lotConsumptions.map((consumption) => ({
+      lotId: consumption.lotId,
+      quantity: Math.abs(consumption.quantity),
+      unitCost: consumption.unitCost?.toString() ?? null,
+      purchaseNumber: numberFor(
+        consumption.lot.sourceType,
+        consumption.lot.sourceId,
+      ),
+    })),
+  };
 }
 
 function referenceLabel(type: StockReferenceType): string | null {

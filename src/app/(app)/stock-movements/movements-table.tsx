@@ -19,7 +19,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatDateTime, formatDelta, formatNumber } from "@/lib/format";
+import {
+  formatCurrency,
+  formatDateTime,
+  formatDelta,
+  formatNumber,
+} from "@/lib/format";
 import {
   hasActiveMovementFilters,
   MOVEMENT_TYPE_LABELS,
@@ -28,7 +33,10 @@ import {
   type MovementListParams,
   type MovementSortKey,
 } from "@/lib/stock-movement-query";
-import { listMovements } from "@/server/stock-movements";
+import {
+  listMovements,
+  type MovementListItem,
+} from "@/server/stock-movements";
 import { cn } from "@/lib/utils";
 
 /**
@@ -88,6 +96,9 @@ async function MovementsTable({ params }: { params: MovementListParams }) {
               label="Balance"
               align="right"
             />
+            <TableHead className="hidden text-right md:table-cell">
+              Cost
+            </TableHead>
             <TableHead>Reference</TableHead>
             <TableHead className="hidden lg:table-cell">By</TableHead>
             <TableHead className="hidden xl:table-cell">Reason</TableHead>
@@ -129,6 +140,10 @@ async function MovementsTable({ params }: { params: MovementListParams }) {
 
               <TableCell className="tabular text-right">
                 {formatNumber(movement.newStock)}
+              </TableCell>
+
+              <TableCell className="tabular hidden text-right text-sm md:table-cell">
+                <MovementCost movement={movement} />
               </TableCell>
 
               <TableCell>
@@ -220,6 +235,37 @@ function SortableHead({
         <Icon className="size-3.5" aria-hidden />
       </Link>
     </TableHead>
+  );
+}
+
+/**
+ * What a movement cost, and how much of it that figure speaks for.
+ *
+ * Three distinct states, and keeping them distinct is the point. A known cost
+ * renders as money. A movement across stock that was never priced renders as
+ * "Unknown" — never as a dash that reads like zero, and never as a figure
+ * borrowed from the catalogue. And a movement that drew from both kinds shows
+ * the money it can vouch for with its coverage underneath, so nobody reads a
+ * partial total as a complete one.
+ */
+function MovementCost({ movement }: { movement: MovementListItem }) {
+  const units = Math.abs(movement.change);
+
+  if (movement.costTotal === null) {
+    return <span className="text-muted-foreground">Unknown</span>;
+  }
+
+  const partial = movement.costedQuantity < units;
+
+  return (
+    <span className="inline-flex flex-col items-end">
+      <span>{formatCurrency(movement.costTotal)}</span>
+      {partial ? (
+        <span className="text-xs text-muted-foreground">
+          {formatNumber(movement.costedQuantity)} of {formatNumber(units)} costed
+        </span>
+      ) : null}
+    </span>
   );
 }
 

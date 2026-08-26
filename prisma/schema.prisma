@@ -43,6 +43,19 @@ enum ProductStatus {
   DISCONTINUED
 }
 
+/// Whether a customer is still traded with. There is no third state on
+/// purpose: unlike a catalogue item, which can be paused or retired for
+/// distinct reasons, a customer is either someone new orders may be raised for
+/// or someone whose record is kept only for the history attached to it.
+///
+/// This is what `Order.customerId`'s Restrict deletion rule assumes exists — a
+/// customer with orders can never be deleted, so there has to be a way to take
+/// them out of circulation without destroying what they bought.
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+}
+
 /// Sales order lifecycle.
 ///
 /// CONFIRMED is the only status that moves stock: it is the point the goods are
@@ -96,6 +109,25 @@ enum StockReferenceType {
   MANUAL
 }
 
+/// Where a lot's unit cost came from, which is a different question from
+/// whether there is one. PURCHASE is the case that matters — a supplier
+/// invoice line, the only cost this system treats as proven. OPENING and
+/// ADJUSTMENT are costs an operator asserted for stock that arrived without a
+/// purchase behind it, and either may legitimately have no cost at all.
+///
+/// UNKNOWN is the honest answer, not a failure: stock that predates lot
+/// tracking, or whose paperwork cannot be reconstructed. Such a lot carries a
+/// null cost and stays null. Nothing in this system is permitted to fill it in
+/// from a catalogue figure or an average — a guessed cost is indistinguishable
+/// from a real one once written, and that is precisely the confusion the whole
+/// costing layer exists to prevent.
+enum LotCostSource {
+  PURCHASE
+  OPENING
+  ADJUSTMENT
+  UNKNOWN
+}
+
 // ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
@@ -133,23 +165,37 @@ model User {
   certificates      Certificate[]
   ordersCreated     Order[]            @relation("OrderCreatedBy")
   purchasesCreated  Purchase[]         @relation("PurchaseCreatedBy")
+  stockLots         StockLot[]
 
   @@index([role])
   @@map("users")
 }
 
 model Customer {
-  id        String   @id @default(cuid())
-  name      String
-  phone     String?
-  email     String?  @unique
-  address   String?
+  id      String  @id @default(cuid())
+  name    String
+  phone   String?
+  address String?
+
+  /// Optional, because a walk-in buyer may not give one — but unique when
+  /// present, so the same address cannot end up on two records. Postgres allows
+  /// any number of NULLs in a unique index, which is exactly the behaviour
+  /// wanted: many customers without an email, never two sharing one.
+  email String? @unique
+
+  /// ACTIVE customers can have new orders raised for them; INACTIVE ones are
+  /// archived and no longer offered in the order builder. Their existing
+  /// orders are untouched and still display them — archiving takes a customer
+  /// out of circulation, it does not rewrite what they already bought.
+  status CustomerStatus @default(ACTIVE)
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   orders Order[]
 
   @@index([name])
+  @@index([status])
   @@map("customers")
 }
 
@@ -184,8 +230,24 @@ model Product {
   /// the UI, not something that owns behaviour or rows of its own.
   category String
 
-  /// What we pay for one unit.
-  costPrice Decimal @map("cost_price") @db.Decimal(12, 2)
+  /// A planning figure, and nothing more.
+  ///
+  /// This is **not** what the inventory cost. It is a reference number an
+  /// operator types to prefill a purchase line and to browse the catalogue by,
+  /// and it may be stale, absent, or simply wrong without anything downstream
+  /// being affected. The same part is bought at different prices from different
+  /// suppliers at different times; no single column on the catalogue row can
+  /// describe what a shelf full of mixed deliveries actually cost.
+  ///
+  /// It must never be used for inventory valuation, COGS, realised margin,
+  /// order profitability, or stock movement costing. Actual acquisition cost
+  /// lives on StockLot, frozen at the moment the goods were received. If you
+  /// are reaching for this field to compute money that has to be right, you
+  /// want `StockLot.unitCost` instead.
+  ///
+  /// Nullable, because inventing a number to satisfy a NOT NULL is exactly the
+  /// fabrication this redesign exists to stop.
+  standardCost Decimal? @map("standard_cost") @db.Decimal(12, 2)
 
   /// What we sell one unit for.
   sellingPrice Decimal @map("selling_price") @db.Decimal(12, 2)
@@ -211,6 +273,7 @@ model Product {
   purchaseItems     PurchaseItem[]
   stockTransactions StockTransaction[]
   certificates      Certificate[]
+  stockLots         StockLot[]
 
   @@index([name])
   @@index([category])
@@ -284,6 +347,30 @@ model OrderItem {
   /// retrospectively when someone edits the price list.
   unitPrice Decimal @map("unit_price") @db.Decimal(12, 2)
   total     Decimal @db.Decimal(12, 2)
+
+  /// What these units cost us, frozen when the order was confirmed and the
+  /// stock actually left. The mirror of `unitPrice` on the cost side, and
+  /// deliberately a *total* rather than a unit rate: the units on one line can
+  /// come from several lots at several prices, and a single per-unit figure
+  /// derived from a mixed allocation is a number that reads as authoritative
+  /// while being true of nothing. Per-lot rates live on StockLotConsumption.
+  ///
+  /// Null until the order is confirmed, and null again if it is cancelled —
+  /// stock that came back was never sold.
+  costTotal Decimal? @map("cost_total") @db.Decimal(12, 2)
+
+  /// How many of `quantity` the cost above actually covers.
+  ///
+  /// This is the field that keeps a partially-costed sale honest. Stock
+  /// received before this system existed has no known acquisition cost, and
+  /// FIFO will happily consume it: selling 15 units where only 10 came from a
+  /// costed lot leaves `costTotal` describing 10 of them. Reporting that total
+  /// as though it covered all 15 would understate cost and overstate profit,
+  /// so the coverage travels with the number and every margin figure is
+  /// obliged to carry it.
+  ///
+  /// Zero exactly when `costTotal` is null.
+  costedQuantity Int @default(0) @map("costed_quantity")
 
   orderId String @map("order_id")
   order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
@@ -408,12 +495,152 @@ model StockTransaction {
   createdBy     String? @map("created_by")
   createdByUser User?   @relation(fields: [createdBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
+  /// The lot this movement brought into existence, if it was an inflow. The
+  /// valuation layer hangs off the ledger and never the other way round.
+  originatedLot StockLot? @relation("LotOrigin")
+
+  /// The lots this movement drew from, if it was an outflow.
+  lotConsumptions StockLotConsumption[] @relation("LotConsumption")
+
   @@index([productId, createdAt])
   @@index([type])
   @@index([referenceType, referenceId])
   @@index([createdBy])
   @@index([createdAt])
   @@map("stock_transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Valuation
+// ---------------------------------------------------------------------------
+
+/// A costed batch of stock: units that arrived together, at one price.
+///
+/// **This is not a second inventory system, and the distinction is the whole
+/// design.** `Product.stockQuantity` remains the only answer to "how many do we
+/// have", and `StockTransaction` remains the only record of what moved. Nothing
+/// consults lots to decide whether a movement is legal, and no lot can exist
+/// describing a movement the ledger does not already contain — every lot is
+/// created by exactly one STOCK_IN row, which is what the unique constraint on
+/// `stockTransactionId` enforces. Lots are a valuation and provenance index
+/// laid over the ledger, not a parallel count of the shelf.
+///
+/// What they buy is the thing a single column on Product cannot express: the
+/// same part bought at ₹8,000, then ₹9,500, then ₹7,800 is three lots, each
+/// remembering what it actually cost, so a sale can be costed against the units
+/// it actually consumed and historical margin stays fixed when the next
+/// delivery lands at a fourth price.
+///
+/// One lot per receipt line, always — never merged with an existing lot even
+/// when the product and unit cost match exactly. Two deliveries are two
+/// batches with two sets of paperwork, and collapsing them would destroy the
+/// distinction the moment somebody needs to know which certificate covers the
+/// units on the shelf. See the note on `Certificate` about where that is going.
+model StockLot {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  /// What one unit in this batch cost, frozen at receipt and never recomputed.
+  ///
+  /// Null means the cost is genuinely unknown — not zero, not "to be decided",
+  /// and emphatically not something to fill in from `Product.standardCost`.
+  /// Stock that predates this system has no provable acquisition cost, and a
+  /// null that survives all the way to the screen ("5 units of unknown cost")
+  /// is worth more than a plausible number nobody can source.
+  unitCost   Decimal?      @map("unit_cost") @db.Decimal(12, 2)
+  costSource LotCostSource @map("cost_source")
+
+  /// How many units arrived. Immutable once written.
+  quantityReceived Int @map("quantity_received")
+
+  /// How many are left. The only mutable column in the valuation layer, and it
+  /// only ever moves under the product row lock its lot belongs to — see
+  /// `allocateFifo` in src/server/stock.ts. Summed across a product's lots this
+  /// must equal `Product.stockQuantity`; that invariant is what makes this an
+  /// index over the ledger rather than a rival to it.
+  quantityRemaining Int @map("quantity_remaining")
+
+  /// What put these units on the shelf. Same polymorphic pair the ledger uses,
+  /// and null exactly when the type is MANUAL.
+  sourceType StockReferenceType @map("source_type")
+  sourceId   String?            @map("source_id")
+
+  /// When the batch arrived — the FIFO sort key, and the reason it is stored
+  /// rather than read from `createdAt`: a backfilled lot is created today but
+  /// arrived long ago, and consuming it in creation order would be wrong.
+  receivedAt DateTime @map("received_at")
+
+  /// The STOCK_IN that created this lot. One lot per movement, enforced.
+  ///
+  /// Nullable for exactly one reason: stock that already existed when lot
+  /// tracking was introduced has no originating movement to point at. The
+  /// backfill migration could only have given those rows a transaction id by
+  /// inventing ledger entries for movements that never happened, which would
+  /// have corrupted the one table this application treats as the truth. So
+  /// they carry null instead, and null means "created by the backfill" — it is
+  /// not a state application code is ever allowed to write.
+  stockTransactionId String?           @unique @map("stock_transaction_id")
+  stockTransaction   StockTransaction? @relation("LotOrigin", fields: [stockTransactionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  /// Who booked it in. Null for backfilled and seeded rows, and nulled rather
+  /// than cascaded if the user is later removed — the delivery still happened.
+  createdBy     String? @map("created_by")
+  createdByUser User?   @relation(fields: [createdBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  consumptions StockLotConsumption[]
+
+  /// The FIFO scan: a product's open lots, oldest first. `id` breaks ties so
+  /// the order is total — two lots received in the same millisecond must still
+  /// be consumed in a deterministic sequence, or two concurrent orders could
+  /// disagree about which came first.
+  @@index([productId, receivedAt, id])
+  /// Finding the lots a purchase created, for the cancellation guard.
+  @@index([sourceType, sourceId])
+  @@map("stock_lots")
+}
+
+/// One draw against one lot: which batch a movement's units came out of, and
+/// what they cost.
+///
+/// Append-only, like the ledger it hangs off. A return is a new row with a
+/// negative quantity, never an edit or a delete of the row it undoes — so a
+/// lot's history reads as what happened rather than as what someone last
+/// decided it should look like, and `quantityRemaining` is always reachable as
+/// `quantityReceived` minus the sum of these.
+model StockLotConsumption {
+  id String @id @default(cuid())
+
+  lotId String   @map("lot_id")
+  lot   StockLot @relation(fields: [lotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  /// The STOCK_OUT that drew these units, or the REVERSAL that put them back.
+  stockTransactionId String           @map("stock_transaction_id")
+  stockTransaction   StockTransaction @relation("LotConsumption", fields: [stockTransactionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  /// Signed: positive takes units out of the lot, negative returns them.
+  quantity Int
+
+  /// Copied from the lot at the moment of the draw, not read through the
+  /// relation afterwards. The lot's cost cannot change today, but freezing it
+  /// here means historical COGS stays a fact about this row rather than a
+  /// lookup that a future migration could quietly restate.
+  ///
+  /// Null when the lot's cost is unknown, which is how an uncosted sale stays
+  /// visibly uncosted all the way to the report.
+  unitCost  Decimal? @map("unit_cost") @db.Decimal(12, 2)
+  /// `quantity * unitCost`, and signed with it, so a plain SUM over these rows
+  /// nets returns against draws without the caller remembering to.
+  totalCost Decimal? @map("total_cost") @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([stockTransactionId])
+  @@index([lotId])
+  @@map("stock_lot_consumptions")
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +667,20 @@ model StockTransaction {
 /// constraints. Without it two concurrent uploads would both retire the old
 /// certificate and both insert a new one, leaving a product with two current
 /// certificates and no way to say which is authoritative.
+///
+/// **Known limitation, left deliberately unfixed for now.** A certificate is
+/// attached to a *product*, but in reality paperwork covers the batch that
+/// arrived, not the catalogue entry. Two deliveries of the same part number
+/// under two different 8130-3 forms are indistinguishable here, and a product
+/// whose current certificate is valid can still have older, differently
+/// certified units sitting on the shelf.
+///
+/// StockLot is the batch, and is shaped so this becomes an additive change
+/// rather than a redesign: a nullable `stockLotId` here, with product-level
+/// certificates staying valid as the fallback for stock whose lot is unknown.
+/// That is why lots are never merged even when product and unit cost match —
+/// collapsing two receipts would destroy the very distinction that FK needs.
+/// Not implemented in this change set; see HANDOVER.md.
 model Certificate {
   id String @id @default(cuid())
 

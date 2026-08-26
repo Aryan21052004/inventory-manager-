@@ -14,9 +14,22 @@ import { toSafeError, type SafeError } from "@/lib/errors";
 export interface DashboardSnapshot {
   productCount: number;
   totalUnits: number;
-  /** Stock at cost. A string, because the SQL sum is a numeric and rounding it
-   *  through a float would lose cents on a large catalogue. */
+  /**
+   * Stock at actual acquisition cost, summed over the lots still holding units.
+   *
+   * A string, because the SQL sum is a numeric and rounding it through a float
+   * would lose cents on a large catalogue.
+   *
+   * Covers only units whose cost is known — see `uncostedUnits`. The two belong
+   * together on screen: this figure alone would read as the value of everything
+   * on the shelf, which it is not.
+   */
   stockValue: string;
+  /**
+   * Units on hand with no established acquisition cost. Excluded from the value
+   * above rather than valued at zero or at a guess.
+   */
+  uncostedUnits: number;
   lowStockCount: number;
   outOfStockCount: number;
   openOrderCount: number;
@@ -47,6 +60,7 @@ interface ProductAggregate {
   product_count: number;
   total_units: number;
   stock_value: string;
+  uncosted_units: number;
   out_of_stock: number;
   low_stock: number;
 }
@@ -64,7 +78,8 @@ export async function loadDashboard(): Promise<DashboardResult> {
     const [aggregate, openOrderCount, pendingPurchaseCount, movements] =
       await Promise.all([
         /*
-         * One pass over products for all five figures.
+         * One pass over products for the counts, with two uncorrelated
+         * subqueries for the lot-based valuation.
          * `stock_quantity <= minimum_stock` compares two columns, which the
          * query builder cannot express, and splitting this into separate counts
          * would mean four table scans instead of one.
@@ -73,7 +88,18 @@ export async function loadDashboard(): Promise<DashboardResult> {
           SELECT
             COUNT(*)::int                                            AS product_count,
             COALESCE(SUM(stock_quantity), 0)::int                    AS total_units,
-            COALESCE(SUM(stock_quantity * cost_price), 0)::text      AS stock_value,
+            COALESCE((
+              SELECT SUM(l.quantity_remaining * l.unit_cost)
+              FROM stock_lots l
+              JOIN products lp ON lp.id = l.product_id AND lp.status = 'ACTIVE'
+              WHERE l.quantity_remaining > 0 AND l.unit_cost IS NOT NULL
+            ), 0)::text                                              AS stock_value,
+            COALESCE((
+              SELECT SUM(l.quantity_remaining)
+              FROM stock_lots l
+              JOIN products lp ON lp.id = l.product_id AND lp.status = 'ACTIVE'
+              WHERE l.quantity_remaining > 0 AND l.unit_cost IS NULL
+            ), 0)::int                                               AS uncosted_units,
             COUNT(*) FILTER (WHERE stock_quantity <= 0)::int         AS out_of_stock,
             COUNT(*) FILTER (
               WHERE stock_quantity > 0 AND stock_quantity <= minimum_stock
@@ -110,6 +136,7 @@ export async function loadDashboard(): Promise<DashboardResult> {
       product_count: 0,
       total_units: 0,
       stock_value: "0",
+      uncosted_units: 0,
       out_of_stock: 0,
       low_stock: 0,
     };
@@ -120,6 +147,7 @@ export async function loadDashboard(): Promise<DashboardResult> {
         productCount: totals.product_count,
         totalUnits: totals.total_units,
         stockValue: totals.stock_value,
+        uncostedUnits: totals.uncosted_units,
         lowStockCount: totals.low_stock,
         outOfStockCount: totals.out_of_stock,
         openOrderCount,
