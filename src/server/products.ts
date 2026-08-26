@@ -3,6 +3,7 @@ import "server-only";
 import type { Prisma } from "@/generated/prisma/client";
 import type { ProductStatus } from "@/generated/prisma/enums";
 import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/errors";
+import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
 import { prisma } from "@/lib/prisma";
 import type { ProductListParams, ProductSortKey } from "@/lib/product-query";
 import { stockStatus, type StockStatus } from "@/lib/stock-status";
@@ -19,6 +20,15 @@ import {
   type ProductFieldErrors,
 } from "@/lib/validation/product";
 import { requireRole } from "@/server/auth";
+import {
+  certificateKeysForProduct,
+  deleteStoredFiles,
+  getCertificateHistory,
+  getCurrentCertificate,
+  prepareCertificate,
+  type CertificateView,
+} from "@/server/certificates";
+import { fileStorage } from "@/server/storage";
 import { recordOpeningStock, recordStockMovement } from "@/server/stock";
 
 /**
@@ -135,6 +145,13 @@ export interface ProductDetail {
   movements: ProductMovement[];
   recentOrders: ProductOrderLine[];
   recentPurchases: ProductPurchaseLine[];
+
+  /** The product's current certificate, or null if it has none. */
+  certificate: CertificateView | null;
+  /** Retired certificates, newest first — the paperwork's audit trail. */
+  certificateHistory: CertificateView[];
+  /** Derived from the certificate's expiry date; never stored. */
+  certificateStatus: CertificateStatus;
   /**
    * Whether a hard delete is possible. False once the product has appeared on
    * an order or a purchase — see `deleteProduct`.
@@ -404,8 +421,14 @@ export async function getProductDetail(
 
     if (!product) return { ok: true, data: null };
 
-    const [movements, orderLines, purchaseLines, tradedCount] =
-      await Promise.all([
+    const [
+      movements,
+      orderLines,
+      purchaseLines,
+      tradedCount,
+      certificate,
+      certificateHistory,
+    ] = await Promise.all([
         prisma.stockTransaction.findMany({
           where: { productId: id },
           orderBy: { createdAt: "desc" },
@@ -452,6 +475,8 @@ export async function getProductDetail(
               ? orders
               : prisma.purchaseItem.count({ where: { productId: id } }),
           ),
+        getCurrentCertificate(id),
+        getCertificateHistory(id),
       ]);
 
     return {
@@ -473,6 +498,12 @@ export async function getProductDetail(
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
         deletable: tradedCount === 0,
+        certificate,
+        certificateHistory,
+        // Derived here rather than stored, for the reason in
+        // src/lib/certificate-status.ts: this value changes on its own as
+        // dates pass, so a column would be wrong every morning.
+        certificateStatus: certificateStatus(certificate),
         movements: movements.map((movement) => ({
           id: movement.id,
           type: movement.type,
@@ -574,8 +605,20 @@ const MISSING_SUPPLIER = fieldError(
  * code at once would both find nothing and both proceed; the index is the only
  * thing that can actually arbitrate.
  */
+export interface CertificateUpload {
+  metadata: unknown;
+  file: unknown;
+}
+
 export async function createProduct(
   input: unknown,
+  /**
+   * A certificate to attach at the same time. Optional, deliberately: a product
+   * can exist before its paperwork arrives, and requiring one here would make
+   * the common case of "receive the part now, file the 8130 when it turns up"
+   * impossible to record.
+   */
+  certificate?: CertificateUpload | null,
 ): Promise<{ id: string; name: string; sku: string }> {
   const user = await requireRole("ADMIN");
 
@@ -593,6 +636,15 @@ export async function createProduct(
 
   const data = parsed.data;
 
+  /*
+   * Validated and stored before the transaction opens, so the certificate row
+   * can be written in the *same* transaction as the product. Creating the
+   * product first and attaching afterwards would leave an unwanted product
+   * behind whenever the upload was rejected, and need a compensating delete
+   * that can itself fail. See `prepareCertificate`.
+   */
+  const prepared = certificate ? await prepareCertificate(certificate) : null;
+
   try {
     return await prisma.$transaction(async (tx) => {
       const product = await tx.product.create({
@@ -608,6 +660,9 @@ export async function createProduct(
           minimumStock: data.minimumStock,
           status: data.status,
           supplierId: data.supplierId,
+          certificates: prepared
+            ? { create: [{ ...prepared.data, uploadedBy: user.id }] }
+            : undefined,
         },
         select: { id: true, name: true, sku: true },
       });
@@ -621,6 +676,13 @@ export async function createProduct(
       return product;
     });
   } catch (error) {
+    // The row was never written, so the file it would have pointed at is
+    // unreferenced. Best-effort: a failed cleanup leaves a harmless orphan and
+    // must not replace the real error with a second one.
+    if (prepared) {
+      await fileStorage.delete(prepared.storageKey).catch(() => {});
+    }
+
     if (isUniqueViolation(error)) throw DUPLICATE_SKU(data.sku);
     if (isForeignKeyViolation(error)) throw MISSING_SUPPLIER;
     throw error;
@@ -704,7 +766,15 @@ export async function updateProduct(
 export async function deleteProduct(id: string): Promise<{ name: string }> {
   await requireRole("ADMIN");
 
-  return prisma.$transaction(async (tx) => {
+  /*
+   * Collected before the delete, because afterwards there is nothing left to
+   * ask. The foreign key cascade removes the certificate rows; nothing but this
+   * removes the files they pointed at, since a database constraint cannot reach
+   * into a filesystem or a bucket.
+   */
+  const storageKeys = await certificateKeysForProduct(id);
+
+  const result = await prisma.$transaction(async (tx) => {
     const product = await tx.product.findUnique({
       where: { id },
       select: { id: true, name: true },
@@ -725,10 +795,22 @@ export async function deleteProduct(id: string): Promise<{ name: string }> {
     }
 
     await tx.stockTransaction.deleteMany({ where: { productId: id } });
+    // The certificates go with it through `onDelete: Cascade` — a certificate
+    // describes one product and has no meaning without it.
     await tx.product.delete({ where: { id } });
 
     return { name: product.name };
   });
+
+  /*
+   * Files last, and only once the transaction has committed. Deleting them
+   * first would destroy documents that a rolled-back delete was supposed to
+   * keep; deleting them after means the worst case is an orphan file, which
+   * costs disk and nothing else.
+   */
+  await deleteStoredFiles(storageKeys);
+
+  return result;
 }
 
 export interface AdjustmentOutcome {

@@ -3,10 +3,15 @@
 Stock control for products, orders, purchases and suppliers, built as a
 production-shaped Next.js application.
 
-> **Status: products and inventory.** The foundation, Clerk authentication, and
-> the products + inventory module are built. Orders, purchases, customers,
-> suppliers and reports are still scaffolded pages — see
-> [What is not built yet](#what-is-not-built-yet).
+> **Status: products, inventory and certificates.** The foundation, Clerk
+> authentication, the products + inventory module, and product certificates are
+> built. Orders, purchases, customers, suppliers and reports are still
+> scaffolded pages — see [What is not built yet](#what-is-not-built-yet).
+
+This is an aviation-parts inventory system, which shapes two decisions you will
+meet early: every part can carry airworthiness paperwork with its own expiry and
+audit trail, and **the system calculates no tax** — an order's grand total is
+`subtotal - discount`, enforced by a check constraint.
 
 ## Stack
 
@@ -122,7 +127,10 @@ src/
       dashboard/         Live stock snapshot
       products/          List, detail, create/edit, stock adjustment
         actions.ts       Server actions (thin — logic lives in src/server)
-        [id]/            Product detail, movement history, orders, purchases
+        [id]/            Product detail, movement history, certificates
+      api/
+        certificates/    Authenticated file download — the only route to a
+                         stored certificate; no public URLs exist
       orders/  purchases/  customers/  suppliers/
       stock-movements/  reports/  settings/
       layout.tsx         Dashboard chrome + the authorisation boundary
@@ -145,12 +153,15 @@ src/
     nav.ts               Single source of truth for navigation
     product-query.ts     The products list's URL state, parsed and serialised
     stock-status.ts      The derived in-stock / low / out rule, in one place
+    certificate-status.ts  The derived valid / expiring / expired / missing rule
     validation/          Zod schemas shared by forms and server actions
   server/
     auth.ts              Clerk session to local user, and role checks
     dashboard.ts         Server-side read models
     products.ts          Catalogue reads and writes; no next/* imports
+    certificates.ts      Certificate upload, replacement, withdrawal, access
     stock.ts             The only way stock is allowed to change
+    storage/             Swappable file storage (interface + local driver)
 tests/                   Integration tests (real Postgres, mocked Clerk)
   proxy.ts               Clerk auth context (Next 16 `proxy` convention)
 ```
@@ -169,12 +180,22 @@ never by editing or deleting one.
 
 **Derived values are never stored.** Stock status (in stock / low / out) is
 computed from `stockQuantity` against `minimumStock` rather than persisted, so it
-cannot drift from the numbers it describes.
+cannot drift from the numbers it describes. Certificate status is the same idea
+with sharper consequences: it changes on its own as dates pass, so a stored
+column would be wrong every morning until something remembered to recalculate
+it.
+
+**No tax, anywhere.** An order's grand total is `subtotal - discount` and there
+is no tax column to reintroduce one. The column was dropped rather than left
+defaulting to zero — a zero column is a field the UI eventually renders and a
+value a report eventually sums. The check constraint `total = subtotal -
+discount` means the database refuses a total that implies tax, whatever wrote
+it.
 
 **The database refuses invalid rows, not just invalid relationships.** Alongside
 the foreign keys, the migration adds check constraints: money is never negative,
-a line always moves at least one unit, `total = subtotal - discount + tax` on
-every order, a line total always equals quantity times price, and a stock
+a line always moves at least one unit, `total = subtotal - discount` on every
+order, a line total always equals quantity times price, and a stock
 transaction's `previousStock`, `quantity` and `newStock` have to add up. Prisma's
 schema language cannot express these, so they live in the migration SQL.
 
@@ -268,6 +289,59 @@ does, that stock never moves without a ledger row — is in `src/server`, so it
 holds however the operation is invoked and can be tested without faking a
 request.
 
+## Certificates
+
+Aviation parts carry paperwork, and an uncertified part is unsellable. Each
+product may have one *current* certificate and any number of retired ones.
+
+**Nothing is overwritten.** Replacing a certificate retires the old row and
+inserts a new one; the old row keeps pointing at the old file and both survive.
+"Remove" is a withdrawal, not a deletion — the product reads as having no
+certificate while the record of the document that once covered it stays in the
+history. For a part whose paperwork someone may ask about in ten years, a system
+that can be made to forget on request is not an audit trail.
+
+**One current certificate per product** is a partial unique index
+(`WHERE superseded_at IS NULL`), not just a code path. Two uploads racing each
+other would otherwise both retire the old row and both insert a new one, leaving
+a product with two certificates claiming to be current.
+
+**Certificate type is free text with suggestions**, for the same reason
+`Product.category` is. FAA 8130-3, EASA Form 1, a Certificate of Conformity and
+an Airworthiness Certificate are the common ones, but a part under Transport
+Canada or CAAC must not need a migration to record.
+
+**Expiry is optional and means what it says.** A Certificate of Conformity
+typically never expires; a null expiry date is a complete answer, not a missing
+one, and such a certificate is `VALID`. The four states are `MISSING`,
+`EXPIRED`, `EXPIRING_SOON` (within 30 days) and `VALID`.
+
+### Files
+
+**A file is identified by reading it.** The browser supplies a filename and a
+`Content-Type`, and neither is evidence — renaming `payload.html` to
+`certificate.pdf` takes a second. `sniffFileType` checks the leading bytes
+against the signatures for PDF, JPEG and PNG, and that result is what gets
+stored and what the download route later sends back, alongside `nosniff`.
+
+**Storage is behind an interface.** `FileStorage` is four operations — put, get,
+delete, exists — keyed by an opaque string, which S3, Supabase, Cloudinary and a
+local directory can all implement. `LocalFileStorage` is the development driver;
+swapping it means writing one class and adding a case to the switch in
+`src/server/storage/index.ts`. No call site knows which driver it has.
+
+Note what the interface deliberately lacks: a URL. A storage layer that hands
+out URLs is one whose files are reachable by anyone holding one. The storage key
+never leaves the server, and the only address a browser sees is
+`/api/certificates/{id}/file`, which checks the Clerk session before it resolves
+anything. Uploads go nowhere near `public/` — Next serves that directory
+statically, with no session in the way.
+
+**Reading requires a session; changing requires ADMIN.** Viewing and downloading
+are part of doing the job, so any signed-in user may. Uploading, replacing,
+editing and withdrawing are ADMIN, checked on the server against the role in our
+database.
+
 ## Tests
 
 ```bash
@@ -292,6 +366,8 @@ with the test.
 | `tests/stock.test.ts`            | The stock engine: attribution, ledger, limits |
 | `tests/products.test.ts`         | Catalogue CRUD, validation, search, filters   |
 | `tests/stock-adjustment.test.ts` | Adjustments, permissions, concurrency         |
+| `tests/certificates.test.ts`     | Upload, replace, withdraw, status, access     |
+| `tests/order-totals.test.ts`     | Total arithmetic, and that tax is gone        |
 
 ## What is not built yet
 

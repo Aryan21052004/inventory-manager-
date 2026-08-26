@@ -7,6 +7,7 @@ import { fakeClerkUser, signInAs } from "./clerk-mock";
  * wrong order fails loudly rather than silently orphaning rows.
  */
 export async function resetDatabase(): Promise<void> {
+  await prisma.certificate.deleteMany();
   await prisma.stockTransaction.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.order.deleteMany();

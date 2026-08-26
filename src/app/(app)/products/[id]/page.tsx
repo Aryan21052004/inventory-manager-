@@ -9,6 +9,7 @@ import {
   Warehouse,
 } from "lucide-react";
 
+import { CertificatePanel } from "@/app/(app)/products/[id]/certificate-panel";
 import { ProductDetailActions } from "@/app/(app)/products/[id]/product-detail-actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -146,6 +147,47 @@ export default async function ProductDetailPage({
       </div>
 
       <StockSummary product={product} />
+
+      {/*
+        Dates are handed over as `YYYY-MM-DD` strings rather than Date objects.
+        The panel feeds them straight back into `<input type="date">`, which
+        accepts exactly that format and nothing else, and the conversion belongs
+        on the server where the value is already known to be a UTC calendar day.
+      */}
+      <CertificatePanel
+        productId={product.id}
+        status={product.certificateStatus}
+        canManage={canManage}
+        certificate={
+          product.certificate
+            ? {
+                id: product.certificate.id,
+                certificateType: product.certificate.certificateType,
+                certificateNumber: product.certificate.certificateNumber,
+                issueDate: isoDay(product.certificate.issueDate),
+                expiryDate: product.certificate.expiryDate
+                  ? isoDay(product.certificate.expiryDate)
+                  : null,
+                fileName: product.certificate.fileName,
+                fileSize: product.certificate.fileSize,
+                fileUrl: product.certificate.fileUrl,
+                uploadedByName: product.certificate.uploadedByName,
+                createdAt: product.certificate.createdAt.toISOString(),
+              }
+            : null
+        }
+        history={product.certificateHistory.map((entry) => ({
+          id: entry.id,
+          certificateType: entry.certificateType,
+          certificateNumber: entry.certificateNumber,
+          issueDate: isoDay(entry.issueDate),
+          expiryDate: entry.expiryDate ? isoDay(entry.expiryDate) : null,
+          fileName: entry.fileName,
+          fileUrl: entry.fileUrl,
+          supersededAt: (entry.supersededAt ?? entry.updatedAt).toISOString(),
+          uploadedByName: entry.uploadedByName,
+        }))}
+      />
 
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-1">
@@ -504,4 +546,15 @@ function Margin({ cost, price }: { cost: string; price: string }) {
       </span>
     </span>
   );
+}
+
+/**
+ * A `DATE` column as the `YYYY-MM-DD` string a date input expects.
+ *
+ * Sliced from the UTC ISO string rather than formatted locally: the column
+ * holds a calendar day with no time and no zone, and running it through a local
+ * formatter would move it a day for anyone west of Greenwich.
+ */
+function isoDay(value: Date): string {
+  return value.toISOString().slice(0, 10);
 }

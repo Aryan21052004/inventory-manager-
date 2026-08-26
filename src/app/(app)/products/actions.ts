@@ -4,7 +4,13 @@ import { revalidatePath } from "next/cache";
 
 import { toSafeError } from "@/lib/errors";
 import type { AdjustmentFieldErrors } from "@/lib/validation/adjustment";
+import type { CertificateFieldErrors } from "@/lib/validation/certificate";
 import type { ProductFieldErrors } from "@/lib/validation/product";
+import {
+  attachCertificate,
+  removeCertificate,
+  updateCertificateMetadata,
+} from "@/server/certificates";
 import {
   adjustStock,
   createProduct,
@@ -35,11 +41,23 @@ import {
 
 export type ProductActionResult =
   | { ok: true; message: string; productId?: string }
-  | { ok: false; message: string; fieldErrors?: ProductFieldErrors };
+  | {
+      ok: false;
+      message: string;
+      /**
+       * Product fields, plus the certificate fields the create form also
+       * carries — creating a product can fail on either half.
+       */
+      fieldErrors?: ProductFieldErrors & CertificateFieldErrors;
+    };
 
 export type AdjustmentActionResult =
   | { ok: true; message: string; newStock: number }
   | { ok: false; message: string; fieldErrors?: AdjustmentFieldErrors };
+
+export type CertificateActionResult =
+  | { ok: true; message: string }
+  | { ok: false; message: string; fieldErrors?: CertificateFieldErrors };
 
 /**
  * Turns a thrown error into a form-shaped failure.
@@ -77,7 +95,23 @@ export async function createProductAction(
   formData: FormData,
 ): Promise<ProductActionResult> {
   try {
-    const product = await createProduct(Object.fromEntries(formData));
+    const fields = Object.fromEntries(formData);
+    const file = formData.get("file");
+
+    /*
+     * A certificate is optional at creation. Its presence is decided by whether
+     * a file was actually chosen — an empty file input still submits a zero-byte
+     * `File`, which is not a document — rather than by whether the metadata
+     * fields happen to be filled in, so a half-typed certificate nobody attached
+     * a scan to does not block creating the product.
+     */
+    const hasCertificate = file instanceof File && file.size > 0;
+
+    const product = await createProduct(
+      fields,
+      hasCertificate ? { metadata: fields, file } : null,
+    );
+
     revalidateProduct(product.id);
 
     return {
@@ -86,7 +120,12 @@ export async function createProductAction(
       message: `"${product.name}" added to the catalogue.`,
     };
   } catch (error) {
-    return toFailure<keyof ProductFieldErrors>(error, "createProductAction");
+    // The failure may name a product field or a certificate field — the create
+    // path validates both — so the union covers both.
+    return toFailure<keyof ProductFieldErrors | keyof CertificateFieldErrors>(
+      error,
+      "createProductAction",
+    );
   }
 }
 
@@ -136,5 +175,101 @@ export async function adjustStockAction(
     };
   } catch (error) {
     return toFailure<keyof AdjustmentFieldErrors>(error, "adjustStockAction");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Certificates
+// ---------------------------------------------------------------------------
+
+/**
+ * Attaches or replaces a product's certificate.
+ *
+ * The `File` travels inside the FormData rather than as a separate argument:
+ * server actions serialise `File` natively, so the upload needs no route
+ * handler of its own and no second endpoint to secure. Note the body size limit
+ * raised in next.config.ts — the default is 1 MB, which a scanned certificate
+ * clears easily.
+ *
+ * As everywhere else here, this wrapper decides nothing. `attachCertificate`
+ * checks the role, validates the metadata, reads the file's leading bytes to
+ * find out what it actually is, and writes the file before the row so a failure
+ * leaves an orphan file rather than a row pointing at nothing.
+ */
+export async function saveCertificateAction(
+  productId: string,
+  formData: FormData,
+): Promise<CertificateActionResult> {
+  try {
+    const certificate = await attachCertificate({
+      productId,
+      metadata: Object.fromEntries(formData),
+      file: formData.get("file"),
+    });
+
+    revalidateProduct(productId);
+
+    return {
+      ok: true,
+      message: `Certificate ${certificate.certificateNumber} saved.`,
+    };
+  } catch (error) {
+    return toFailure<keyof CertificateFieldErrors>(
+      error,
+      "saveCertificateAction",
+    );
+  }
+}
+
+/** Corrects the details on the current certificate. The file is untouched. */
+export async function updateCertificateAction(
+  certificateId: string,
+  productId: string,
+  formData: FormData,
+): Promise<CertificateActionResult> {
+  try {
+    const certificate = await updateCertificateMetadata(
+      certificateId,
+      Object.fromEntries(formData),
+    );
+
+    revalidateProduct(productId);
+
+    return {
+      ok: true,
+      message: `Certificate ${certificate.certificateNumber} updated.`,
+    };
+  } catch (error) {
+    return toFailure<keyof CertificateFieldErrors>(
+      error,
+      "updateCertificateAction",
+    );
+  }
+}
+
+/**
+ * Withdraws the current certificate.
+ *
+ * A retirement rather than a deletion — the row and its file are kept as
+ * history and the product simply reads as having none. See `removeCertificate`.
+ */
+export async function removeCertificateAction(
+  certificateId: string,
+): Promise<CertificateActionResult> {
+  try {
+    const { productId, certificateNumber } =
+      await removeCertificate(certificateId);
+
+    revalidateProduct(productId);
+
+    return {
+      ok: true,
+      message: `Certificate ${certificateNumber} withdrawn. Its record is kept in the product's history.`,
+    };
+  } catch (error) {
+    return toFailure<keyof CertificateFieldErrors>(
+      error,
+      "removeCertificateAction",
+    );
   }
 }

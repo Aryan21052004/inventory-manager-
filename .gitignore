@@ -44,3 +44,6 @@ next-env.d.ts
 
 # keep the template committed, ignore real values
 !.env.example
+
+# uploaded files (local file-storage driver) — never commit business documents
+/.storage

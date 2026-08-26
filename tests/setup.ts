@@ -1,3 +1,6 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { config } from "dotenv";
 
 import { testDatabaseUrl } from "./database-url";
@@ -21,3 +24,13 @@ process.env["DATABASE_URL"] = testDatabaseUrl();
  */
 process.env["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"] = "pk_test_fake_for_tests";
 process.env["CLERK_SECRET_KEY"] = "sk_test_fake_for_tests";
+
+/*
+ * Uploads go to a scratch directory, never the one a developer is using. The
+ * certificate tests write real files and delete them again, and pointing that
+ * at `.storage` would have the suite quietly removing documents somebody had
+ * uploaded through the app. Set before `src/lib/env.ts` is imported, for the
+ * same reason DATABASE_URL is.
+ */
+process.env["FILE_STORAGE_DRIVER"] = "local";
+process.env["FILE_STORAGE_DIR"] = join(tmpdir(), "inventory-manager-test-storage");

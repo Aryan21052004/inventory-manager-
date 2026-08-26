@@ -38,6 +38,29 @@ const schema = z.object({
   CLERK_SECRET_KEY: z.string().optional(),
 
   NEXT_PUBLIC_APP_NAME: z.string().default("Inventory Manager"),
+
+  /**
+   * Where uploaded certificates are stored.
+   *
+   * An enum rather than a free string, so an unknown value fails here — at
+   * import, with a readable message — instead of at the first upload. The
+   * exhaustiveness check in src/server/storage/index.ts is tied to this list,
+   * which means adding a driver name without implementing it is a compile
+   * error.
+   */
+  FILE_STORAGE_DRIVER: z.enum(["local"]).default("local"),
+
+  /**
+   * Root directory for the local driver. Relative paths resolve against the
+   * process working directory.
+   *
+   * Note where the default is *not*: anywhere under `public/`. Next serves that
+   * directory statically with no session in the way, so a certificate written
+   * there would be downloadable by anyone who learned its filename. Keeping the
+   * default outside it means the safe arrangement is also the one you get by
+   * doing nothing.
+   */
+  FILE_STORAGE_DIR: z.string().min(1).default(".storage"),
 });
 
 function load() {
@@ -48,6 +71,8 @@ function load() {
       process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
     CLERK_SECRET_KEY: process.env.CLERK_SECRET_KEY,
     NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
+    FILE_STORAGE_DRIVER: process.env.FILE_STORAGE_DRIVER,
+    FILE_STORAGE_DIR: process.env.FILE_STORAGE_DIR,
   });
 
   if (!parsed.success) {

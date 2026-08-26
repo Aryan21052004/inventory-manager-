@@ -118,6 +118,7 @@ model User {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   stockTransactions StockTransaction[]
+  certificates      Certificate[]
 
   @@index([role])
   @@map("users")
@@ -195,6 +196,7 @@ model Product {
   orderItems        OrderItem[]
   purchaseItems     PurchaseItem[]
   stockTransactions StockTransaction[]
+  certificates      Certificate[]
 
   @@index([name])
   @@index([category])
@@ -212,12 +214,16 @@ model Order {
   orderNumber String      @unique @map("order_number")
   status      OrderStatus @default(DRAFT)
 
-  /// Sum of the line totals, then the adjustments applied to it. Denormalised
-  /// so lists and reports do not aggregate items on every read; recalculated
-  /// whenever the items change. total = subtotal - discount + tax.
+  /// Sum of the line totals, then the one adjustment applied to it.
+  /// Denormalised so lists and reports do not aggregate items on every read;
+  /// recalculated whenever the items change.
+  ///
+  /// total = subtotal - discount. There is deliberately no tax column: this
+  /// system does not compute tax, and a column defaulting to zero would be an
+  /// invitation to start — the grand total is the discounted subtotal and
+  /// nothing else. The check constraint in the migration enforces it.
   subtotal Decimal @default(0) @db.Decimal(12, 2)
   discount Decimal @default(0) @db.Decimal(12, 2)
-  tax      Decimal @default(0) @db.Decimal(12, 2)
   total    Decimal @default(0) @db.Decimal(12, 2)
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -362,4 +368,102 @@ model StockTransaction {
   @@index([createdBy])
   @@index([createdAt])
   @@map("stock_transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Certificates
+// ---------------------------------------------------------------------------
+
+/// Airworthiness and conformity paperwork for a part.
+///
+/// In an aviation parts business the certificate is not decoration — an
+/// uncertified part is unsellable, and "which document, issued when, by whom"
+/// is a question an auditor asks years later. The table is therefore shaped as
+/// a record of documents over time rather than a column on Product.
+///
+/// A product has at most one *current* certificate and any number of retired
+/// ones. `supersededAt` is what separates them: null means current, set means
+/// replaced or withdrawn. Nothing is ever overwritten or deleted in the normal
+/// course of events — replacing a certificate retires the old row and inserts a
+/// new one, so the history reads as a sequence and the file each version
+/// pointed at is still there.
+///
+/// "At most one current" is enforced by a partial unique index on
+/// (product_id) WHERE superseded_at IS NULL, which Prisma's schema language
+/// cannot express — it lives in the migration SQL alongside the check
+/// constraints. Without it two concurrent uploads would both retire the old
+/// certificate and both insert a new one, leaving a product with two current
+/// certificates and no way to say which is authoritative.
+model Certificate {
+  id String @id @default(cuid())
+
+  /// A plain label rather than an enum, for the same reason Product.category
+  /// is: the set is open. FAA 8130-3, EASA Form 1, a Certificate of
+  /// Conformity and an Airworthiness Certificate are the common ones, but a
+  /// part sourced under a different authority — Transport Canada, CAAC, a
+  /// manufacturer's own form — must not need a migration to record.
+  certificateType String @map("certificate_type")
+
+  /// The number printed on the document. Not unique: two authorities can
+  /// legitimately issue the same number, and a reissued document often keeps
+  /// the number it had.
+  certificateNumber String @map("certificate_number")
+
+  /// Dates, not timestamps — a certificate is issued on a day, not at an
+  /// instant, and storing a time would invent a precision the paper does not
+  /// have and drag timezone conversion into every comparison.
+  issueDate DateTime @map("issue_date") @db.Date
+
+  /// Nullable, and genuinely so. A Certificate of Conformity typically never
+  /// expires; an airworthiness release usually does. Code that assumes an
+  /// expiry date exists is wrong about half the documents in this table.
+  expiryDate DateTime? @map("expiry_date") @db.Date
+
+  /// The name the file had when it was uploaded. Shown to people, and used for
+  /// nothing else — never to build a path, never to decide a content type.
+  fileName String @map("file_name")
+
+  /// Where the bytes actually live, as an opaque key the storage layer
+  /// understands. Not a URL: a URL bakes in one provider and, worse, tends to
+  /// become a public one. Certificates are served through an authenticated
+  /// route that resolves this key server-side, so the location is never
+  /// something a browser can guess or share.
+  storageKey String @map("storage_key")
+
+  /// Determined by inspecting the file's leading bytes on upload, not taken
+  /// from the browser's claim. It is what the download route sends back, so a
+  /// wrong value here would be a way to have a file served as something it is
+  /// not.
+  contentType String @map("content_type")
+
+  /// Bytes. Displayed, and checked against the stored object as a cheap
+  /// integrity signal.
+  fileSize Int @map("file_size")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Null while this is the product's current certificate; set when it is
+  /// replaced or withdrawn. This is the whole history mechanism.
+  supersededAt DateTime? @map("superseded_at")
+
+  /// Cascade, unlike most relations here. A certificate describes exactly one
+  /// product and has no meaning without it, so it cannot outlive it — and the
+  /// only products that can be deleted are ones that never traded. The stored
+  /// file is removed explicitly by `deleteProduct`, because a foreign key
+  /// cannot reach into a filesystem or a bucket.
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  /// Who uploaded it, resolved from the Clerk session on the server. Nulled
+  /// rather than cascaded if the user is later removed — the upload still
+  /// happened.
+  uploadedBy     String? @map("uploaded_by")
+  uploadedByUser User?   @relation(fields: [uploadedBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([productId, supersededAt])
+  @@index([expiryDate])
+  @@index([certificateType])
+  @@index([uploadedBy])
+  @@map("certificates")
 }

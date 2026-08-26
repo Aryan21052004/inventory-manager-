@@ -357,8 +357,9 @@ const PURCHASES = [
  * Sales orders. Stock leaves on CONFIRMED and stays gone through FULFILLED;
  * DRAFT and CANCELLED move nothing.
  *
- * `discountPct` is applied to the subtotal and `taxPct` to what remains, both
- * rounded to whole cents, so `total = subtotal - discount + tax` holds exactly.
+ * `discountPct` is applied to the subtotal and rounded to whole cents, so
+ * `total = subtotal - discount` holds exactly. This system calculates no tax,
+ * and the check constraint on `orders` would reject a total that implied one.
  */
 const ORDERS = [
   {
@@ -367,7 +368,6 @@ const ORDERS = [
     status: "FULFILLED",
     daysAgo: 21,
     discountPct: 0,
-    taxPct: 20,
     lines: [
       { product: "kb-87", quantity: 4 },
       { product: "mouse-erg", quantity: 4 },
@@ -379,7 +379,6 @@ const ORDERS = [
     status: "FULFILLED",
     daysAgo: 16,
     discountPct: 5,
-    taxPct: 20,
     lines: [
       { product: "mon-27", quantity: 3 },
       { product: "dock-usbc", quantity: 3 },
@@ -392,7 +391,6 @@ const ORDERS = [
     status: "FULFILLED",
     daysAgo: 12,
     discountPct: 10,
-    taxPct: 20,
     lines: [
       { product: "chair-erg", quantity: 6 },
       { product: "desk-std", quantity: 2 },
@@ -404,7 +402,6 @@ const ORDERS = [
     status: "CONFIRMED",
     daysAgo: 6,
     discountPct: 0,
-    taxPct: 20,
     lines: [
       { product: "box-ship", quantity: 300 },
       { product: "label-therm", quantity: 24 },
@@ -416,7 +413,6 @@ const ORDERS = [
     status: "CONFIRMED",
     daysAgo: 2,
     discountPct: 0,
-    taxPct: 20,
     lines: [
       { product: "paper-a4", quantity: 120 },
       { product: "kb-87", quantity: 2 },
@@ -429,7 +425,6 @@ const ORDERS = [
     status: "DRAFT",
     daysAgo: 1,
     discountPct: 0,
-    taxPct: 20,
     lines: [
       { product: "desk-std", quantity: 1 },
       { product: "chair-erg", quantity: 1 },
@@ -442,7 +437,6 @@ const ORDERS = [
     status: "CANCELLED",
     daysAgo: 9,
     discountPct: 0,
-    taxPct: 20,
     lines: [{ product: "mouse-erg", quantity: 10 }],
   },
 ] as const;
@@ -697,10 +691,7 @@ async function main(): Promise<void> {
 
     const subtotalCents = lines.reduce((sum, line) => sum + line.totalCents, 0);
     const discountCents = roundCents((subtotalCents * order.discountPct) / 100);
-    const taxCents = roundCents(
-      ((subtotalCents - discountCents) * order.taxPct) / 100,
-    );
-    const totalCents = subtotalCents - discountCents + taxCents;
+    const totalCents = subtotalCents - discountCents;
 
     const row = await prisma.order.create({
       data: {
@@ -708,7 +699,6 @@ async function main(): Promise<void> {
         status: order.status as OrderStatus,
         subtotal: money(subtotalCents),
         discount: money(discountCents),
-        tax: money(taxCents),
         total: money(totalCents),
         createdAt: placedAt,
         customerId: customerIds.get(order.customer)!,
