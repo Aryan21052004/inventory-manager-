@@ -44,9 +44,9 @@ import { getCurrentUser } from "@/server/auth";
 import {
   getProductDetail,
   loadCategories,
-  loadSuppliers,
   type ProductDetail,
 } from "@/server/products";
+import { loadSupplierOptions } from "@/server/suppliers";
 import { cn } from "@/lib/utils";
 
 /**
@@ -106,7 +106,12 @@ export default async function ProductDetailPage({
   // Only fetched when they can be used — the dialogs these feed are not
   // rendered for a STAFF user.
   const [categories, suppliers] = canManage
-    ? await Promise.all([loadCategories(), loadSuppliers()])
+    ? await Promise.all([
+        loadCategories(),
+        // The product's own supplier is kept in the list even if archived, so
+        // editing an existing product does not silently blank its sourcing.
+        loadSupplierOptions(product.supplierId),
+      ])
     : [[], []];
 
   return (
@@ -139,6 +144,7 @@ export default async function ProductDetailPage({
                   minimumStock: product.minimumStock,
                   status: product.status,
                   supplierId: product.supplierId,
+                  supplierName: product.supplierName,
                   deletable: product.deletable,
                 }}
               />

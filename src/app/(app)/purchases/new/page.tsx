@@ -5,7 +5,8 @@ import { ArrowLeft } from "lucide-react";
 import { PurchaseBuilder } from "@/app/(app)/purchases/purchase-builder";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
-import { loadSupplierOptions, searchPurchaseProducts } from "@/server/purchases";
+import { searchPurchaseProducts } from "@/server/purchases";
+import { loadSupplierOptions } from "@/server/suppliers";
 
 export const metadata: Metadata = { title: "New purchase" };
 

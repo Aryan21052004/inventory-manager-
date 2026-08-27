@@ -210,6 +210,7 @@ async function ProductsTable({
                     minimumStock: product.minimumStock,
                     status: product.status,
                     supplierId: product.supplierId,
+                    supplierName: product.supplierName,
                   }}
                 />
               </TableCell>

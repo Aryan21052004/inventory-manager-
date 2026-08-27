@@ -252,9 +252,28 @@ export async function seedCustomer(overrides: {
   });
 }
 
-export async function createSupplier(name = "Acme Supply Co") {
+export async function createSupplier(
+  name = "Acme Supply Co",
+  overrides: {
+    status?: "ACTIVE" | "INACTIVE";
+    contactPerson?: string | null;
+    accountNumber?: string | null;
+    typicalLeadTimeDays?: number | null;
+    email?: string | null;
+  } = {},
+) {
   return prisma.supplier.create({
-    data: { name, email: `${Math.random().toString(36).slice(2, 10)}@example.com` },
+    data: {
+      name,
+      email:
+        overrides.email === undefined
+          ? `${Math.random().toString(36).slice(2, 10)}@example.com`
+          : overrides.email,
+      contactPerson: overrides.contactPerson ?? null,
+      accountNumber: overrides.accountNumber ?? null,
+      typicalLeadTimeDays: overrides.typicalLeadTimeDays ?? null,
+      status: overrides.status ?? "ACTIVE",
+    },
   });
 }
 

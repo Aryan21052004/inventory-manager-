@@ -29,6 +29,7 @@ import type {
   PurchaseStatus,
   StockReferenceType,
   StockTransactionType,
+  SupplierStatus,
   UserRole,
 } from "../src/generated/prisma/enums";
 
@@ -77,6 +78,14 @@ const daysAgo = (days: number, hour = 10): Date => {
 // Source data
 // ---------------------------------------------------------------------------
 
+/*
+ * One supplier is seeded ARCHIVED on purpose.
+ *
+ * They have products and purchases behind them, which is exactly the state
+ * worth having in development: it exercises the status filter, proves the
+ * pickers leave them out, and shows that an archived supplier's history — and
+ * the acquisition cost of the stock they delivered — survives untouched.
+ */
 const SUPPLIERS = [
   {
     key: "kestrel",
@@ -85,6 +94,9 @@ const SUPPLIERS = [
     phone: "+44 20 7946 0112",
     email: "orders@kestrel-electronics.co.uk",
     address: "Unit 14, Brightmoor Industrial Estate, Slough SL1 4XR",
+    accountNumber: "KES-4471",
+    typicalLeadTimeDays: 7,
+    status: "ACTIVE",
   },
   {
     key: "northwind",
@@ -93,6 +105,9 @@ const SUPPLIERS = [
     phone: "+44 161 496 0233",
     email: "sales@northwindcomponents.com",
     address: "3 Ashfield Way, Trafford Park, Manchester M17 1AB",
+    accountNumber: "NW-2200-B",
+    typicalLeadTimeDays: 14,
+    status: "ACTIVE",
   },
   {
     key: "meridian",
@@ -101,6 +116,9 @@ const SUPPLIERS = [
     phone: "+44 113 496 0781",
     email: "accounts@meridianoffice.co.uk",
     address: "Meridian House, 22 Kirkstall Road, Leeds LS3 1LX",
+    accountNumber: null,
+    typicalLeadTimeDays: 3,
+    status: "ACTIVE",
   },
   {
     key: "harbour",
@@ -109,6 +127,9 @@ const SUPPLIERS = [
     phone: "+353 1 903 4417",
     email: "hello@harbourpackaging.ie",
     address: "Pier 6, North Wall Quay, Dublin 1, D01 K5C9",
+    accountNumber: "HP-0091",
+    typicalLeadTimeDays: 21,
+    status: "ACTIVE",
   },
   {
     key: "aldridge",
@@ -117,6 +138,10 @@ const SUPPLIERS = [
     phone: "+44 121 496 0550",
     email: "trade@aldridgefurniture.co.uk",
     address: "Foundry Lane, Aldridge, Walsall WS9 8UZ",
+    accountNumber: null,
+    typicalLeadTimeDays: null,
+    // Out of circulation, with history intact behind them.
+    status: "INACTIVE",
   },
 ] as const;
 
@@ -510,7 +535,9 @@ async function main(): Promise<void> {
   const supplierIds = new Map<SupplierKey, string>();
 
   for (const { key, ...supplier } of SUPPLIERS) {
-    const row = await prisma.supplier.create({ data: supplier });
+    const row = await prisma.supplier.create({
+      data: { ...supplier, status: supplier.status as SupplierStatus },
+    });
     supplierIds.set(key, row.id);
   }
   console.log(`  ${supplierIds.size} suppliers`);

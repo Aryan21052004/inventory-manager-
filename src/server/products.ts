@@ -203,10 +203,8 @@ export interface ProductDetail {
   deletable: boolean;
 }
 
-export interface SupplierOption {
-  id: string;
-  name: string;
-}
+/** Re-exported so callers do not need to know which module owns suppliers. */
+export type { SupplierOption } from "@/server/suppliers";
 
 export type Result<T> = { ok: true; data: T } | { ok: false; error: SafeError };
 
@@ -465,17 +463,14 @@ export async function loadCategories(): Promise<string[]> {
   }
 }
 
-export async function loadSuppliers(): Promise<SupplierOption[]> {
-  try {
-    return await prisma.supplier.findMany({
-      orderBy: { name: "asc" },
-      select: { id: true, name: true },
-    });
-  } catch (error) {
-    toSafeError(error, "loadSuppliers");
-    return [];
-  }
-}
+/*
+ * Supplier options used to be loaded here, with a second copy in the purchases
+ * module and no notion of a supplier being archived. Both are gone: there is
+ * one loader, in src/server/suppliers.ts, and one rule about who may be picked.
+ * Re-exported rather than re-implemented so callers do not have to care which
+ * module owns it.
+ */
+export { loadSupplierOptions } from "@/server/suppliers";
 
 /**
  * Everything the detail page shows, in one round trip.
@@ -741,6 +736,13 @@ const MISSING_SUPPLIER = fieldError(
   "That supplier no longer exists. Pick another, or leave it unassigned.",
 );
 
+const ARCHIVED_SUPPLIER = (name: string) =>
+  fieldError(
+    "BAD_REQUEST",
+    "supplierId",
+    `"${name}" has been archived, so new products cannot be sourced from them. Pick an active supplier, leave it unassigned, or make them active again first.`,
+  );
+
 /**
  * Creates a product, and its opening stock along with it.
  *
@@ -797,6 +799,33 @@ export async function createProduct(
 
   try {
     return await prisma.$transaction(async (tx) => {
+      /*
+       * An archived supplier cannot be given new business, and a new catalogue
+       * item sourced from them is new business.
+       *
+       * The product form already leaves archived suppliers out of its picker,
+       * but a picker is a convenience, not the rule — this is a server action
+       * reachable with any `supplierId` somebody cares to send, and a stale
+       * form would send one in good faith. The rule lives here, where it cannot
+       * be edited on the way in.
+       *
+       * Only on create. An existing product that already names an archived
+       * supplier keeps that link and stays editable: `updateProduct` does not
+       * make this check, because taking a supplier out of circulation must not
+       * strand the catalogue rows already pointing at them.
+       */
+      if (data.supplierId) {
+        const supplier = await tx.supplier.findUnique({
+          where: { id: data.supplierId },
+          select: { name: true, status: true },
+        });
+
+        if (!supplier) throw MISSING_SUPPLIER;
+        if (supplier.status !== "ACTIVE") {
+          throw ARCHIVED_SUPPLIER(supplier.name);
+        }
+      }
+
       const product = await tx.product.create({
         data: {
           sku: data.sku,
@@ -857,6 +886,9 @@ export async function createProduct(
  * catalogue operation, and letting it set a quantity would put a second,
  * unaudited path next to the stock engine — one where a number changes and the
  * ledger never hears about it. Corrections go through `adjustStock`.
+ *
+ * The supplier rule it does enforce: an archived supplier can be kept but not
+ * newly chosen. See the comment inside.
  */
 export async function updateProduct(
   id: string,
@@ -879,20 +911,57 @@ export async function updateProduct(
   const data = parsed.data;
 
   try {
-    return await prisma.product.update({
-      where: { id },
-      data: {
-        sku: data.sku,
-        name: data.name,
-        description: data.description,
-        category: data.category,
-        standardCost: data.standardCost?.toFixed(2) ?? null,
-        sellingPrice: data.sellingPrice.toFixed(2),
-        minimumStock: data.minimumStock,
-        status: data.status,
-        supplierId: data.supplierId,
-      },
-      select: { id: true, name: true, sku: true },
+    return await prisma.$transaction(async (tx) => {
+      /*
+       * An archived supplier may be *kept*, but never newly *chosen*.
+       *
+       * The distinction is the whole rule. Archiving takes a supplier out of
+       * circulation for new business; it does not reach back into the catalogue
+       * and strand the products already sourced from them. So a product that
+       * already names an archived supplier stays editable with that supplier
+       * intact — renaming it, repricing it, retiring it all still work — while
+       * moving a *different* product onto that supplier is refused.
+       *
+       * Comparing against the product's current `supplierId` is what separates
+       * the two, and it is read inside this transaction so a concurrent edit
+       * cannot slip between the check and the write.
+       */
+      const existing = await tx.product.findUnique({
+        where: { id },
+        select: { supplierId: true },
+      });
+
+      if (!existing) throw new NotFoundError("Product");
+
+      const changingSupplier = data.supplierId !== existing.supplierId;
+
+      if (data.supplierId && changingSupplier) {
+        const supplier = await tx.supplier.findUnique({
+          where: { id: data.supplierId },
+          select: { name: true, status: true },
+        });
+
+        if (!supplier) throw MISSING_SUPPLIER;
+        if (supplier.status !== "ACTIVE") {
+          throw ARCHIVED_SUPPLIER(supplier.name);
+        }
+      }
+
+      return await tx.product.update({
+        where: { id },
+        data: {
+          sku: data.sku,
+          name: data.name,
+          description: data.description,
+          category: data.category,
+          standardCost: data.standardCost?.toFixed(2) ?? null,
+          sellingPrice: data.sellingPrice.toFixed(2),
+          minimumStock: data.minimumStock,
+          status: data.status,
+          supplierId: data.supplierId,
+        },
+        select: { id: true, name: true, sku: true },
+      });
     });
   } catch (error) {
     if (isUniqueViolation(error)) throw DUPLICATE_SKU(data.sku);

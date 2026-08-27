@@ -56,6 +56,22 @@ enum CustomerStatus {
   INACTIVE
 }
 
+/// Whether a supplier is still traded with. Two states for the same reason
+/// CustomerStatus has two: a supplier is either somebody new business may be
+/// placed with, or somebody whose record is kept for the history attached to
+/// it.
+///
+/// Archiving is the normal end of a supplier relationship, and deletion is
+/// reserved for a record created by mistake that nothing references. That is
+/// not a stylistic preference here — `Purchase.supplierId` is `Restrict`, so a
+/// supplier with any purchase cannot be deleted at all, and deleting one with
+/// products would fire `SetNull` and silently blank the sourcing on every
+/// catalogue row they supplied.
+enum SupplierStatus {
+  ACTIVE
+  INACTIVE
+}
+
 /// Sales order lifecycle.
 ///
 /// CONFIRMED is the only status that moves stock: it is the point the goods are
@@ -199,20 +215,63 @@ model Customer {
   @@map("customers")
 }
 
+/// Somebody we buy from.
+///
+/// A supplier is referenced by two things, and the difference between them is
+/// the whole of this model's design:
+///
+///   `products`  — where a catalogue item is normally sourced. Optional and
+///                 `SetNull`: a product can exist before its supplier is known,
+///                 and losing the supplier must not lose the product.
+///   `purchases` — what was actually bought. Required and `Restrict`: a
+///                 purchase is a document that has to keep saying who it was
+///                 placed with, so the database refuses to let that become
+///                 unanswerable.
+///
+/// That second relation is now load-bearing for costing as well as for
+/// paperwork. `StockLot.sourceId` points at the purchase that brought a batch
+/// in, so the chain from a unit on the shelf back to what was paid for it and
+/// who supplied it runs `StockLot → Purchase → Supplier`. The middle link is
+/// polymorphic rather than a foreign key, so it holds only because purchases
+/// are never deleted — see the note on StockLot. The last link is guarded by
+/// `Restrict`, and that guard is why a supplier with any purchase history
+/// cannot be removed no matter what the application does.
 model Supplier {
-  id            String   @id @default(cuid())
+  id            String  @id @default(cuid())
   name          String
-  contactPerson String?  @map("contact_person")
+  contactPerson String? @map("contact_person")
   phone         String?
-  email         String?  @unique
+  email         String? @unique
   address       String?
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  /// Our account with them — the reference *they* file us under, printed on
+  /// their invoices. Free text, because vendor numbering is theirs to decide.
+  accountNumber String? @map("account_number")
+
+  /// How long an order from this supplier usually takes to arrive, in days.
+  ///
+  /// A planning figure an operator types, not something measured from the
+  /// purchase history — that would be a different and much more careful
+  /// calculation, and this is the number someone wants when deciding whether
+  /// to reorder now. The unit is in the name so an integer cannot be read as
+  /// weeks by the next person.
+  typicalLeadTimeDays Int? @map("typical_lead_time_days")
+
+  /// ACTIVE suppliers can be assigned to products and raised purchases against;
+  /// INACTIVE ones are archived and offered in neither picker. Their existing
+  /// products and purchases are untouched and still name them — archiving takes
+  /// a supplier out of circulation, it does not rewrite what was already bought
+  /// from them, and it never touches a stock lot or an acquisition cost.
+  status SupplierStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   products  Product[]
   purchases Purchase[]
 
   @@index([name])
+  @@index([status])
   @@map("suppliers")
 }
 

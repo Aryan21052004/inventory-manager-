@@ -16,7 +16,8 @@ import {
   type RawSearchParams,
 } from "@/lib/product-query";
 import { getCurrentUser } from "@/server/auth";
-import { loadCategories, loadProductStats, loadSuppliers } from "@/server/products";
+import { loadCategories, loadProductStats } from "@/server/products";
+import { loadSupplierOptions } from "@/server/suppliers";
 
 export const metadata: Metadata = { title: "Products" };
 
@@ -50,7 +51,7 @@ export default async function ProductsPage({
     getCurrentUser(),
     loadProductStats(),
     loadCategories(),
-    loadSuppliers(),
+    loadSupplierOptions(),
   ]);
 
   const canManage = user?.role === "ADMIN";

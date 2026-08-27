@@ -20,7 +20,9 @@ import {
   toPurchaseFieldErrors,
   type PurchaseFieldErrors,
 } from "@/lib/validation/purchase";
+import type { SupplierStatus } from "@/generated/prisma/enums";
 import { requireUser } from "@/server/auth";
+import { getSupplierDetail } from "@/server/suppliers";
 import {
   applyStockMovement,
   createLot,
@@ -133,6 +135,8 @@ export interface SupplierSummary {
   email: string | null;
   phone: string | null;
   address: string | null;
+  /** So the page can say when a supplier is no longer open for new business. */
+  status: SupplierStatus;
   /** Live figures, counted across every purchase from this supplier. */
   purchaseCount: number;
   receivedCount: number;
@@ -164,11 +168,8 @@ export interface PurchaseDetail {
   hasRetiredProducts: boolean;
 }
 
-export interface SupplierOption {
-  id: string;
-  name: string;
-  email: string | null;
-}
+/** Re-exported so callers do not need to know which module owns suppliers. */
+export type { SupplierOption } from "@/server/suppliers";
 
 /** A product as the purchase builder's search results present it. */
 export interface PurchaseProductOption {
@@ -351,17 +352,17 @@ export async function loadPurchaseStats(): Promise<Result<PurchaseStats>> {
   }
 }
 
-export async function loadSupplierOptions(): Promise<SupplierOption[]> {
-  try {
-    return await prisma.supplier.findMany({
-      orderBy: { name: "asc" },
-      select: { id: true, name: true, email: true },
-    });
-  } catch (error) {
-    toSafeError(error, "loadSupplierOptions");
-    return [];
-  }
-}
+/*
+ * Supplier options used to be loaded here, with a second copy in the products
+ * module and no notion of a supplier being archived. Both are gone: there is
+ * one loader, in src/server/suppliers.ts, and one rule about who may be picked.
+ * The list filter needs a different rule — archived suppliers must stay
+ * findable — so it uses `loadSupplierFilterOptions` instead.
+ */
+export {
+  loadSupplierFilterOptions,
+  loadSupplierOptions,
+} from "@/server/suppliers";
 
 /**
  * Products that can be added to a purchase.
@@ -466,34 +467,21 @@ async function loadInventoryImpact(
   return [...byProduct.values()];
 }
 
-/** Live figures for a supplier, plus their recent purchases. */
+/**
+ * Live figures for a supplier, plus their recent purchases.
+ *
+ * Reads through `getSupplierDetail` rather than re-querying suppliers here.
+ * This panel and the supplier detail page were computing the same aggregate two
+ * different ways — same "received purchases only" rule written twice — and the
+ * one that drifts is the one nobody is looking at. The suppliers module owns
+ * that rule now; this trims the result to what the purchase page displays.
+ */
 async function loadSupplierSummary(supplierId: string): Promise<SupplierSummary> {
-  const [supplier, aggregate, received, recent] = await Promise.all([
-    prisma.supplier.findUniqueOrThrow({ where: { id: supplierId } }),
-    prisma.purchase.aggregate({
-      where: { supplierId },
-      _count: { _all: true },
-    }),
-    // Only received purchases count as money actually spent — a draft is a
-    // plan, and a cancelled purchase is one that did not happen.
-    prisma.purchase.aggregate({
-      where: { supplierId, status: "RECEIVED" },
-      _count: { _all: true },
-      _sum: { total: true },
-    }),
-    prisma.purchase.findMany({
-      where: { supplierId },
-      orderBy: { purchaseDate: "desc" },
-      take: 5,
-      select: {
-        id: true,
-        purchaseNumber: true,
-        status: true,
-        total: true,
-        purchaseDate: true,
-      },
-    }),
-  ]);
+  const detail = await getSupplierDetail(supplierId);
+
+  if (!detail.ok || !detail.data) throw new NotFoundError("Supplier");
+
+  const supplier = detail.data;
 
   return {
     id: supplier.id,
@@ -502,14 +490,15 @@ async function loadSupplierSummary(supplierId: string): Promise<SupplierSummary>
     email: supplier.email,
     phone: supplier.phone,
     address: supplier.address,
-    purchaseCount: aggregate._count._all,
-    receivedCount: received._count._all,
-    totalPurchased: (received._sum.total ?? 0).toString(),
-    recentPurchases: recent.map((row) => ({
+    status: supplier.status,
+    purchaseCount: supplier.purchaseCount,
+    receivedCount: supplier.receivedCount,
+    totalPurchased: supplier.totalPurchased,
+    recentPurchases: supplier.purchases.slice(0, 5).map((row) => ({
       id: row.id,
       purchaseNumber: row.purchaseNumber,
       status: row.status,
-      total: row.total.toString(),
+      total: row.total,
       purchaseDate: row.purchaseDate,
     })),
   };
@@ -692,13 +681,26 @@ export async function createPurchase(
       return await prisma.$transaction(async (tx) => {
         const supplier = await tx.supplier.findUnique({
           where: { id: purchase.supplierId },
-          select: { id: true },
+          select: { id: true, name: true, status: true },
         });
 
         if (!supplier) {
           throw badRequest(
             "supplierId",
             "That supplier no longer exists. Pick another.",
+          );
+        }
+
+        /*
+         * Archived suppliers are out of circulation for *new* business. The
+         * picker already leaves them out, so reaching this means either a stale
+         * form or a request that did not come from one — which is exactly why
+         * the rule is enforced here rather than only in the dropdown.
+         */
+        if (supplier.status !== "ACTIVE") {
+          throw badRequest(
+            "supplierId",
+            `"${supplier.name}" has been archived, so no new purchases can be raised with them. Pick another supplier, or make them active again first.`,
           );
         }
 
@@ -823,11 +825,21 @@ export interface PurchaseTransitionOutcome {
 async function lockPurchase(
   tx: Prisma.TransactionClient,
   purchaseId: string,
-): Promise<{ id: string; purchaseNumber: string; status: PurchaseStatus }> {
+): Promise<{
+  id: string;
+  purchaseNumber: string;
+  status: PurchaseStatus;
+  supplierId: string;
+}> {
   const rows = await tx.$queryRaw<
-    { id: string; purchase_number: string; status: PurchaseStatus }[]
+    {
+      id: string;
+      purchase_number: string;
+      status: PurchaseStatus;
+      supplier_id: string;
+    }[]
   >`
-    SELECT id, purchase_number, status
+    SELECT id, purchase_number, status, supplier_id
     FROM purchases
     WHERE id = ${purchaseId}
     FOR UPDATE
@@ -840,6 +852,9 @@ async function lockPurchase(
     id: purchase.id,
     purchaseNumber: purchase.purchase_number,
     status: purchase.status,
+    // Read under the same lock, so the "is this already our supplier" test in
+    // `updatePurchase` cannot race a concurrent edit that moved it.
+    supplierId: purchase.supplier_id,
   };
 }
 
@@ -1222,13 +1237,31 @@ export async function updatePurchase(
 
     const supplier = await tx.supplier.findUnique({
       where: { id: purchase.supplierId },
-      select: { id: true },
+      select: { id: true, name: true, status: true },
     });
 
     if (!supplier) {
       throw badRequest(
         "supplierId",
         "That supplier no longer exists. Pick another.",
+      );
+    }
+
+    /*
+     * An archived supplier is allowed here on one condition: they are already
+     * the supplier on this purchase.
+     *
+     * Archiving stops new business, it does not invalidate a document already
+     * raised. A draft placed with somebody who has since been archived must
+     * stay editable — otherwise archiving a supplier would strand every open
+     * order with them, and the only way to fix a line item would be to abandon
+     * the purchase. Moving a purchase *to* a different archived supplier is a
+     * new assignment, and is refused like any other.
+     */
+    if (supplier.status !== "ACTIVE" && supplier.id !== existing.supplierId) {
+      throw badRequest(
+        "supplierId",
+        `"${supplier.name}" has been archived, so this purchase cannot be moved to them. Pick an active supplier, or make them active again first.`,
       );
     }
 

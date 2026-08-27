@@ -8,8 +8,8 @@ Written for whoever picks this up next — a new developer, or a new session. It
 covers what exists, the rules the code is built around, and the things that will
 waste your afternoon if nobody tells you.
 
-**Last updated:** 27 August 2026, after replacing fixed product cost with FIFO
-lot costing (see §10).
+**Last updated:** 27 August 2026, after building the Suppliers module (§11) on
+top of the FIFO lot costing work (§10).
 
 ---
 
@@ -26,7 +26,7 @@ lot costing (see §10).
 | Purchases | Done | `/purchases`, `/purchases/new`, `/purchases/[id]`, `/purchases/[id]/edit` |
 | Stock movements | Done | `/stock-movements` |
 | Customers | Done | `/customers`, `/customers/[id]` |
-| Suppliers | **Placeholder** | `/suppliers` |
+| Suppliers | Done | `/suppliers`, `/suppliers/[id]` |
 | Reports | **Placeholder** | `/reports` |
 | Settings | Partial | `/settings` reports database and auth health |
 
@@ -125,10 +125,11 @@ protects everything beneath it. Roles are checked server-side in `requireRole`.
 Hiding a button is a courtesy, never the control.
 
 **Records with history are archived, never deleted.** A product that has traded
-becomes DISCONTINUED; a customer who has ordered becomes INACTIVE. The
-`Restrict` foreign keys would refuse the delete anyway — the status column
-exists so there is a way to take something out of circulation without editing
-the past. Archiving is *only* about what a picker offers: an archived customer
+becomes DISCONTINUED; a customer who has ordered becomes INACTIVE; a supplier
+who has been bought from becomes INACTIVE. The `Restrict` foreign keys would
+refuse most of these deletes anyway — the status column exists so there is a
+way to take something out of circulation without editing the past. Suppliers
+are the one place where a `Restrict` is *not* enough on its own; see §11. Archiving is *only* about what a picker offers: an archived customer
 keeps every order, still displays on them, still counts towards their spend, and
 their existing drafts stay editable.
 
@@ -314,19 +315,9 @@ tiles. They describe the customer base, not the current view.
 
 ## 8. What is not built
 
-**`/suppliers` and `/reports` are placeholders.**
-- **Suppliers (`/suppliers`):** Supplier information and purchase history are
-  shown on the purchase detail page, and suppliers can be chosen on products.
-  A standalone supplier CRUD list/detail module is still placeholder. The
-  Customers module is the template to copy — `Supplier` even has one field more
-  (`contactPerson`) and two relations instead of one.
-- **Reports (`/reports`):** Valuation, movement, low-stock/dead-stock, and
-  supplier spend summaries across date ranges with CSV export.
-
-**Suppliers have no archive.** `Customer.status` was added for exactly this
-problem — a record with history that has to leave circulation without being
-deleted — and `Supplier` still has no equivalent. It needs the same treatment
-when that module is built.
+**`/reports` is a placeholder.** Valuation, movement, low-stock/dead-stock, and
+supplier spend summaries across date ranges with CSV export. Lot costing (§10)
+unblocked the money side of it.
 
 **Other gaps.** No user management UI. No Clerk webhook, so a name or email
 changed in Clerk leaves a stale local mirror and a deletion is invisible
@@ -340,16 +331,7 @@ refused because the goods have shipped.
 
 The most logical next steps for the application:
 
-1. **Suppliers module (`/suppliers`)**:
-   - Copy the Customers module almost verbatim: `src/lib/supplier-query.ts`,
-     `src/server/suppliers.ts`, `src/app/(app)/suppliers/*`, a `SupplierStatus`
-     enum and migration, and `tests/suppliers.test.ts`.
-   - Two differences to plan for. A supplier has **two** relations, not one:
-     archiving them has to keep them off new *purchases* and, arguably, off the
-     product form's supplier picker — decide which. And `Product.supplierId` is
-     `SetNull`, not `Restrict`, so a supplier with products but no purchases is
-     technically deletable; decide whether that should be allowed.
-2. **Reports module (`/reports`)**:
+1. **Reports module (`/reports`)**:
    - Aggregates over `Product`, `StockTransaction`, `Order`, and `Purchase`
      with date range filtering and CSV export. Worth doing after Suppliers, when
      the whole transaction history is reachable from both sides.
@@ -357,7 +339,10 @@ The most logical next steps for the application:
      product, customer or period is computable from `OrderItem.costTotal`.
      **Every money figure must carry its coverage** — see §10 and use the
      helpers in `src/lib/cost-coverage.ts` rather than subtracting by hand.
-3. **Certificates on lots** — the change §10 was designed to make additive.
+2. **Certificates on lots** — the change §10 was designed to make additive, and
+   the decision deferred when Suppliers was built. Worth settling the business
+   workflow around certificates first: whether the release authority is the
+   supplier, the lot, or both.
 
 ---
 
@@ -430,3 +415,86 @@ cost", which is the truth.
 Expect the uncosted share to be at its highest immediately after the migration
 and to shrink on its own: uncosted lots are the oldest, so FIFO drains them
 first.
+
+---
+
+## 11. Suppliers, and the two relationships
+
+Suppliers look like customers and are not, in one way that matters. A customer
+is referenced by one thing. A supplier is referenced by two, with different
+foreign keys and different consequences:
+
+| Relation | Column | On delete | What that means |
+| --- | --- | --- | --- |
+| `products` | `Product.supplierId`, nullable | `SetNull` | A product can exist before its supplier is known, and losing the supplier must not lose the product. |
+| `purchases` | `Purchase.supplierId`, NOT NULL | `Restrict` | A purchase must always say who it was placed with. The database enforces it. |
+
+### Deletion is stricter than for customers, and only half of it is a constraint
+
+A supplier can be deleted only when they have **no purchases and no products**.
+
+The purchases half is enforced by `Restrict` regardless of what the application
+does; `deleteSupplier` checks it anyway so the refusal is a sentence somebody
+can act on rather than a foreign key violation. That constraint is also the last
+link in the provenance chain — a stock lot points at the purchase that delivered
+it, and that purchase points at the supplier.
+
+**The products half is the one worth remembering, because the database will not
+stop it.** `Product.supplierId` is `SetNull`, so deleting a supplier with
+products *succeeds* and silently blanks the sourcing on every catalogue row they
+supply, with no ledger to explain it afterwards. Refusing that is application
+logic in `deleteSupplier`, and the foreign key stays as it is as defence in
+depth against a raw SQL delete. Do not "simplify" this by trusting the schema.
+
+### Archiving
+
+`SupplierStatus` mirrors `CustomerStatus`, and archiving is the normal end of a
+supplier relationship. It takes them out of **two** pickers — new purchases and
+the product form — and out of nothing else:
+
+- an existing purchase keeps its supplier and stays editable;
+- a **pending delivery can still be received**, because goods that physically
+  arrived have to be bookable in;
+- a product already sourced from them keeps the link and stays editable;
+- no stock lot, quantity, or acquisition cost is touched. Archiving is one
+  column on one row.
+
+Moving a purchase *to* an archived supplier is refused — that is a new
+assignment, not an existing obligation. Products follow the same shape:
+`createProduct` refuses an archived supplier outright, and `updateProduct`
+refuses one **only when it is a change**. Keeping the archived supplier a
+product already has is allowed; choosing a different archived supplier is not.
+Both checks compare against the record's current supplier inside the write
+transaction, and both live on the server — the pickers exclude archived
+suppliers as a convenience, never as the rule.
+
+### One loader, two rules
+
+`loadSupplierOptions(includeId?)` in `src/server/suppliers.ts` is the only
+supplier picker loader. Products and purchases each used to keep their own, with
+different `select`s and no notion of status.
+
+`includeId` is not optional decoration. It keeps a named supplier in the list
+whatever their status, and without it archiving would strand every document and
+product already pointing at them: the select would find no matching option,
+blank the field, and the save would reject a record nobody had edited. It takes
+one id or several — the product list passes the archived supplier of whichever
+row is being edited.
+
+`loadSupplierFilterOptions()` is deliberately separate and returns **everyone**.
+A picker asks who may be given new business; a filter asks whose records to
+find. Excluding archived suppliers from a filter would make their history
+unreachable from the only control that could reach it.
+
+### Permissions
+
+Create and edit are `requireUser()` — a purchase needs a supplier, both roles
+raise purchases. Archive, reactivate and delete are `requireRole("ADMIN")`.
+
+### What was deliberately not built
+
+No link between certificates and suppliers. `Certificate` still points only at a
+product. The release authority for an airworthiness document is often the
+supplier, and that question interacts with the `Certificate.stockLotId` change
+§10 was designed to make additive — both are deferred until the certificate
+workflow is defined, and should be decided together.

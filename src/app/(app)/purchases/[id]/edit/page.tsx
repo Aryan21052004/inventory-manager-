@@ -14,9 +14,9 @@ import { isEditable, purchaseStatusLabel } from "@/lib/purchase-status";
 import {
   getPurchaseDetail,
   loadPurchaseProducts,
-  loadSupplierOptions,
   searchPurchaseProducts,
 } from "@/server/purchases";
+import { loadSupplierOptions } from "@/server/suppliers";
 
 export const dynamic = "force-dynamic";
 
@@ -79,7 +79,12 @@ export default async function EditPurchasePage({
    * vanish from the form and silently disappear from the purchase on save.
    */
   const [suppliers, searchResults, lineProducts] = await Promise.all([
-    loadSupplierOptions(),
+    /*
+     * The purchase's own supplier is kept in the list even if archived. Without
+     * it the select would find no matching option, blank the field, and the
+     * save would then reject a purchase nobody had actually edited.
+     */
+    loadSupplierOptions(purchase.supplier.id),
     searchPurchaseProducts("", 20),
     loadPurchaseProducts(purchase.lines.map((line) => line.productId)),
   ]);

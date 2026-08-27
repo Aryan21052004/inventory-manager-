@@ -16,7 +16,8 @@ import {
   toPurchaseSearchParams,
   type RawSearchParams,
 } from "@/lib/purchase-query";
-import { loadPurchaseStats, loadSupplierOptions } from "@/server/purchases";
+import { loadPurchaseStats } from "@/server/purchases";
+import { loadSupplierFilterOptions } from "@/server/suppliers";
 
 export const metadata: Metadata = { title: "Purchases" };
 
@@ -42,7 +43,7 @@ export default async function PurchasesPage({
 
   const [stats, suppliers] = await Promise.all([
     loadPurchaseStats(),
-    loadSupplierOptions(),
+    loadSupplierFilterOptions(),
   ]);
 
   return (

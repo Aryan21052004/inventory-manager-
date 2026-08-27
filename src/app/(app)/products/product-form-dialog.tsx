@@ -80,6 +80,12 @@ export interface ProductFormValues {
   minimumStock: number;
   status: string;
   supplierId: string | null;
+  /**
+   * Carried alongside the id so the select can still name a supplier who has
+   * since been archived. The options list holds active suppliers only; without
+   * the name, an archived one would render as a blank row.
+   */
+  supplierName?: string | null;
 }
 
 export interface SupplierOption {
@@ -119,6 +125,30 @@ function ProductFormDialog({
   const editing = product !== undefined;
   const categoryListId = `${fieldId}-categories`;
   const certificateTypeListId = `${fieldId}-certificate-types`;
+
+  /*
+   * Active suppliers, plus this product's own if it has since been archived.
+   *
+   * The options list deliberately excludes archived suppliers — they must not
+   * be available for a *new* assignment. But a product already sourced from one
+   * has to keep showing it, or opening the edit dialog would silently drop the
+   * supplier and saving would clear a field nobody meant to touch. Archiving
+   * stops new business; it does not make existing records unsaveable.
+   *
+   * Flagged in the list rather than shown plainly, so nobody picks it back up
+   * without noticing what it is.
+   */
+  const supplierChoices: (SupplierOption & { archived?: boolean })[] =
+    product?.supplierId && !suppliers.some((s) => s.id === product.supplierId)
+      ? [
+          ...suppliers,
+          {
+            id: product.supplierId,
+            name: product.supplierName ?? "Archived supplier",
+            archived: true,
+          },
+        ]
+      : suppliers;
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -408,9 +438,10 @@ function ProductFormDialog({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={NO_SUPPLIER}>Unassigned</SelectItem>
-                  {suppliers.map((supplier) => (
+                  {supplierChoices.map((supplier) => (
                     <SelectItem key={supplier.id} value={supplier.id}>
                       {supplier.name}
+                      {supplier.archived ? " (archived)" : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
