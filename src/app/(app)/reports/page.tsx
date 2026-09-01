@@ -1,6 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { BarChart3, Boxes, ShoppingCart, Truck } from "lucide-react";
+import {
+  ArrowLeftRight,
+  BarChart3,
+  Boxes,
+  ShoppingCart,
+  Truck,
+} from "lucide-react";
 
 import {
   Card,
@@ -17,7 +23,7 @@ export const metadata: Metadata = { title: "Reports" };
 /**
  * The report index.
  *
- * Three reports in this version. The catalogue beyond them is documented in
+ * Four reports in this version. The catalogue beyond them is documented in
  * HANDOVER.md rather than listed here as disabled cards — a page of things you
  * cannot click is a worse answer than a short page of things you can.
  */
@@ -26,6 +32,7 @@ const REPORTS = [
   { key: "valuation", icon: Boxes, href: "/reports/valuation" },
   { key: "sales", icon: ShoppingCart, href: "/reports/sales" },
   { key: "purchases", icon: Truck, href: "/reports/purchases" },
+  { key: "movements", icon: ArrowLeftRight, href: "/reports/movements" },
 ] as const;
 
 export default function ReportsPage() {
@@ -33,10 +40,10 @@ export default function ReportsPage() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Reports"
-        description="Stock valuation, sales and procurement, over any period, exportable as CSV."
+        description="Stock valuation, sales, procurement and stock movement, over any period, exportable as CSV."
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {REPORTS.map(({ key, icon: Icon, href }) => (
           <Link
             key={key}

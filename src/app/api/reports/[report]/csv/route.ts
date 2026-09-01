@@ -4,12 +4,14 @@ import {
   describeRange,
   isReportKey,
   reportParamsFor,
+  reportRowLabel,
   REPORT_CONFIG,
   REPORT_TITLES,
   type ReportKey,
   type ReportParams,
 } from "@/lib/report-query";
 import {
+  loadMovementSummaryReport,
   loadPurchaseSpendReport,
   loadSalesReport,
   loadValuationReport,
@@ -74,6 +76,9 @@ function preamble(report: ReportKey, params: ReportParams): string[] {
   }
   if (params.search) lines.push(`Search: ${params.search}`);
   if (params.category) lines.push(`Category: ${params.category}`);
+  if (params.movementType) {
+    lines.push(`Movement type: ${params.movementType}`);
+  }
 
   return lines;
 }
@@ -244,6 +249,54 @@ async function render(
               "Realised revenue is blank for this grouping: an order-level discount applies to a whole order and is not apportioned across lines.",
             ]
           : []),
+        ...truncated(rows.length),
+      ],
+    );
+  }
+
+  if (report === "movements") {
+    const result = await loadMovementSummaryReport(params);
+    if (!result.ok) rethrow(result.error);
+
+    const { rows, totals } = result.data;
+
+    return toCsv(
+      [
+        "Group",
+        "Detail",
+        "Movements",
+        "Products",
+        "Units in",
+        "Units out",
+        "Net change",
+      ],
+      [
+        ...rows.map((row) => [
+          reportRowLabel(params.grouping, row.label),
+          row.sublabel,
+          row.movements,
+          row.products,
+          row.unitsIn,
+          row.unitsOut,
+          row.netChange,
+        ]),
+        [
+          "TOTAL",
+          "",
+          totals.movements,
+          totals.products,
+          totals.unitsIn,
+          totals.unitsOut,
+          totals.netChange,
+        ],
+      ],
+      [
+        ...preamble(report, params),
+        "Dated by when each movement was recorded in the ledger — the moment the stock actually moved.",
+        "Direction is read from the balance a movement left behind, not from its type, so a cancellation counts against the movement it undid.",
+        "Units in minus units out equals net change. A confirmation and its later cancellation remain two movements.",
+        "Opening stock and manual adjustments are included. Stock that predates the ledger has no movement and is not reported.",
+        "Quantities only. Movement value and cost of sales are deliberately absent — per-movement cost is on the stock movements page.",
         ...truncated(rows.length),
       ],
     );

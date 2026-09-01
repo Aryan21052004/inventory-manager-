@@ -31,7 +31,7 @@ export const MOVEMENT_TYPES: readonly StockTransactionType[] = [
   "REVERSAL",
 ] as const;
 
-function isMovementType(value: unknown): value is StockTransactionType {
+export function isMovementType(value: unknown): value is StockTransactionType {
   return (
     typeof value === "string" &&
     (MOVEMENT_TYPES as readonly string[]).includes(value)

@@ -8,10 +8,10 @@ Written for whoever picks this up next — a new developer, or a new session. It
 covers what exists, the rules the code is built around, and the things that will
 waste your afternoon if nobody tells you.
 
-**Last updated:** 1 September 2026, after removing threshold-based stock
-classification from the product entirely (§16), on top of the dead-code audit
-and cleanup pass (§15), the Tier 1 Reports module (§13) and the Dashboard
-rebuild (§12).
+**Last updated:** 1 September 2026, after adding the stock movement summary —
+the first Tier 2 report (§13) — on top of the removal of threshold-based stock
+classification (§16), the dead-code audit and cleanup pass (§15), the Tier 1
+Reports module (§13) and the Dashboard rebuild (§12).
 
 ---
 
@@ -29,7 +29,7 @@ rebuild (§12).
 | Stock movements | Done | `/stock-movements` |
 | Customers | Done | `/customers`, `/customers/[id]` |
 | Suppliers | Done | `/suppliers`, `/suppliers/[id]` |
-| Reports | Tier 1 done | `/reports`, `/reports/[report]` |
+| Reports | Tier 1 done, plus stock movement summary | `/reports`, `/reports/[report]` |
 | Settings | Partial | `/settings` reports database and auth health |
 
 ### Commit history
@@ -344,11 +344,12 @@ tiles. They describe the customer base, not the current view.
 
 ## 8. What is not built
 
-**Reports beyond Tier 1.** Three are built (§13). Five more are designed and
-deliberately not built: profitability and cost coverage, stock movement summary,
-inventory ageing by lot, supplier provenance, and a certificate compliance
-register. The last is the one worth doing next — an exportable airworthiness
-register is not something generic ERP ships, and the data already supports it.
+**Reports beyond Tier 1.** Four are built (§13) — the three Tier 1 reports and
+the stock movement summary, which was the first of Tier 2. Four more are
+designed and deliberately not built: profitability and cost coverage, inventory
+ageing by lot, supplier provenance, and a certificate compliance register. The
+last is the one worth doing next — an exportable airworthiness register is not
+something generic ERP ships, and the data already supports it.
 
 **Low and dead stock is removed from the product, not deferred.** It was the
 sixth Tier 2 report, and the threshold machinery behind it was *built* — a
@@ -375,11 +376,11 @@ refused because the goods have shipped.
 
 The most logical next steps for the application:
 
-1. **Reports Tier 2** — five are designed and unbuilt; see §13. Profitability is
-   the obvious next one and carries the sharpest trap: it cannot report a margin
-   until cost coverage is non-zero, and today it is zero. Use the helpers in
-   `src/lib/cost-coverage.ts` and the dashboard's rules rather than subtracting
-   by hand.
+1. **Reports Tier 2** — the stock movement summary is built; four are designed
+   and unbuilt; see §13. Profitability carries the sharpest trap: it cannot
+   report a margin until cost coverage is non-zero, and today it is zero. Use
+   the helpers in `src/lib/cost-coverage.ts` and the dashboard's rules rather
+   than subtracting by hand.
 2. **Certificate compliance register** — Tier 2's most valuable report for this
    business, and the one no generic ERP ships. The data already supports it.
 3. **Certificates on lots** — the change §10 was designed to make additive, and
@@ -621,14 +622,18 @@ WHERE o.status = ANY(${revenueStatuses()}::"OrderStatus"[])
 
 ## 13. Reports
 
-Three reports are built. `/reports` is the index; `/reports/[report]` renders
-one; `/api/reports/[report]/csv` exports it.
+Four reports are built — the three Tier 1 reports and the first of Tier 2.
+`/reports` is the index; `/reports/[report]` renders one;
+`/api/reports/[report]/csv` exports it. All four read their state from the query
+string through `reportParamsFor`, which is the only reason a page and its export
+cannot come to answer differently phrased questions.
 
 | Report | What it answers | Date basis |
 | --- | --- | --- |
 | **Stock valuation** | What is on the shelf and what it cost | current state |
 | **Sales** | What sold, to whom, for how much | `orders.confirmed_at` |
 | **Purchase spend** | What was bought and from whom | `purchases.received_at` |
+| **Stock movement summary** | How much moved in and out, and net | `stock_transactions.created_at` |
 
 ### One date rule: the economic event
 
@@ -695,6 +700,85 @@ still showed a sequential scan — the query reads two thirds of the table, whic
 is the wrong shape for an index. `stock_lot_consumptions(lot_id, created_at)`
 has no query to serve until as-of valuation exists.
 
+### The stock movement summary, and the sign that is easy to get wrong
+
+The first Tier 2 report, and the only one so far that reports quantities rather
+than money.
+
+**Direction comes from the balance, never from the type.** This is the whole of
+it. `stock_transactions.quantity` is always positive — the column stores the
+size of the move, and a check constraint enforces `quantity > 0`. Only STOCK_IN
+and STOCK_OUT carry their direction in the type. ADJUSTMENT and REVERSAL go
+either way, and on the development database both do: reversals net +329 in and
+−225 out, adjustments +25 and −16. A `CASE` on the type inverts one kind of
+reversal — a cancelled purchase's, or a cancelled order's, whichever way it is
+written — and produces a table nobody would question.
+
+The one expression correct for all four types is
+
+```sql
+delta = new_stock - previous_stock
+```
+
+which `stock_transactions_arithmetic_balances` guarantees. Everything the report
+reports is built from it:
+
+```sql
+units_in  = SUM(GREATEST(delta, 0))
+units_out = SUM(-LEAST(delta, 0))
+net       = SUM(delta)
+```
+
+so `units_in - units_out = net` holds for every row and for the totals. Two
+tests pin the two reversal directions specifically, because that is the failure
+that would survive review.
+
+**Dated by `created_at`, and here that *is* the economic event.** Unlike sales
+and procurement, the ledger row is written inside the same database transaction
+as the balance change — there is no second timestamp meaning "when it really
+moved". `StockLot.receivedAt` exists for backfilled batches that arrived before
+this system and does not apply: those lots carry no originating transaction and
+so contribute no movement at all.
+
+**Nothing is reconstructed.** Stock that predates the ledger has no movement and
+is not reported. The report never derives a movement from an order, a purchase,
+a lot or a current quantity — a test seeds 500 units with no ledger row behind
+them and asserts the report says nothing about them.
+
+**Aggregate only.** `/stock-movements` remains the per-row ledger, with the
+reference document, the operator, the note and the per-movement cost. The report
+links to it rather than reproducing it.
+
+**Groupings: month, product, category, movement type. Filters: period, category,
+search, movement type.** Sorted newest-first by default — `label` descending,
+which for the default month grouping means the current month at the top. Busiest
+first was tried and read badly: it scattered the months (08, 07, 06, 09) with
+the current one last. Every other sort key stays available and an explicitly
+chosen sort is untouched by that default.
+
+Deliberately no supplier or customer, in either role.
+Only movements carrying a document reference have one, so such a grouping would
+silently drop opening stock and every manual adjustment — and its rows would
+then fail to sum to the report's own totals. Supplier provenance is a separate
+Tier 2 report with a query shaped for the question.
+
+**No money at all.** No movement value, no cost of sales, no coverage. A "value
+moved" column on a movement report is one screenshot away from being read as
+cost of sales, and per-movement cost already exists on the ledger page.
+
+**No migration and no new index.** `stock_transactions` already carries
+`@@index([createdAt])`, `([productId, createdAt])`, `([type])` and
+`([referenceType, referenceId])`; every access path this report uses was already
+indexed. Following the rule set earlier in this section, an index would have to
+be measured before it was added.
+
+The movement type filter added one field to the shared `ReportParams`
+(`movementType`, URL key `mtype`). It lives there rather than in a parser of its
+own for the same reason the groupings do: the CSV route reads the same
+parameters the page did, and a second parser is how the two drift apart.
+`reportRowLabel` in `src/lib/report-query.ts` is the single place the raw enum
+becomes "Stock In", so the screen and the export cannot spell it differently.
+
 ### Known limitations
 
 **Historical COGS does not exist and is not reconstructed.** Orders confirmed
@@ -709,9 +793,43 @@ reproduces `quantityRemaining` exactly — but backfilled lots carry a
 before that boundary would misstate them. There is deliberately no date picker
 implying otherwise.
 
-**The certificate compliance register is deferred**, along with the other four
+**The certificate compliance register is deferred**, along with the other three
 Tier 2 reports. Certificates are unchanged, and `Certificate.stockLotId` was not
 introduced.
+
+**Browser QA of the stock movement summary is complete.** Run in setup mode
+against live development data: the index, the report page, all four groupings,
+the movement-type filter and Reset, category and search, pagination, the empty
+state, the CSV download and the 375px layout. Two things are worth recording
+because they are the ones the eye caught and the tests could not.
+
+The first is the evidence that the sign rule works, visible on screen. Grouped
+by movement type, the ledger reports:
+
+| | Movements | Units in | Units out | Net |
+| --- | ---: | ---: | ---: | ---: |
+| Stock Out | 19 | — | 872 | −872 |
+| Stock In | 13 | 1,748 | — | +1,748 |
+| Reversal | 6 | **329** | **225** | +104 |
+| Adjustment | 4 | **25** | **16** | +9 |
+
+Reversal and Adjustment each carry traffic in *both* directions. That is what a
+type-based sign rule cannot produce, and it is the fastest way to check the
+report is still honest after any edit to the loader.
+
+The second is that two cosmetic problems were found and fixed. The index grid
+was `xl:grid-cols-3`, which left the fourth card alone on a second row; it is
+`xl:grid-cols-4` now and the four render as one row. And the default sort was
+`movements`, which is the ordering described above as reading badly; it is
+`label` now.
+
+**Two pre-existing issues in the shared report filter bar were found and
+deliberately not fixed**, since neither belongs to this report and both predate
+it. A `range=custom` URL renders a **blank Period trigger** — the control builds
+its options from `RANGE_PRESETS.filter(p => p !== "custom")`, so a custom range
+has no item to select; confirmed identical on `/reports/sales`. And a `?page=N`
+beyond the last page renders the **empty state rather than clamping** to the
+last page. Both affect all four reports.
 
 ---
 

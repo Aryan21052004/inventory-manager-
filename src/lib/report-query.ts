@@ -1,9 +1,14 @@
+import type { StockTransactionType } from "@/generated/prisma/enums";
 import {
   monthsAgo,
   readDateRange,
   readOne,
   type RawSearchParams,
 } from "@/lib/date-range";
+import {
+  isMovementType,
+  MOVEMENT_TYPE_LABELS,
+} from "@/lib/stock-movement-query";
 
 /**
  * The reports' state, and how it maps to the URL.
@@ -15,7 +20,12 @@ import {
  * different queries would be two answers to one question.
  */
 
-export const REPORT_KEYS = ["valuation", "sales", "purchases"] as const;
+export const REPORT_KEYS = [
+  "valuation",
+  "sales",
+  "purchases",
+  "movements",
+] as const;
 export type ReportKey = (typeof REPORT_KEYS)[number];
 
 export function isReportKey(value: unknown): value is ReportKey {
@@ -28,6 +38,7 @@ export const REPORT_TITLES: Record<ReportKey, string> = {
   valuation: "Stock valuation",
   sales: "Sales",
   purchases: "Purchase spend",
+  movements: "Stock movement summary",
 };
 
 export const REPORT_DESCRIPTIONS: Record<ReportKey, string> = {
@@ -35,6 +46,8 @@ export const REPORT_DESCRIPTIONS: Record<ReportKey, string> = {
     "What is on the shelf and what it actually cost, at current state.",
   sales: "Realised sales, dated by when each order was confirmed.",
   purchases: "Procurement spend, dated by when each delivery was received.",
+  movements:
+    "What moved in and out of stock, dated by when each movement was recorded.",
 };
 
 /**
@@ -84,6 +97,33 @@ export const REPORT_CONFIG = {
     sortKeys: ["value", "units", "purchases", "label"] as readonly string[],
     defaultSort: "value",
   },
+  /*
+   * Deliberately no supplier or customer grouping. Only movements carrying a
+   * document reference have either, so such a grouping would quietly drop
+   * opening stock and every manual adjustment — and its rows would then fail to
+   * sum to the report's own totals. Supplier-level provenance is a separate
+   * Tier 2 report with a query shaped for the question.
+   *
+   * `label` is the default sort, which with the default `desc` direction puts
+   * the newest month first. Busiest-first was tried and read badly: the default
+   * grouping is by month, and ordering months by movement count scattered them
+   * (08, 07, 06, 09) with the current month last. Sorting by the signed net
+   * change would be worse still, pushing every month of net outflow to the
+   * back. Every other sort key remains available and behaves as asked for.
+   */
+  movements: {
+    groupings: ["period", "product", "category", "type"] as readonly string[],
+    defaultGrouping: "period",
+    sortKeys: [
+      "movements",
+      "products",
+      "in",
+      "out",
+      "net",
+      "label",
+    ] as readonly string[],
+    defaultSort: "label",
+  },
 } satisfies Record<
   ReportKey,
   {
@@ -100,6 +140,7 @@ export const GROUPING_LABELS: Record<string, string> = {
   category: "Category",
   customer: "Customer",
   supplier: "Supplier",
+  type: "Movement type",
 };
 
 const REPORT_PAGE_SIZES = [25, 50, 100, 250] as const;
@@ -138,6 +179,12 @@ export interface ReportParams {
   customerId: string | null;
   category: string | null;
   search: string;
+  /**
+   * Narrows the stock movement summary to one ledger type. Ignored by every
+   * other report, which is why it lives here with the rest of the shared state
+   * rather than in a second parser the CSV route would have to duplicate.
+   */
+  movementType: StockTransactionType | null;
 }
 
 /**
@@ -219,6 +266,10 @@ export function parseReportParams(
     customerId: readOne(raw, "customer"),
     category: readOne(raw, "category"),
     search: readOne(raw, "q") ?? "",
+    movementType: (() => {
+      const value = readOne(raw, "mtype");
+      return isMovementType(value) ? value : null;
+    })(),
   };
 }
 
@@ -260,6 +311,7 @@ export function toReportSearchParams(
   if (params.customerId) query.set("customer", params.customerId);
   if (params.category) query.set("category", params.category);
   if (params.search) query.set("q", params.search);
+  if (params.movementType) query.set("mtype", params.movementType);
 
   return query;
 }
@@ -313,6 +365,19 @@ export function reportSortHref(
     },
     defaults,
   );
+}
+
+/**
+ * The label a grouped row is shown under.
+ *
+ * Only the movement summary needs a translation: it groups by the ledger's own
+ * enum, and `STOCK_IN` is not what anybody wants to read. The mapping lives
+ * here rather than in the page so the CSV cannot come to spell a movement type
+ * differently from the screen it was downloaded from.
+ */
+export function reportRowLabel(grouping: string, label: string): string {
+  if (grouping !== "type") return label;
+  return MOVEMENT_TYPE_LABELS[label as StockTransactionType] ?? label;
 }
 
 /** A human sentence for the window a report covers, for the page and the CSV. */

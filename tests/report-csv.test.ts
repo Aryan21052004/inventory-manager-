@@ -7,8 +7,13 @@ vi.mock("@clerk/nextjs/server", async () => {
 
 import { csvField, csvRow, toCsv } from "@/lib/csv";
 import { prisma } from "@/lib/prisma";
-import { parseReportParams, type ReportParams } from "@/lib/report-query";
 import {
+  parseReportParams,
+  REPORT_CONFIG,
+  type ReportParams,
+} from "@/lib/report-query";
+import {
+  loadMovementSummaryReport,
   loadPurchaseSpendReport,
   loadSalesReport,
   loadValuationReport,
@@ -272,5 +277,140 @@ describe("the CSV totals match the page totals", () => {
     ).text();
 
     expect(csv).toContain("not apportioned across lines");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The stock movement summary export
+// ---------------------------------------------------------------------------
+
+describe("the stock movement summary export", () => {
+  function movementParams(overrides: Partial<ReportParams> = {}): ReportParams {
+    return {
+      ...parseReportParams({ range: "all" }, REPORT_CONFIG.movements),
+      ...overrides,
+    };
+  }
+
+  async function movements() {
+    const supplier = await createSupplier("Alpha Supply");
+    const buyer = await prisma.customer.create({ data: { name: "Contoso" } });
+    const a = await seedProduct({
+      sku: "M-1",
+      name: 'Bracket, 4x6" Rev.B',
+      stockQuantity: 0,
+      sellingPrice: "100.00",
+    });
+
+    const purchase = await createPurchase({
+      supplierId: supplier.id,
+      items: [{ productId: a.id, quantity: 60, unitCost: "40.00" }],
+    });
+    await receivePurchase(purchase.id);
+
+    const order = await createOrder({
+      customerId: buyer.id,
+      items: [{ productId: a.id, quantity: 14 }],
+      discount: "0",
+    });
+    await confirmOrder(order.id);
+  }
+
+  it("refuses an unauthenticated request", async () => {
+    // The export must not be a weaker path to the data than the page.
+    const response = await GET(request("movements"), routeParams("movements"));
+    expect(response.status).toBe(401);
+  });
+
+  it("agrees with the page on every total", async () => {
+    await signInWithRole("STAFF");
+    await movements();
+
+    const page = await loadMovementSummaryReport(movementParams());
+    if (!page.ok) throw new Error("expected the report");
+
+    const csv = await (
+      await GET(request("movements"), routeParams("movements"))
+    ).text();
+
+    const totalRow = bodyRows(csv).find((line) => line.startsWith("TOTAL,"));
+    expect(totalRow).toBeDefined();
+    expect(totalRow).toBe(
+      [
+        "TOTAL",
+        "",
+        page.data.totals.movements,
+        page.data.totals.products,
+        page.data.totals.unitsIn,
+        page.data.totals.unitsOut,
+        page.data.totals.netChange,
+      ].join(","),
+    );
+
+    // The reconciliation the screen shows has to survive the export.
+    expect(page.data.totals.unitsIn - page.data.totals.unitsOut).toBe(
+      page.data.totals.netChange,
+    );
+  });
+
+  it("carries the direction and quantity-only caveats into the file", async () => {
+    await signInWithRole("STAFF");
+    await movements();
+
+    const csv = await (
+      await GET(request("movements"), routeParams("movements"))
+    ).text();
+
+    expect(csv).toContain("Direction is read from the balance");
+    expect(csv).toContain("Movement value and cost of sales are deliberately absent");
+    expect(csv).toContain("Group,Detail,Movements,Products,Units in,Units out,Net change");
+  });
+
+  it("honours the movement type filter it was given", async () => {
+    await signInWithRole("STAFF");
+    await movements();
+
+    const csv = await (
+      await GET(
+        request("movements", "range=all&group=type&mtype=STOCK_OUT"),
+        routeParams("movements"),
+      )
+    ).text();
+
+    expect(csv).toContain("Movement type: STOCK_OUT");
+    // One grouped row plus the totals row: the inbound movement is filtered out.
+    const rows = bodyRows(csv);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain("Stock Out");
+    expect(rows[0]).not.toContain("STOCK_OUT");
+  });
+
+  it("honours a date window that excludes everything", async () => {
+    await signInWithRole("STAFF");
+    await movements();
+
+    const csv = await (
+      await GET(
+        request("movements", "range=custom&from=2020-01-01&to=2020-01-31"),
+        routeParams("movements"),
+      )
+    ).text();
+
+    expect(csv).toContain("2020-01-01 to 2020-01-31");
+    expect(bodyRows(csv)).toHaveLength(1); // the TOTAL row alone
+  });
+
+  it("escapes a product name containing a comma and a quote", async () => {
+    await signInWithRole("STAFF");
+    await movements();
+
+    const csv = await (
+      await GET(
+        request("movements", "range=all&group=product"),
+        routeParams("movements"),
+      )
+    ).text();
+
+    expect(csv).toContain('"Bracket, 4x6"" Rev.B"');
   });
 });

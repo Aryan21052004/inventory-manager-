@@ -734,3 +734,239 @@ export async function loadPurchaseSpendReport(
     return { ok: false, error: toSafeError(error, "loadPurchaseSpendReport") };
   }
 }
+
+// ---------------------------------------------------------------------------
+// R4 · Stock movement summary
+// ---------------------------------------------------------------------------
+
+export interface MovementSummaryRow {
+  key: string;
+  label: string;
+  sublabel: string | null;
+  /** Ledger rows in this group. A confirmation and its cancellation are two. */
+  movements: number;
+  products: number;
+  /** Units the group put on the shelf, as a positive number. */
+  unitsIn: number;
+  /** Units the group took off it, also as a positive number. */
+  unitsOut: number;
+  /** `unitsIn - unitsOut`. Negative when the group removed more than it added. */
+  netChange: number;
+}
+
+export interface MovementSummaryTotals {
+  movements: number;
+  products: number;
+  unitsIn: number;
+  unitsOut: number;
+  netChange: number;
+}
+
+const MOVEMENT_SORTS: Record<string, string> = {
+  movements: "movements",
+  products: "products",
+  in: "units_in",
+  out: "units_out",
+  net: "net_change",
+  label: "label",
+};
+
+interface MovementSqlRow {
+  key: string;
+  label: string;
+  sublabel: string | null;
+  movements: number;
+  products: number;
+  units_in: number;
+  units_out: number;
+  net_change: number;
+}
+
+/**
+ * What moved in and out of stock, dated by when each movement was recorded.
+ *
+ * **Direction comes from the balance, never from the type.** `quantity` on a
+ * ledger row is always positive — the column stores the size of the move — and
+ * only STOCK_IN and STOCK_OUT carry their direction in the type. ADJUSTMENT and
+ * REVERSAL go either way: a cancelled order's REVERSAL puts units back, a
+ * cancelled purchase's takes them away, and both are the same type. The one
+ * expression correct for all four is `new_stock - previous_stock`, which the
+ * `stock_transactions_arithmetic_balances` check constraint guarantees. A CASE
+ * on the type would invert one kind of reversal and still look plausible.
+ *
+ * **`created_at` is the economic event here**, unlike sales and procurement.
+ * The ledger row is written inside the same database transaction as the balance
+ * change, so there is no second timestamp meaning "when it really moved".
+ * `StockLot.receivedAt` exists for backfilled batches that arrived before this
+ * system and does not apply: those lots carry no originating transaction and so
+ * contribute no movement at all. Nothing here invents one for them.
+ *
+ * Aggregate only. `/stock-movements` is the per-row ledger, with the reference
+ * document, the operator, the note and the cost of each movement; this answers
+ * how much moved, not which rows moved it.
+ *
+ * No money, deliberately. A "value moved" column on a movement report is one
+ * screenshot away from being read as cost of sales, and per-movement cost
+ * already exists on the ledger page.
+ */
+export async function loadMovementSummaryReport(
+  params: ReportParams,
+): Promise<Result<ReportPage<MovementSummaryRow, MovementSummaryTotals>>> {
+  try {
+    await requireUser();
+
+    /*
+     * The signed change one movement made. Everything below is built from this,
+     * and nothing consults `type` to decide a direction.
+     */
+    const delta = Prisma.sql`(st.new_stock - st.previous_stock)`;
+
+    const filters: Prisma.Sql[] = [
+      dateFilter(Prisma.sql`st.created_at`, params.from, params.to),
+    ];
+
+    if (params.movementType) {
+      filters.push(
+        Prisma.sql`st.type = ${params.movementType}::"StockTransactionType"`,
+      );
+    }
+    if (params.category) {
+      filters.push(Prisma.sql`pr.category = ${params.category}`);
+    }
+    if (params.search) {
+      filters.push(
+        Prisma.sql`(pr.name ILIKE ${"%" + params.search + "%"} OR pr.sku ILIKE ${"%" + params.search + "%"})`,
+      );
+    }
+
+    const where = Prisma.join(filters, " AND ");
+
+    const grouped = (() => {
+      switch (params.grouping) {
+        case "product":
+          return {
+            key: Prisma.sql`pr.id`,
+            label: Prisma.sql`pr.name`,
+            sublabel: Prisma.sql`pr.sku`,
+          };
+        case "category":
+          return {
+            key: Prisma.sql`pr.category`,
+            label: Prisma.sql`pr.category`,
+            sublabel: Prisma.sql`NULL::text`,
+          };
+        case "type":
+          /*
+           * The raw enum, translated for display by `reportRowLabel` — which
+           * the page and the CSV route both call, so neither can come to spell
+           * a movement type differently from the other.
+           */
+          return {
+            key: Prisma.sql`st.type::text`,
+            label: Prisma.sql`st.type::text`,
+            sublabel: Prisma.sql`NULL::text`,
+          };
+        case "period":
+        default:
+          return {
+            key: Prisma.sql`to_char(date_trunc('month', st.created_at), 'YYYY-MM')`,
+            label: Prisma.sql`to_char(date_trunc('month', st.created_at), 'YYYY-MM')`,
+            sublabel: Prisma.sql`NULL::text`,
+          };
+      }
+    })();
+
+    /*
+     * Only the ledger and the catalogue. Orders, purchases, lots and
+     * consumptions are deliberately not joined: none of them is needed to say
+     * how much moved, and joining a document would drop every movement that has
+     * none — opening stock and every manual adjustment.
+     */
+    const base = Prisma.sql`
+      FROM stock_transactions st
+      JOIN products pr ON pr.id = st.product_id
+      WHERE ${where}
+    `;
+
+    const [rows, totals, countRows] = await Promise.all([
+      prisma.$queryRaw<MovementSqlRow[]>`
+        SELECT
+          ${grouped.key}::text                         AS key,
+          ${grouped.label}::text                       AS label,
+          ${grouped.sublabel}                          AS sublabel,
+          COUNT(*)::int                                AS movements,
+          COUNT(DISTINCT st.product_id)::int           AS products,
+          COALESCE(SUM(GREATEST(${delta}, 0)), 0)::int AS units_in,
+          COALESCE(SUM(-LEAST(${delta}, 0)), 0)::int   AS units_out,
+          COALESCE(SUM(${delta}), 0)::int              AS net_change
+        ${base}
+        GROUP BY ${grouped.key}, ${grouped.label}, ${grouped.sublabel}
+        ORDER BY ${orderBy(MOVEMENT_SORTS, params.sort, params.direction, "label")}, label ASC
+        LIMIT ${params.pageSize} OFFSET ${(params.page - 1) * params.pageSize}
+      `,
+      prisma.$queryRaw<
+        {
+          movements: number;
+          products: number;
+          units_in: number;
+          units_out: number;
+          net_change: number;
+        }[]
+      >`
+        SELECT
+          COUNT(*)::int                                AS movements,
+          COUNT(DISTINCT st.product_id)::int           AS products,
+          COALESCE(SUM(GREATEST(${delta}, 0)), 0)::int AS units_in,
+          COALESCE(SUM(-LEAST(${delta}, 0)), 0)::int   AS units_out,
+          COALESCE(SUM(${delta}), 0)::int              AS net_change
+        ${base}
+      `,
+      prisma.$queryRaw<{ n: number }[]>`
+        SELECT COUNT(*)::int AS n FROM (
+          SELECT ${grouped.key} ${base} GROUP BY ${grouped.key}
+        ) g
+      `,
+    ]);
+
+    const t = totals[0] ?? {
+      movements: 0,
+      products: 0,
+      units_in: 0,
+      units_out: 0,
+      net_change: 0,
+    };
+    const count = countRows[0]?.n ?? 0;
+
+    return {
+      ok: true,
+      data: {
+        rows: rows.map((row) => ({
+          key: row.key,
+          label: row.label,
+          sublabel: row.sublabel,
+          movements: row.movements,
+          products: row.products,
+          unitsIn: row.units_in,
+          unitsOut: row.units_out,
+          netChange: row.net_change,
+        })),
+        totals: {
+          movements: t.movements,
+          products: t.products,
+          unitsIn: t.units_in,
+          unitsOut: t.units_out,
+          netChange: t.net_change,
+        },
+        total: count,
+        page: params.page,
+        pageSize: params.pageSize,
+        pageCount: Math.max(1, Math.ceil(count / params.pageSize)),
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: toSafeError(error, "loadMovementSummaryReport"),
+    };
+  }
+}

@@ -22,6 +22,11 @@ import {
   type ReportKey,
   type ReportParams,
 } from "@/lib/report-query";
+import {
+  MOVEMENT_TYPES,
+  MOVEMENT_TYPE_LABELS,
+} from "@/lib/stock-movement-query";
+import type { StockTransactionType } from "@/generated/prisma/enums";
 
 /**
  * The reports' filter bar.
@@ -43,6 +48,7 @@ function ReportFilters({
   defaults,
   groupings,
   categories,
+  movementTypes = false,
 }: {
   report: ReportKey;
   params: ReportParams;
@@ -50,6 +56,8 @@ function ReportFilters({
   /** Empty for a report that does not group. */
   groupings: readonly string[];
   categories: string[];
+  /** Only the stock movement summary filters by ledger type. */
+  movementTypes?: boolean;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -96,7 +104,7 @@ function ReportFilters({
   }, [search, router, report, defaults]);
 
   const filtered =
-    Boolean(params.search || params.category) ||
+    Boolean(params.search || params.category || params.movementType) ||
     params.preset !== "12m" ||
     params.grouping !== defaults.grouping;
 
@@ -165,6 +173,32 @@ function ReportFilters({
             </Select>
           ) : null}
 
+          {movementTypes ? (
+            <Select
+              value={params.movementType ?? ANY}
+              onValueChange={(next) =>
+                navigate({
+                  ...params,
+                  movementType:
+                    next === ANY ? null : (next as StockTransactionType),
+                  page: 1,
+                })
+              }
+            >
+              <SelectTrigger aria-label="Movement type" className="w-44">
+                <SelectValue placeholder="All movements" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ANY}>All movements</SelectItem>
+                {MOVEMENT_TYPES.map((type) => (
+                  <SelectItem key={type} value={type}>
+                    {MOVEMENT_TYPE_LABELS[type]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+
           {categories.length > 0 ? (
             <Select
               value={params.category ?? ANY}
@@ -198,6 +232,7 @@ function ReportFilters({
                   ...params,
                   search: "",
                   category: null,
+                  movementType: null,
                   preset: "12m",
                   grouping: defaults.grouping,
                   page: 1,

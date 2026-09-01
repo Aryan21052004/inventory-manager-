@@ -2,7 +2,15 @@ import { Suspense } from "react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, ArrowDown, ArrowUp, ChevronsUpDown, Download, SearchX } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowLeftRight,
+  ArrowDown,
+  ArrowUp,
+  ChevronsUpDown,
+  Download,
+  SearchX,
+} from "lucide-react";
 
 import { ReportFilters } from "@/app/(app)/reports/report-filters";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +38,7 @@ import {
   reportCsvHref,
   reportHref,
   reportParamsFor,
+  reportRowLabel,
   reportSortHref,
   REPORT_CONFIG,
   REPORT_DESCRIPTIONS,
@@ -41,6 +50,7 @@ import {
 import { cn } from "@/lib/utils";
 import { loadCategories } from "@/server/products";
 import {
+  loadMovementSummaryReport,
   loadPurchaseSpendReport,
   loadSalesReport,
   loadValuationReport,
@@ -49,8 +59,8 @@ import {
 /**
  * One report, whichever it is.
  *
- * The three share a shape — filters, summary tiles, a sortable paged table, a
- * CSV button — so they share a page rather than three near-identical copies.
+ * They share a shape — filters, summary tiles, a sortable paged table, a CSV
+ * button — so they share a page rather than four near-identical copies.
  * What differs is the columns and the sentence explaining what the figures
  * mean, and that sentence is not decoration: a report gets exported and
  * forwarded, and the basis has to travel with it.
@@ -124,6 +134,8 @@ export default async function ReportPage({
             defaults={defaults}
             groupings={config.groupings}
             categories={categories}
+            /* Only the movement summary filters by ledger type. */
+            movementTypes={report === "movements"}
           />
 
           <Suspense
@@ -134,8 +146,10 @@ export default async function ReportPage({
               <ValuationBody params={reportParams} defaults={defaults} />
             ) : report === "sales" ? (
               <SalesBody params={reportParams} defaults={defaults} />
-            ) : (
+            ) : report === "purchases" ? (
               <PurchaseBody params={reportParams} defaults={defaults} />
+            ) : (
+              <MovementBody params={reportParams} defaults={defaults} />
             )}
           </Suspense>
         </CardContent>
@@ -683,6 +697,211 @@ async function PurchaseBody({
         pageSize={pageSize}
         hrefFor={(next) =>
           reportHref("purchases", { ...params, page: next }, defaults)
+        }
+      />
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// R4 · Stock movement summary
+// ---------------------------------------------------------------------------
+
+async function MovementBody({
+  params,
+  defaults,
+}: {
+  params: ReportParams;
+  defaults: Defaults;
+}) {
+  const result = await loadMovementSummaryReport(params);
+
+  if (!result.ok) {
+    return (
+      <ErrorState
+        title="This report could not be loaded"
+        message={result.error.message}
+      />
+    );
+  }
+
+  const { rows, totals, total, page, pageCount, pageSize } = result.data;
+
+  if (rows.length === 0) {
+    return (
+      <EmptyState
+        icon={SearchX}
+        title="No movements in this period"
+        description={`Nothing moved in or out between ${describeRange(params).toLowerCase()}. Widen the period, or clear the filters.`}
+      />
+    );
+  }
+
+  return (
+    <>
+      <div className="grid gap-4 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Units in"
+          value={formatNumber(totals.unitsIn)}
+          hint="Everything that added stock"
+          icon={ArrowDown}
+          tone="success"
+        />
+        <StatCard
+          label="Units out"
+          value={formatNumber(totals.unitsOut)}
+          hint="Everything that took stock away"
+          icon={ArrowUp}
+        />
+        <StatCard
+          label="Net change"
+          value={formatNumber(totals.netChange)}
+          hint="Units in minus units out"
+          icon={ArrowLeftRight}
+          tone={totals.netChange < 0 ? "warning" : "default"}
+        />
+        <StatCard
+          label="Movements"
+          value={formatNumber(totals.movements)}
+          hint={`Across ${formatNumber(totals.products)} ${totals.products === 1 ? "product" : "products"}`}
+          icon={ChevronsUpDown}
+        />
+      </div>
+
+      <BasisNote>
+        Dated by{" "}
+        <span className="font-medium text-foreground">
+          when each movement was recorded in the ledger
+        </span>
+        , which is the moment the stock actually moved.{" "}
+        <span className="font-medium text-foreground">
+          Direction is read from the balance a movement left behind
+        </span>
+        , not from its type — so a cancellation counts against the movement it
+        undid, and both stay visible as separate movements. Opening stock and
+        manual adjustments are included even though no document explains them.
+        Stock that predates the ledger has no movement and is not reported here.
+        For the individual rows — the reference document, who recorded it, the
+        note and the cost — see{" "}
+        <Link href="/stock-movements" className="font-medium text-foreground underline underline-offset-4">
+          stock movements
+        </Link>
+        .
+      </BasisNote>
+
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <SortHead
+              report="movements"
+              params={params}
+              defaults={defaults}
+              column="label"
+            >
+              {params.grouping === "period"
+                ? "Month"
+                : params.grouping === "type"
+                  ? "Movement type"
+                  : "Group"}
+            </SortHead>
+            <SortHead
+              report="movements"
+              params={params}
+              defaults={defaults}
+              column="movements"
+              className="text-right"
+              align="right"
+            >
+              Movements
+            </SortHead>
+            <SortHead
+              report="movements"
+              params={params}
+              defaults={defaults}
+              column="products"
+              className="hidden text-right lg:table-cell"
+              align="right"
+            >
+              Products
+            </SortHead>
+            <SortHead
+              report="movements"
+              params={params}
+              defaults={defaults}
+              column="in"
+              className="hidden text-right sm:table-cell"
+              align="right"
+            >
+              Units in
+            </SortHead>
+            <SortHead
+              report="movements"
+              params={params}
+              defaults={defaults}
+              column="out"
+              className="hidden text-right sm:table-cell"
+              align="right"
+            >
+              Units out
+            </SortHead>
+            <SortHead
+              report="movements"
+              params={params}
+              defaults={defaults}
+              column="net"
+              className="text-right"
+              align="right"
+            >
+              Net change
+            </SortHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={row.key}>
+              <TableCell className="max-w-[20rem]">
+                <span className="font-medium">
+                  {reportRowLabel(params.grouping, row.label)}
+                </span>
+                {row.sublabel ? (
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    {row.sublabel}
+                  </span>
+                ) : null}
+              </TableCell>
+              <TableCell className="tabular text-right">
+                {formatNumber(row.movements)}
+              </TableCell>
+              <TableCell className="tabular hidden text-right lg:table-cell">
+                {formatNumber(row.products)}
+              </TableCell>
+              <TableCell className="tabular hidden text-right text-success sm:table-cell">
+                {row.unitsIn === 0 ? "—" : formatNumber(row.unitsIn)}
+              </TableCell>
+              <TableCell className="tabular hidden text-right sm:table-cell">
+                {row.unitsOut === 0 ? "—" : formatNumber(row.unitsOut)}
+              </TableCell>
+              <TableCell
+                className={cn(
+                  "tabular text-right font-medium",
+                  row.netChange < 0 && "text-destructive",
+                )}
+              >
+                {row.netChange > 0 ? "+" : ""}
+                {formatNumber(row.netChange)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+
+      <Pagination
+        page={page}
+        pageCount={pageCount}
+        total={total}
+        pageSize={pageSize}
+        hrefFor={(next) =>
+          reportHref("movements", { ...params, page: next }, defaults)
         }
       />
     </>
