@@ -1,4 +1,5 @@
 import type { CustomerStatus } from "@/generated/prisma/enums";
+import { readOne, type RawSearchParams } from "@/lib/date-range";
 
 /**
  * The customers list's state, and how it maps to the URL.
@@ -9,7 +10,7 @@ import type { CustomerStatus } from "@/generated/prisma/enums";
  * bar serialises with it — so no server-only import belongs here.
  */
 
-export const CUSTOMER_SORT_KEYS = [
+const CUSTOMER_SORT_KEYS = [
   "name",
   "email",
   "orders",
@@ -30,7 +31,7 @@ export type SortDirection = "asc" | "desc";
 
 export const CUSTOMER_STATUSES = ["ACTIVE", "INACTIVE"] as const;
 
-export function isCustomerStatus(value: unknown): value is CustomerStatus {
+function isCustomerStatus(value: unknown): value is CustomerStatus {
   return (
     typeof value === "string" &&
     (CUSTOMER_STATUSES as readonly string[]).includes(value)
@@ -42,8 +43,8 @@ export const CUSTOMER_STATUS_LABELS: Record<CustomerStatus, string> = {
   INACTIVE: "Archived",
 };
 
-export const CUSTOMER_PAGE_SIZES = [10, 25, 50, 100] as const;
-export const DEFAULT_CUSTOMER_PAGE_SIZE = 10;
+const CUSTOMER_PAGE_SIZES = [10, 25, 50, 100] as const;
+const DEFAULT_CUSTOMER_PAGE_SIZE = 10;
 
 export interface CustomerListParams {
   /** Matches the name, email or phone, case-insensitively. */
@@ -66,15 +67,12 @@ export const DEFAULT_CUSTOMER_PARAMS: CustomerListParams = {
   pageSize: DEFAULT_CUSTOMER_PAGE_SIZE,
 };
 
-/** What Next hands a page as `searchParams`. */
-export type RawSearchParams = Record<string, string | string[] | undefined>;
-
-function readOne(raw: RawSearchParams, key: string): string | null {
-  const value = raw[key];
-  const single = Array.isArray(value) ? value[0] : value;
-  const trimmed = single?.trim();
-  return trimmed ? trimmed : null;
-}
+/*
+ * `RawSearchParams` and `readOne` come from src/lib/date-range.ts, which is
+ * where the query-string primitives live now. This module had its own private
+ * copy of both — identical to the other five lists', and to the shared one.
+ */
+export type { RawSearchParams };
 
 /**
  * Turns a query string into list parameters, discarding anything unrecognised.

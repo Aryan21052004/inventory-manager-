@@ -1,4 +1,9 @@
 import type { StockTransactionType } from "@/generated/prisma/enums";
+import {
+  readDateRange,
+  readOne,
+  type RawSearchParams,
+} from "@/lib/date-range";
 
 /**
  * The stock movements list's state, and how it maps to the URL.
@@ -8,7 +13,7 @@ import type { StockTransactionType } from "@/generated/prisma/enums";
  * component. Shared by both sides, so no server-only import here.
  */
 
-export const MOVEMENT_SORT_KEYS = [
+const MOVEMENT_SORT_KEYS = [
   "createdAt",
   "product",
   "type",
@@ -26,7 +31,7 @@ export const MOVEMENT_TYPES: readonly StockTransactionType[] = [
   "REVERSAL",
 ] as const;
 
-export function isMovementType(value: unknown): value is StockTransactionType {
+function isMovementType(value: unknown): value is StockTransactionType {
   return (
     typeof value === "string" &&
     (MOVEMENT_TYPES as readonly string[]).includes(value)
@@ -40,8 +45,8 @@ export const MOVEMENT_TYPE_LABELS: Record<StockTransactionType, string> = {
   REVERSAL: "Reversal",
 };
 
-export const MOVEMENT_PAGE_SIZES = [10, 25, 50, 100] as const;
-export const DEFAULT_MOVEMENT_PAGE_SIZE = 25;
+const MOVEMENT_PAGE_SIZES = [10, 25, 50, 100] as const;
+const DEFAULT_MOVEMENT_PAGE_SIZE = 25;
 
 export interface MovementListParams {
   /** Matches the product name or SKU, case-insensitively. */
@@ -71,21 +76,8 @@ export const DEFAULT_MOVEMENT_PARAMS: MovementListParams = {
   pageSize: DEFAULT_MOVEMENT_PAGE_SIZE,
 };
 
-export type RawSearchParams = Record<string, string | string[] | undefined>;
-
-function readOne(raw: RawSearchParams, key: string): string | null {
-  const value = raw[key];
-  const single = Array.isArray(value) ? value[0] : value;
-  const trimmed = single?.trim();
-  return trimmed ? trimmed : null;
-}
-
-const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
-
-function readDate(raw: RawSearchParams, key: string): string | null {
-  const value = readOne(raw, key);
-  return value && ISO_DAY.test(value) ? value : null;
-}
+/** Re-exported so existing callers keep their import path. */
+export type { RawSearchParams };
 
 /**
  * Turns a query string into list parameters, discarding anything unrecognised.
@@ -103,17 +95,15 @@ export function parseMovementListParams(
   const pageSize = Number(readOne(raw, "size") ?? DEFAULT_MOVEMENT_PAGE_SIZE);
   const direction = readOne(raw, "dir");
 
-  const from = readDate(raw, "from");
-  const to = readDate(raw, "to");
+  const range = readDateRange(raw);
 
   return {
     search: readOne(raw, "q") ?? "",
     productId: readOne(raw, "product"),
     type: isMovementType(type) ? type : null,
-    // A backwards range returns nothing and looks like a bug. Swapping is what
-    // the person meant.
-    from: from && to && from > to ? to : from,
-    to: from && to && from > to ? from : to,
+    // Swapping a backwards range happens in `readDateRange` now.
+    from: range.from,
+    to: range.to,
     sort: MOVEMENT_SORT_KEYS.includes(sort as MovementSortKey)
       ? (sort as MovementSortKey)
       : DEFAULT_MOVEMENT_PARAMS.sort,

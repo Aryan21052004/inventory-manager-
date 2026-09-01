@@ -1,3 +1,4 @@
+import { readOne, type RawSearchParams } from "@/lib/date-range";
 import { isStockStatus, type StockStatus } from "@/lib/stock-status";
 
 /**
@@ -14,7 +15,7 @@ import { isStockStatus, type StockStatus } from "@/lib/stock-status";
  * serialises with it — so it must stay free of any server-only import.
  */
 
-export const PRODUCT_SORT_KEYS = [
+const PRODUCT_SORT_KEYS = [
   "name",
   "sku",
   "category",
@@ -37,8 +38,8 @@ export const PRODUCT_STATUSES = [
 
 export type ProductStatusFilter = (typeof PRODUCT_STATUSES)[number];
 
-export const PAGE_SIZES = [10, 25, 50, 100] as const;
-export const DEFAULT_PAGE_SIZE = 10;
+const PAGE_SIZES = [10, 25, 50, 100] as const;
+const DEFAULT_PAGE_SIZE = 10;
 
 export interface ProductListParams {
   /** Matches product name or SKU, case-insensitively. */
@@ -65,15 +66,12 @@ export const DEFAULT_LIST_PARAMS: ProductListParams = {
   pageSize: DEFAULT_PAGE_SIZE,
 };
 
-/** What Next hands a page as `searchParams`. */
-export type RawSearchParams = Record<string, string | string[] | undefined>;
-
-function readOne(raw: RawSearchParams, key: string): string | null {
-  const value = raw[key];
-  const single = Array.isArray(value) ? value[0] : value;
-  const trimmed = single?.trim();
-  return trimmed ? trimmed : null;
-}
+/*
+ * `RawSearchParams` and `readOne` come from src/lib/date-range.ts, which is
+ * where the query-string primitives live now. This module had its own private
+ * copy of both — identical to the other five lists', and to the shared one.
+ */
+export type { RawSearchParams };
 
 /**
  * Turns a query string into list parameters, discarding anything unrecognised.
