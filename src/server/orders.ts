@@ -1186,6 +1186,14 @@ export async function cancelOrder(
           sourceTransactionIds: outboundIds,
           reversalTransactionId: transaction.id,
           productId: product.id,
+          /*
+           * What the reversal actually restored. Anything the consumption
+           * rows cannot account for — an order confirmed before costing
+           * existed has none — comes back as an uncosted lot rather than
+           * being lost, which is what keeps the lots and the ledger agreeing.
+           */
+          expectedQuantity: quantity,
+          userId: user.id,
         });
 
         movements.push({

@@ -559,11 +559,23 @@ export async function returnToLots(
     sourceTransactionIds: readonly string[];
     /** The REVERSAL now putting the units back. */
     reversalTransactionId: string;
-    /** Limits the return to one product, for callers reversing per product. */
-    productId?: string;
+    /** The product being reversed. Required: the shortfall lot needs it. */
+    productId: string;
+    /**
+     * How many units the REVERSAL actually restored.
+     *
+     * The reconciling number. Whatever the consumption rows cannot account
+     * for becomes an uncosted lot rather than vanishing — see the note about
+     * shortfall below.
+     */
+    expectedQuantity: number;
+    /** Attribution for any lot this has to create. */
+    userId: string | null;
   },
-): Promise<{ returned: number }> {
-  if (params.sourceTransactionIds.length === 0) return { returned: 0 };
+): Promise<{ returned: number; uncosted: number }> {
+  if (params.sourceTransactionIds.length === 0) {
+    return { returned: 0, uncosted: 0 };
+  }
 
   const rows = await tx.stockLotConsumption.findMany({
     where: {
@@ -619,7 +631,54 @@ export async function returnToLots(
     returned += quantity;
   }
 
-  return { returned };
+  /*
+   * Whatever the consumption rows could not account for.
+   *
+   * Stock that left before this system existed has no consumption rows to
+   * return it to — the backfill deliberately did not cost historical orders,
+   * because FIFO was not the policy when they happened. Cancelling such an
+   * order still legitimately puts units back on the shelf: `stockQuantity`
+   * rises and the ledger records a REVERSAL. Without this, those units would
+   * exist in the ledger and in no lot at all, and
+   * `SUM(quantityRemaining) = stockQuantity` — the invariant the whole
+   * valuation layer rests on — would quietly stop being true.
+   *
+   * They come back as an UNKNOWN lot, which is the honest description: the
+   * units are real, and nobody can say what they cost. Dated to when they
+   * originally left, so FIFO puts them back roughly where they were rather
+   * than treating decade-old stock as the newest thing on the shelf — and so
+   * they drain early, which is what should happen to uncosted stock.
+   */
+  const shortfall = params.expectedQuantity - returned;
+
+  if (shortfall > 0) {
+    const origin = await tx.stockTransaction.findFirst({
+      where: {
+        id: { in: [...params.sourceTransactionIds] },
+        productId: params.productId,
+      },
+      orderBy: { createdAt: "asc" },
+      select: { createdAt: true },
+    });
+
+    await tx.stockLot.create({
+      data: {
+        productId: params.productId,
+        // The REVERSAL that brought them back is what explains this lot.
+        stockTransactionId: params.reversalTransactionId,
+        quantityReceived: shortfall,
+        quantityRemaining: shortfall,
+        unitCost: null,
+        costSource: "UNKNOWN",
+        sourceType: "MANUAL",
+        sourceId: null,
+        receivedAt: origin?.createdAt ?? new Date(),
+        createdBy: params.userId,
+      },
+    });
+  }
+
+  return { returned, uncosted: Math.max(0, shortfall) };
 }
 
 /**

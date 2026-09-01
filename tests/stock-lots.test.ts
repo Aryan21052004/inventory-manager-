@@ -538,6 +538,215 @@ describe("cancelling an order returns stock to its original batches", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Stock that predates cost tracking
+// ---------------------------------------------------------------------------
+
+describe("cancelling an order confirmed before cost tracking existed", () => {
+  /**
+   * The regression this block exists to prevent happening twice.
+   *
+   * The backfill deliberately did not cost historical orders — FIFO was not the
+   * policy when they happened, so a COGS for them would have been assumed
+   * rather than proven. But those orders can still be cancelled, and when one
+   * is, `returnToLots` finds no consumption rows to return the units to.
+   *
+   * It used to return zero and say nothing. The stock went back on the shelf,
+   * `stockQuantity` rose, the ledger recorded a REVERSAL, and no lot changed —
+   * so SUM(quantityRemaining) stopped equalling stockQuantity, silently, on a
+   * live database.
+   *
+   * The units are real and their cost is genuinely unknown, so they come back
+   * as an UNKNOWN lot.
+   */
+
+  /**
+   * An order in the shape migrated data has: confirmed, stock deducted through
+   * the real engine, but with the lot bookkeeping stripped out afterwards so it
+   * looks like it was confirmed before costing existed.
+   */
+  async function preCostingConfirmedOrder(productId: string, quantity: number) {
+    const buyer = await customer();
+    const order = await createOrder({
+      customerId: buyer.id,
+      items: [{ productId, quantity }],
+      discount: "0",
+    });
+    await confirmOrder(order.id);
+
+    const outbound = await prisma.stockTransaction.findMany({
+      where: {
+        referenceType: "ORDER",
+        referenceId: order.id,
+        type: "STOCK_OUT",
+      },
+      select: { id: true },
+    });
+
+    const ids = outbound.map((row) => row.id);
+
+    /*
+     * Drop the consumption rows, then close the lots up behind them.
+     *
+     * A backfilled lot was created with `quantityReceived` equal to whatever
+     * was still on the shelf — the backfill attributed the *remaining* balance,
+     * so it has no record of units that had already been sold. Deleting the
+     * consumption rows without also closing `quantityReceived` down to match
+     * would leave a lot claiming it received more than anything can account
+     * for, which is a state migrated data is never in and which the
+     * consumption reconciliation would rightly reject.
+     */
+    await prisma.stockLotConsumption.deleteMany({
+      where: { stockTransactionId: { in: ids } },
+    });
+
+    const drawn = await prisma.stockLot.findMany({
+      where: { productId },
+      select: { id: true, quantityRemaining: true },
+    });
+
+    for (const lot of drawn) {
+      await prisma.stockLot.update({
+        where: { id: lot.id },
+        data: { quantityReceived: lot.quantityRemaining },
+      });
+    }
+
+    await prisma.orderItem.updateMany({
+      where: { orderId: order.id },
+      data: { costTotal: null, costedQuantity: 0 },
+    });
+
+    return order;
+  }
+
+  it("returns the stock as an uncosted lot rather than losing it", async () => {
+    await signInWithRole("STAFF");
+    const supplier = await createSupplier();
+    const a = await part("A-1");
+
+    await receive(supplier.id, a.id, 10, "8000.00");
+    const order = await preCostingConfirmedOrder(a.id, 6);
+
+    // The state migrated data is in: stock down, lots down, no consumptions.
+    expect(await stockOf(a.id)).toBe(4);
+    expect(await prisma.stockLotConsumption.count()).toBe(0);
+    await expectLotsReconcile();
+
+    await cancelOrder(order.id, "Customer withdrew");
+
+    // Stock is back...
+    expect(await stockOf(a.id)).toBe(10);
+
+    // ...and so are the lots. This is the assertion that used to fail.
+    await expectLotsReconcile();
+    await expectConsumptionsReconcile();
+
+    // The six returned units are uncosted, because nothing knows what they
+    // cost — and emphatically not valued at the 8,000 of the batch they happen
+    // to sit beside.
+    const lots = await lotsOf(a.id);
+    const uncosted = lots.filter((lot) => lot.unitCost === null);
+    expect(uncosted).toHaveLength(1);
+    expect(uncosted[0]!.quantityRemaining).toBe(6);
+    expect(uncosted[0]!.costSource).toBe("UNKNOWN");
+  });
+
+  it("does not invent a cost for the returned units", async () => {
+    await signInWithRole("STAFF");
+    const supplier = await createSupplier();
+    const a = await seedProduct({
+      sku: "A-1",
+      stockQuantity: 0,
+      minimumStock: 0,
+      standardCost: "9999.00",
+      sellingPrice: "12000.00",
+    });
+
+    await receive(supplier.id, a.id, 10, "8000.00");
+    const order = await preCostingConfirmedOrder(a.id, 4);
+    await cancelOrder(order.id);
+
+    const lots = await lotsOf(a.id);
+    const returned = lots.find((lot) => lot.costSource === "UNKNOWN");
+
+    // Not the standard cost, not the lot rate beside it, not zero. Null.
+    expect(returned?.unitCost).toBeNull();
+    await expectLotsReconcile();
+  });
+
+  it("dates the returned units to when they left, not to now", async () => {
+    /*
+     * The returned units are dated to the moment they originally left, which
+     * puts them ahead of anything received since — but still behind whatever
+     * was already on the shelf when they went. FIFO then does the obvious
+     * thing, and the ordering here is the proof:
+     *
+     *   lot A   10 @ 8,000, received first        → 4 left after the sale
+     *   lot B    6 uncosted, returned by the cancel
+     *   lot C   10 @ 9,500, received afterwards
+     *
+     * A sale of 6 takes A's remaining 4 first, then 2 from the returned batch,
+     * and never touches C. Dating the returned units to *now* would have put
+     * them behind C and left the newest stock selling before the oldest.
+     */
+    await signInWithRole("STAFF");
+    const supplier = await createSupplier();
+    const buyer = await customer();
+    const a = await part("A-1");
+
+    await receive(supplier.id, a.id, 10, "8000.00");
+    const order = await preCostingConfirmedOrder(a.id, 6);
+    await cancelOrder(order.id);
+
+    await receive(supplier.id, a.id, 10, "9500.00");
+
+    const sale = await createOrder({
+      customerId: buyer.id,
+      items: [{ productId: a.id, quantity: 6 }],
+      discount: "0",
+    });
+    const outcome = await confirmOrder(sale.id);
+
+    // 4 costed at 8,000, then 2 from the uncosted batch.
+    expect(outcome.uncostedUnits).toBe(2);
+    const line = await lineOf(sale.id);
+    expect(line.costedQuantity).toBe(4);
+    expect(Number(line.costTotal)).toBe(32_000);
+
+    // The 9,500 delivery is untouched — it is the newest thing on the shelf.
+    const lots = await lotsOf(a.id);
+    const newest = lots.find((lot) => lot.unitCost?.toString() === "9500");
+    expect(newest?.quantityRemaining).toBe(10);
+
+    await expectLotsReconcile();
+    await expectConsumptionsReconcile();
+  });
+
+  it("leaves a normally-costed cancellation alone", async () => {
+    // The fix must not create a spurious uncosted lot on the ordinary path.
+    await signInWithRole("STAFF");
+    const supplier = await createSupplier();
+    const buyer = await customer();
+    const a = await part("A-1");
+
+    await receive(supplier.id, a.id, 10, "8000.00");
+    const order = await createOrder({
+      customerId: buyer.id,
+      items: [{ productId: a.id, quantity: 6 }],
+      discount: "0",
+    });
+    await confirmOrder(order.id);
+    await cancelOrder(order.id);
+
+    const lots = await lotsOf(a.id);
+    expect(lots).toHaveLength(1);
+    expect(lots[0]!.unitCost?.toString()).toBe("8000");
+    expect(lots[0]!.quantityRemaining).toBe(10);
+    await expectLotsReconcile();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Cancelling a purchase
 // ---------------------------------------------------------------------------
 

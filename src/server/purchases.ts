@@ -882,10 +882,13 @@ async function assertPurchaseLotsIntact(
   tx: Prisma.TransactionClient,
   purchaseId: string,
   purchaseNumber: string,
+  /** Units the reversal is about to take back, per product. */
+  outstanding: ReadonlyMap<string, number>,
 ): Promise<void> {
   const lots = await tx.stockLot.findMany({
     where: { sourceType: "PURCHASE", sourceId: purchaseId },
     select: {
+      productId: true,
       quantityReceived: true,
       quantityRemaining: true,
       product: { select: { name: true } },
@@ -893,11 +896,54 @@ async function assertPurchaseLotsIntact(
     orderBy: { id: "asc" },
   });
 
+  /*
+   * The mirror of the shortfall `returnToLots` handles, and the opposite
+   * answer.
+   *
+   * A delivery received before costing existed has no lots behind it. Reversing
+   * it would take stock off the shelf while no lot shrank, leaving the ledger
+   * and the valuation layer disagreeing — the same invariant break, in the
+   * other direction. There is no honest repair available here: an outbound
+   * shortfall cannot become an uncosted lot, and making up the difference from
+   * some other batch is exactly what taking stock from a delivery it did not
+   * come from would mean, corrupting that batch's cost history.
+   *
+   * So it is refused. In practice the backfill created lots for every received
+   * purchase, so this is a guard against a state that should not arise rather
+   * than one operators will meet.
+   */
+  const covered = new Map<string, number>();
+
+  for (const lot of lots) {
+    covered.set(
+      lot.productId,
+      (covered.get(lot.productId) ?? 0) + lot.quantityRemaining,
+    );
+  }
+
+  const uncovered = [...outstanding.entries()].filter(
+    ([productId, quantity]) => quantity > (covered.get(productId) ?? 0),
+  );
+
+  if (uncovered.length > 0 && lots.length === 0) {
+    throw new AppError(
+      "CONFLICT",
+      `Purchase ${purchaseNumber} predates cost tracking, so the stock it delivered cannot be identified and the delivery cannot be reversed. Record a stock adjustment instead — nothing has been changed.`,
+    );
+  }
+
   const consumed = lots.filter(
     (lot) => lot.quantityRemaining < lot.quantityReceived,
   );
 
-  if (consumed.length === 0) return;
+  if (consumed.length === 0 && uncovered.length === 0) return;
+
+  if (consumed.length === 0) {
+    throw new AppError(
+      "CONFLICT",
+      `Purchase ${purchaseNumber} cannot be cancelled: the stock it delivered can no longer be fully accounted for. Record a stock adjustment instead — nothing has been changed.`,
+    );
+  }
 
   const detail = consumed
     .map((lot) => {
@@ -1121,7 +1167,12 @@ export async function cancelPurchase(
        * the check and the reversal that follows a single atomic decision rather
        * than a race.
        */
-      await assertPurchaseLotsIntact(tx, purchaseId, purchase.purchaseNumber);
+      await assertPurchaseLotsIntact(
+        tx,
+        purchaseId,
+        purchase.purchaseNumber,
+        outstanding,
+      );
 
       for (const productId of [...productIds].sort()) {
         const quantity = outstanding.get(productId)!;
