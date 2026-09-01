@@ -50,16 +50,22 @@ import { requireRole, requireUser } from "@/server/auth";
 // Shapes
 // ---------------------------------------------------------------------------
 
-/** The order statuses that count towards what a customer has spent. */
 /*
- * Re-exported rather than defined. The rule lives in src/lib/money-basis.ts
- * now — this module having its own copy is how it came to differ from the
- * orders module's idea of "value" without anybody noticing.
+ * The statuses that count towards what a customer has spent are not defined
+ * here. They live in src/lib/money-basis.ts as `REVENUE_STATUSES` and are
+ * imported above — this module having its own copy is how it came to differ
+ * from the orders module's idea of "value" without anybody noticing.
  */
-export { REVENUE_STATUSES } from "@/lib/money-basis";
 
-/** The order statuses that are raised but not yet committed. */
-export const OPEN_STATUSES = ["DRAFT", "PENDING"] as const;
+/**
+ * The order statuses that are raised but not yet committed.
+ *
+ * Named for what it means rather than for "open", which had already been
+ * claimed by a different idea: `OPEN_ORDER_STATUSES` in src/lib/money-basis.ts
+ * is CONFIRMED — an order committed and awaiting shipment. This one is the
+ * other end of the same lifecycle. Both were called "open"; only one could be.
+ */
+const UNCOMMITTED_ORDER_STATUSES = ["DRAFT", "PENDING"] as const;
 
 export interface CustomerListItem {
   id: string;
@@ -389,7 +395,7 @@ export async function getCustomerDetail(
 
       if ((REVENUE as readonly string[]).includes(group.status)) {
         lifetime += sum;
-      } else if ((OPEN_STATUSES as readonly string[]).includes(group.status)) {
+      } else if ((UNCOMMITTED_ORDER_STATUSES as readonly string[]).includes(group.status)) {
         open += sum;
       }
     }

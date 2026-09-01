@@ -8,8 +8,9 @@ Written for whoever picks this up next — a new developer, or a new session. It
 covers what exists, the rules the code is built around, and the things that will
 waste your afternoon if nobody tells you.
 
-**Last updated:** 27 August 2026, after building the Suppliers module (§11) on
-top of the FIFO lot costing work (§10).
+**Last updated:** 1 September 2026, after a dead-code audit and cleanup pass
+over the whole repository (§15), on top of the Tier 1 Reports module (§13) and
+the Dashboard rebuild (§12).
 
 ---
 
@@ -27,12 +28,16 @@ top of the FIFO lot costing work (§10).
 | Stock movements | Done | `/stock-movements` |
 | Customers | Done | `/customers`, `/customers/[id]` |
 | Suppliers | Done | `/suppliers`, `/suppliers/[id]` |
-| Reports | **Placeholder** | `/reports` |
+| Reports | Tier 1 done | `/reports`, `/reports/[report]` |
 | Settings | Partial | `/settings` reports database and auth health |
 
 ### Commit history
 
 ```
+83e8d55        feat: rebuild the dashboard on real data, with honest costing
+8bdaa65        fix: return pre-costing stock to a lot when an order is cancelled
+9f5069e        feat: add the suppliers module with an archive lifecycle
+532c0bc        feat: cost inventory by FIFO lot instead of a fixed product price
 c35dd1f        test: cover stock movements and update handover
 eeb1e8e        feat: add stock movements ledger page
 79555db        feat: add purchases with automatic stock receipt
@@ -40,15 +45,14 @@ e0b9655        feat: add order editing
 1eaaa61        feat: add orders with automatic stock deduction
 bfa5eef        feat: add product certificates and remove tax
 bc643e3        feat: add products and inventory management
-8a00813        Replace removed Clerk control components with Show
-ffb2ce6        Make Clerk the sole authentication provider
-230a251        Build the inventory domain model
-03536e4        Scaffold inventory manager foundation
 ```
 
+Four older commits precede these: the Clerk work, the domain model, and the
+original scaffold, back to `03536e4`.
+
 **Current branch:** `db/inventory-domain-model`
-**Latest commit:** `c35dd1f` — plus one commit adding the Customers module and
-this update, which is the tip once it lands.
+**Latest commit:** `83e8d55` — with the Tier 1 Reports module (§13) and the
+cleanup pass (§15) uncommitted in the working tree on top of it.
 
 There is **no git remote** — everything is local. `master` is still back at
 `03536e4`; all real work is on the branch.
@@ -140,31 +144,39 @@ their existing drafts stay editable.
 ```
 prisma/
   schema.prisma          The domain model, heavily commented
-  migrations/            9 migrations; several carry hand-written SQL
+  migrations/            15 migrations; several carry hand-written SQL
   seed.ts                A small, self-consistent warehouse
 src/
   app/
     (app)/               Authenticated pages — the auth boundary is its layout
       products/  orders/  purchases/  stock-movements/   Built modules
-      customers/ dashboard/ settings/                    Built
-      suppliers/ reports/                                Placeholders
+      customers/ suppliers/ dashboard/ settings/         Built
+      reports/   reports/[report]/                       Tier 1 built (§13)
     api/certificates/[id]/file/          Authenticated certificate download
+    api/reports/[report]/csv/            Report export, same loaders as the page
   components/
     layout/              Shell: sidebar, header, mobile drawer, user menu
     ui/                  Button, Card, Table, Dialog, badges, Pagination…
   lib/
     env.ts               Validated environment, read once at import
     errors.ts            AppError + toSafeError (nothing leaks to the browser)
+    money-basis.ts       What counts as revenue, spend, commitment (§12)
+    cost-coverage.ts     Margin over the costed portion only (§10)
+    date-range.ts        Query-string date parsing, shared by every list
+    csv.ts               RFC 4180 escaping, BOM, download headers
     *-status.ts          Derived status rules: stock, certificate, order, purchase
-    *-query.ts           List URL state: product, order, purchase,
-                         stock-movement, customer
+    *-query.ts           List URL state: product, order, purchase, stock-movement,
+                         customer, supplier, report
     validation/          Zod schemas shared by forms and server actions
   server/
     auth.ts              Clerk session → local user, role checks
-    stock.ts             The only way stock changes
+    stock.ts             The only way stock changes; FIFO lots live here
     stock-movements.ts   Read model over StockTransaction ledger
-    products.ts  orders.ts  purchases.ts  certificates.ts  dashboard.ts
+    products.ts  orders.ts  purchases.ts  certificates.ts
     customers.ts         Customer directory: CRUD, archiving, lifetime value
+    suppliers.ts         Supplier directory, archive lifecycle, provenance
+    dashboard.ts         Six independent snapshot loaders (§12)
+    reports.ts           The three Tier 1 report queries (§13)
     storage/             Swappable file storage (interface + local driver)
 tests/                   Integration tests against a real Postgres
 ```
@@ -203,7 +215,7 @@ stage so far.
 
 ## 5. Testing
 
-**375 tests across 10 files**, all against a **real PostgreSQL** database.
+**583 tests across 17 files**, all against a **real PostgreSQL** database.
 Clerk is the only thing mocked.
 
 Real Postgres because most of what is worth proving *is* Postgres: that a unique
@@ -224,6 +236,13 @@ mock had been written to agree with the test.
 | `tests/purchases.test.ts` | Purchases: receiving, reversal, retired products |
 | `tests/stock-movements.test.ts` | Ledger read model: filters, sorting, paging, stats |
 | `tests/customers.test.ts` | Customer CRUD, archiving, permissions, lifetime value |
+| `tests/suppliers.test.ts` | Supplier CRUD, archive lifecycle, provenance, deletion |
+| `tests/stock-lots.test.ts` | FIFO allocation, lot invariants, partial cost coverage |
+| `tests/stock-lot-backfill.test.ts` | What the backfill reconstructed, and what it refused to |
+| `tests/dashboard.test.ts` | The six snapshots, and the margin that must stay null |
+| `tests/reports.test.ts` | The three Tier 1 reports and their date bases |
+| `tests/report-csv.test.ts` | Export escaping, and that it agrees with the page |
+| `tests/date-range.test.ts` | The shared query-string date parser |
 
 The concurrency tests are the ones to keep. They fire genuinely simultaneous
 requests and assert that exactly one wins — they would pass trivially against a
@@ -315,9 +334,12 @@ tiles. They describe the customer base, not the current view.
 
 ## 8. What is not built
 
-**`/reports` is a placeholder.** Valuation, movement, low-stock/dead-stock, and
-supplier spend summaries across date ranges with CSV export. Lot costing (§10)
-unblocked the money side of it.
+**Reports beyond Tier 1.** Three are built (§13). Six more are designed and
+deliberately not built: profitability and cost coverage, low and dead stock,
+stock movement summary, inventory ageing by lot, supplier provenance, and a
+certificate compliance register. The last is the one worth doing next — an
+exportable airworthiness register is not something generic ERP ships, and the
+data already supports it.
 
 **Other gaps.** No user management UI. No Clerk webhook, so a name or email
 changed in Clerk leaves a stale local mirror and a deletion is invisible
@@ -331,18 +353,19 @@ refused because the goods have shipped.
 
 The most logical next steps for the application:
 
-1. **Reports module (`/reports`)**:
-   - Aggregates over `Product`, `StockTransaction`, `Order`, and `Purchase`
-     with date range filtering and CSV export. Worth doing after Suppliers, when
-     the whole transaction history is reachable from both sides.
-   - Now unblocked by lot costing: valuation at cost is truthful, and margin by
-     product, customer or period is computable from `OrderItem.costTotal`.
-     **Every money figure must carry its coverage** — see §10 and use the
-     helpers in `src/lib/cost-coverage.ts` rather than subtracting by hand.
-2. **Certificates on lots** — the change §10 was designed to make additive, and
-   the decision deferred when Suppliers was built. Worth settling the business
-   workflow around certificates first: whether the release authority is the
-   supplier, the lot, or both.
+1. **Reports Tier 2** — six are designed and unbuilt; see §13. Profitability is
+   the obvious next one and carries the sharpest trap: it cannot report a margin
+   until cost coverage is non-zero, and today it is zero. Use the helpers in
+   `src/lib/cost-coverage.ts` and the dashboard's rules rather than subtracting
+   by hand.
+2. **Certificate compliance register** — Tier 2's most valuable report for this
+   business, and the one no generic ERP ships. The data already supports it.
+3. **Certificates on lots** — the change §10 was designed to make additive, and
+   deferred twice now. Worth settling the business workflow first: whether the
+   release authority is the supplier, the lot, or both. Deciding it alongside
+   the register above would avoid two migrations over the same table.
+4. **Historical as-of valuation** — reconstructible, but needs explicit handling
+   of the pre-costing migration boundary. See §13.
 
 ---
 
@@ -498,3 +521,265 @@ product. The release authority for an airworthiness document is often the
 supplier, and that question interacts with the `Certificate.stockLotId` change
 §10 was designed to make additive — both are deferred until the certificate
 workflow is defined, and should be decided together.
+
+---
+
+## 12. The dashboard, and the number it must never print
+
+The dashboard has six sections — needs attention, inventory, sales,
+procurement, costing and coverage, recent activity — each loading behind its own
+Suspense boundary so a slow aggregate delays its own card rather than the page.
+A section that fails renders an error in place; the rest still paints.
+
+### The margin trap
+
+`revenue - knownCost` is not margin when some units sold have no recorded
+acquisition cost. It is an upper bound reached only if those units were free.
+
+This is not hypothetical. Every order confirmed before FIFO costing shipped has
+`costedQuantity = 0`, so on the development database that subtraction reports
+the **entire revenue as profit, at one hundred per cent** — a confident,
+plausible, catastrophically wrong number in the most prominent place in the app.
+
+So `loadCosting` returns `margin: null` when nothing is costed. Not zero, not
+the revenue: absent, so there is no number for the UI to render. At partial
+coverage the revenue is apportioned to the costed units
+(`unitPrice x costedQuantity` per line) and the coverage travels with the figure.
+
+### Two revenue bases
+
+The Sales section reports **realised revenue** — `SUM(orders.total)`, after
+order-level discounts. The Costing section works at **list price** —
+`SUM(order_items.total)`, before them — because an order-level discount applies
+to a whole order and apportioning it across individual FIFO-costed units would
+mean inventing an allocation rule.
+
+They differ by the discounts and a standing note on the page reconciles them.
+The word "revenue" appears in one section only; the costing figures are named
+for their basis in the code as well (`allSalesAtListPrice`,
+`costedSalesAtListPrice`).
+
+### Certificates on the dashboard
+
+Expired, expiring within thirty days, and missing — over **ACTIVE products
+only**, since a discontinued part is not being sold. A certificate with **no
+expiry date is valid**; a Certificate of Conformity typically never expires and
+flagging null expiries would alarm about a large share of legitimate documents.
+Superseded certificates are ignored.
+
+The products list has no certificate filter, so the affected products travel
+with the counts rather than linking to a view that cannot filter.
+
+### Retired stock is counted, and separated
+
+Inventory value covers active, inactive and discontinued products alike — a
+discontinued part on a shelf is still capital — with the retired share broken
+out so it cannot be mistaken for stock that can still be sold.
+
+### Money rules live in one place
+
+`src/lib/money-basis.ts` owns what counts as revenue, open commitment, spend and
+committed spend. Before it, `REVENUE_STATUSES` lived in the customers module, an
+equivalent was private to suppliers, and orders and purchases filtered inline —
+which is how `openValue` came to mean CONFIRMED while `lifetimeValue` meant
+CONFIRMED + COMPLETED, both defensible and neither discoverable from the other.
+
+In raw SQL, interpolate them as enum arrays rather than writing the strings out:
+
+```sql
+WHERE o.status = ANY(${revenueStatuses()}::"OrderStatus"[])
+```
+
+---
+
+## 13. Reports
+
+Three reports are built. `/reports` is the index; `/reports/[report]` renders
+one; `/api/reports/[report]/csv` exports it.
+
+| Report | What it answers | Date basis |
+| --- | --- | --- |
+| **Stock valuation** | What is on the shelf and what it cost | current state |
+| **Sales** | What sold, to whom, for how much | `orders.confirmed_at` |
+| **Purchase spend** | What was bought and from whom | `purchases.received_at` |
+
+### One date rule: the economic event
+
+A sale is dated by when its order was **confirmed** — the moment stock left and
+cost was frozen. Procurement by when its delivery was **received** — the moment
+stock and cost arrived. Committed procurement by `purchase_date`, since nothing
+has been received.
+
+`created_at` is deliberately not used for anything financial: it dates the
+moment a draft was started, so an order raised in March and confirmed in June
+would land in March's revenue. Both chosen columns are fully populated for
+realised documents — no row is silently dropped by a date filter.
+
+### Spend is not cost of sales
+
+The most natural wrong report to build. Buying and selling are different events
+at different times: the development data has procurement in June against no
+revenue at all. Nothing in the purchase report may be subtracted from the sales
+report to produce a margin. COGS comes from `OrderItem.costTotal` and appears in
+no Tier 1 report at all.
+
+### No profitability in Tier 1
+
+Deliberate. The only honest margin on data with no cost coverage is an absence,
+and a report gets exported and forwarded where a caveat does not travel. When
+Tier 2 adds it, it must follow the dashboard's rules exactly.
+
+### Dates, discounts and grouping
+
+Grouping sales by product or category returns **null** for realised revenue
+rather than an apportioned figure — an order-level discount is not split across
+lines. Period and customer groupings can report it, because an order belongs to
+each of those whole.
+
+### CSV
+
+Same query, same parser, same loader as the page — the export answers the
+question the screen was showing rather than a second implementation that agrees
+today and drifts tomorrow. Authentication is the loaders' own `requireUser()`,
+so an unauthenticated request gets a 401 before a row is read.
+
+The file carries a preamble naming the period, the grouping and the filters, and
+restating the coverage caveats — a spreadsheet that gets forwarded still says
+that uncosted stock was excluded rather than valued at zero. UTF-8 BOM for
+Excel, CRLF endings, and quoting for commas, quotes, newlines and edge
+whitespace.
+
+### Indexes were measured, not assumed
+
+`orders(confirmed_at)` and `purchases(received_at)` are partial indexes added in
+`20260828140000_report_date_indexes`. They were measured on a throwaway database
+loaded with three years of synthetic history — 120,000 orders, 40,000 purchases
+— because the development database has fewer than twenty rows per table and
+Postgres sequentially scans everything:
+
+```
+sales, 12-month window      67.1ms -> 51.2ms    24% faster
+purchase spend, 12 months    2.3ms ->  0.4ms    81% faster
+```
+
+Two candidates were measured and **rejected**. A partial index on
+`stock_lots(quantity_remaining)` moved valuation by six per cent and the plan
+still showed a sequential scan — the query reads two thirds of the table, which
+is the wrong shape for an index. `stock_lot_consumptions(lot_id, created_at)`
+has no query to serve until as-of valuation exists.
+
+### Known limitations
+
+**Historical COGS does not exist and is not reconstructed.** Orders confirmed
+before FIFO costing have `costedQuantity = 0` by the deliberate backfill
+decision. Any margin over that period is zero-coverage, and nothing fills the
+gap.
+
+**As-of valuation is deferred.** It is reconstructible — the consumption table
+is append-only, and `quantityReceived - SUM(signed consumptions <= T)`
+reproduces `quantityRemaining` exactly — but backfilled lots carry a
+`receivedAt` in the past and a `createdAt` at migration time, so any as-of date
+before that boundary would misstate them. There is deliberately no date picker
+implying otherwise.
+
+**The certificate compliance register is deferred**, along with the other five
+Tier 2 reports. Certificates are unchanged, and `Certificate.stockLotId` was not
+introduced.
+
+---
+
+## 14. The pre-costing cancellation bug
+
+Worth knowing about because the shape of it will recur.
+
+The backfill deliberately did not cost historical orders. What that left
+unhandled is that those orders can still be **cancelled** — and when one was,
+`returnToLots` found no consumption rows to attribute the returned stock to. It
+returned zero silently: `stockQuantity` and the ledger rose, no lot did, and
+`SUM(quantityRemaining) = stockQuantity` stopped being true on a live database.
+
+`returnToLots` now reconciles against how many units the reversal restored, and
+whatever the consumption rows cannot explain becomes an UNKNOWN lot dated to
+when the units originally left. The same hole exists in the other direction on
+purchases and is **refused** rather than repaired — an outbound shortfall cannot
+become an uncosted lot, and taking it from another batch would corrupt that
+batch's cost history.
+
+The lesson for the next migration that declines to reconstruct something: check
+what can still be *undone*, not only what can be read.
+
+---
+
+## 15. The cleanup pass, and the two names it settled
+
+A dead-code audit over the whole repository after Tier 1 Reports landed. Worth
+recording mainly for what it *kept*, because the next audit will ask the same
+questions.
+
+### What went
+
+Roughly 200 lines across a dozen files, none of it in the inventory engine:
+`ModulePlaceholder` (its last consumer was the placeholder `/reports` page,
+rewritten in §13), `formatCompactCurrency`, `daysUntilExpiry`, `coverageLabel`,
+`isUnlinked`, the report grouping constants superseded by `REPORT_CONFIG`, and
+the tone helpers in `order-status.ts` and `purchase-status.ts` — those last two
+had been quietly superseded by the badge components, which pair a tone with an
+icon and so could never have used a colour-only map.
+
+Three supplier re-export shims went with them (`@/server/products` and
+`@/server/purchases` both re-exported `loadSupplierOptions`, and nothing had
+imported either since the suppliers module took ownership), along with a
+`REVENUE_STATUSES` re-export from customers, three obsolete `costPrice` keys in
+the certificate fixtures that Zod had been silently stripping since `532c0bc`,
+and the `@radix-ui/react-avatar` dependency — the avatar is Clerk's.
+
+### Three duplicated implementations became one
+
+`readOne` and `RawSearchParams` existed four times: once in `date-range.ts` and
+once privately in each of the customer, product and supplier query modules. The
+orders, purchases and movements modules had already been switched over during
+the Reports work; these three were missed because they have no date filter and
+so were not in that refactor's path.
+
+More consequentially, the report page and the CSV route each held their own copy
+of every report's groupings and sort keys. That is the one duplication that
+could do real damage: add a sort key to the page, forget the route, and the
+export answers a differently ordered question than the screen it came from,
+silently. Both now go through `reportParamsFor(report, raw)`, and neither can
+supply a configuration of its own.
+
+### Two constants both called "open"
+
+`money-basis.ts` had `OPEN_ORDER_STATUSES = [CONFIRMED]` — committed, awaiting
+shipment. The customers module had `OPEN_STATUSES = [DRAFT, PENDING]` — raised,
+not yet committed. Opposite ends of the same lifecycle, both called open, in a
+codebase whose money definitions had already drifted once for exactly this
+reason.
+
+The customers one is now `UNCOMMITTED_ORDER_STATUSES`, private to its module.
+The statuses themselves are unchanged; only the name is.
+
+Note it is *not* called `ACTIONABLE_ORDER_STATUSES`, which was the first
+suggestion: money-basis already exports that name for `[PENDING, CONFIRMED]`,
+and reusing it would have replaced a vague collision with an exact one.
+
+### One constant kept on purpose
+
+`OPEN_ORDER_STATUSES` and `openOrderStatuses()` have no callers and are staying.
+They are reserved for the reporting and operational layer, where "what have we
+committed to ship" is a question that will be asked and should be asked in one
+agreed way. The constant carries a comment saying so, because an audit that only
+counts references will find it again.
+
+The same applies to `supplierId` and `customerId` in `ReportParams`: no filter
+control offers them yet, but all three loaders honour them and they round-trip
+through the URL today.
+
+### Two schema indexes, deliberately untouched
+
+`Certificate @@index([certificateType])` and `User @@index([role])` have no query
+filtering or sorting on those columns. That makes them *candidates*, not waste —
+proving an index is unused needs a measurement on realistic volume, the way the
+report indexes in §13 were measured, and dropping one costs a migration. Left in
+place, recorded here for a future schema review.
+

@@ -95,11 +95,11 @@ export function totalCoverage(parts: readonly Coverage[]): Coverage {
   );
 }
 
-export function isComplete(coverage: Coverage): boolean {
+function isComplete(coverage: Coverage): boolean {
   return coverage.quantity > 0 && coverage.costedQuantity === coverage.quantity;
 }
 
-export function uncostedUnits(coverage: Coverage): number {
+function uncostedUnits(coverage: Coverage): number {
   return Math.max(0, coverage.quantity - coverage.costedQuantity);
 }
 
@@ -121,12 +121,4 @@ export function coverageNote(coverage: Coverage): string | null {
   }
 
   return `Margin calculated for ${coverage.costedQuantity} of ${coverage.quantity} units; ${missing} ${missing === 1 ? "unit has" : "units have"} unknown acquisition cost.`;
-}
-
-/** A compact form of the same disclosure, for a table cell or a tile. */
-export function coverageLabel(coverage: Coverage): string | null {
-  if (coverage.quantity === 0) return null;
-  if (isComplete(coverage)) return null;
-  if (coverage.costedQuantity === 0) return "Cost unknown";
-  return `${coverage.costedQuantity} of ${coverage.quantity} units costed`;
 }

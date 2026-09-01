@@ -94,14 +94,3 @@ const LABELS: Record<CertificateStatus, string> = {
 export function certificateStatusLabel(status: CertificateStatus): string {
   return LABELS[status];
 }
-
-/** Whole days until expiry; null when there is nothing to count down to. */
-export function daysUntilExpiry(
-  certificate: CertificateExpiry | null | undefined,
-  now: Date = new Date(),
-): number | null {
-  if (!certificate?.expiryDate) return null;
-  return Math.round(
-    (toUtcDay(certificate.expiryDate) - toUtcDay(now)) / 86_400_000,
-  );
-}

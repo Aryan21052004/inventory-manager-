@@ -203,9 +203,6 @@ export interface ProductDetail {
   deletable: boolean;
 }
 
-/** Re-exported so callers do not need to know which module owns suppliers. */
-export type { SupplierOption } from "@/server/suppliers";
-
 export type Result<T> = { ok: true; data: T } | { ok: false; error: SafeError };
 
 // ---------------------------------------------------------------------------
@@ -467,10 +464,8 @@ export async function loadCategories(): Promise<string[]> {
  * Supplier options used to be loaded here, with a second copy in the purchases
  * module and no notion of a supplier being archived. Both are gone: there is
  * one loader, in src/server/suppliers.ts, and one rule about who may be picked.
- * Re-exported rather than re-implemented so callers do not have to care which
- * module owns it.
+ * Import it from there — this module deliberately no longer re-exports it.
  */
-export { loadSupplierOptions } from "@/server/suppliers";
 
 /**
  * Everything the detail page shows, in one round trip.

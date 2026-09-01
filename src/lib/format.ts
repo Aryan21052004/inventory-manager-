@@ -16,13 +16,6 @@ const currencyFormatter = new Intl.NumberFormat(LOCALE, {
   maximumFractionDigits: 2,
 });
 
-const compactCurrencyFormatter = new Intl.NumberFormat(LOCALE, {
-  style: "currency",
-  currency: CURRENCY,
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
-
 const numberFormatter = new Intl.NumberFormat(LOCALE);
 
 const dateFormatter = new Intl.DateTimeFormat(LOCALE, {
@@ -54,11 +47,6 @@ function toNumber(value: Money): number {
 
 export function formatCurrency(value: Money): string {
   return currencyFormatter.format(toNumber(value));
-}
-
-/** `$1.2M` rather than `$1,234,567.00` — for stat tiles, where width is tight. */
-export function formatCompactCurrency(value: Money): string {
-  return compactCurrencyFormatter.format(toNumber(value));
 }
 
 export function formatNumber(value: number): string {

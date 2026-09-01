@@ -111,19 +111,8 @@ export function purchaseStatusLabel(status: PurchaseStatus): string {
   return LABELS[status];
 }
 
-export type PurchaseStatusTone =
-  | "muted"
-  | "secondary"
-  | "success"
-  | "destructive";
-
-const TONES: Record<PurchaseStatus, PurchaseStatusTone> = {
-  DRAFT: "muted",
-  PENDING: "secondary",
-  RECEIVED: "success",
-  CANCELLED: "destructive",
-};
-
-export function purchaseStatusTone(status: PurchaseStatus): PurchaseStatusTone {
-  return TONES[status];
-}
+/*
+ * Presentation lives in src/components/ui/purchase-status-badge.tsx, for the
+ * same reason it does for orders: the badge pairs a tone with an icon, and a
+ * tone map here would be half that rule kept somewhere else.
+ */

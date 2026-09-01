@@ -35,6 +35,15 @@ export const REVENUE_STATUSES = ["CONFIRMED", "COMPLETED"] as const;
  * A narrower question than revenue, and a different one: this is what is owed
  * to customers right now. COMPLETED orders are deliberately absent — they are
  * revenue, but they are no longer an open commitment.
+ *
+ * **Intentionally unused for now.** Nothing calls this yet; it is reserved for
+ * the reporting and operational layer, where "what have we committed to ship"
+ * is a question that will be asked and must be asked in one agreed way rather
+ * than reinvented at the call site. A dead-code audit will keep finding it —
+ * this comment is the answer.
+ *
+ * Note what it is *not*: the customers module's `UNCOMMITTED_ORDER_STATUSES`
+ * (DRAFT + PENDING) is the opposite end of the lifecycle, not a synonym.
  */
 export const OPEN_ORDER_STATUSES = ["CONFIRMED"] as const;
 
@@ -78,6 +87,7 @@ export const OUTSTANDING_PURCHASE_STATUSES = ["DRAFT", "PENDING"] as const;
 
 /** Mutable copies, because Prisma's `in` filters do not take readonly arrays. */
 export const revenueStatuses = (): OrderStatus[] => [...REVENUE_STATUSES];
+/** Reserved alongside OPEN_ORDER_STATUSES; see the note there. */
 export const openOrderStatuses = (): OrderStatus[] => [...OPEN_ORDER_STATUSES];
 export const actionableOrderStatuses = (): OrderStatus[] => [
   ...ACTIONABLE_ORDER_STATUSES,

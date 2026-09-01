@@ -122,21 +122,9 @@ export function orderStatusLabel(status: OrderStatus): string {
   return LABELS[status];
 }
 
-export type OrderStatusTone =
-  | "muted"
-  | "secondary"
-  | "default"
-  | "success"
-  | "destructive";
-
-const TONES: Record<OrderStatus, OrderStatusTone> = {
-  DRAFT: "muted",
-  PENDING: "secondary",
-  CONFIRMED: "default",
-  COMPLETED: "success",
-  CANCELLED: "destructive",
-};
-
-export function orderStatusTone(status: OrderStatus): OrderStatusTone {
-  return TONES[status];
-}
+/*
+ * How a status *looks* is not decided here. src/components/ui/order-status-badge.tsx
+ * owns that, because colour alone does not distinguish five states for everyone
+ * — it pairs each status with an icon as well, and a tone map here could only
+ * ever be half of that answer kept in a second place.
+ */

@@ -54,9 +54,6 @@ import { prisma } from "@/lib/prisma";
  */
 export const UNLINKED_CLERK_ID_PREFIX = "unlinked_";
 
-export const isUnlinked = (user: Pick<User, "clerkId">): boolean =>
-  user.clerkId.startsWith(UNLINKED_CLERK_ID_PREFIX);
-
 /** The fields of a Clerk account this app mirrors locally. */
 interface ClerkProfile {
   clerkId: string;

@@ -168,9 +168,6 @@ export interface PurchaseDetail {
   hasRetiredProducts: boolean;
 }
 
-/** Re-exported so callers do not need to know which module owns suppliers. */
-export type { SupplierOption } from "@/server/suppliers";
-
 /** A product as the purchase builder's search results present it. */
 export interface PurchaseProductOption {
   id: string;
@@ -357,12 +354,9 @@ export async function loadPurchaseStats(): Promise<Result<PurchaseStats>> {
  * module and no notion of a supplier being archived. Both are gone: there is
  * one loader, in src/server/suppliers.ts, and one rule about who may be picked.
  * The list filter needs a different rule — archived suppliers must stay
- * findable — so it uses `loadSupplierFilterOptions` instead.
+ * findable — so it uses `loadSupplierFilterOptions` instead. Import either from
+ * the suppliers module directly.
  */
-export {
-  loadSupplierFilterOptions,
-  loadSupplierOptions,
-} from "@/server/suppliers";
 
 /**
  * Products that can be added to a purchase.

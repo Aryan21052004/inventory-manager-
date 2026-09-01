@@ -155,7 +155,7 @@ const PRODUCTS = [
     description:
       "Tenkeyless mechanical keyboard, hot-swappable switches, USB-C detachable cable.",
     category: "Peripherals",
-    costPriceCents: 4250,
+    standardCostCents: 4250,
     sellingPriceCents: 8999,
     minimumStock: 15,
     status: "ACTIVE",
@@ -167,7 +167,7 @@ const PRODUCTS = [
     name: "Contour Ergonomic Wireless Mouse",
     description: "Vertical grip, six programmable buttons, 2.4GHz and Bluetooth.",
     category: "Peripherals",
-    costPriceCents: 1875,
+    standardCostCents: 1875,
     sellingPriceCents: 4450,
     minimumStock: 20,
     status: "ACTIVE",
@@ -179,7 +179,7 @@ const PRODUCTS = [
     name: 'Lumen 27" 4K IPS Monitor',
     description: "3840x2160 IPS panel, 99% sRGB, height-adjustable stand.",
     category: "Displays",
-    costPriceCents: 18900,
+    standardCostCents: 18900,
     sellingPriceCents: 32900,
     minimumStock: 6,
     status: "ACTIVE",
@@ -192,7 +192,7 @@ const PRODUCTS = [
     description:
       "Dual 4K output, 100W power delivery, gigabit ethernet. Supply paused pending a firmware revision.",
     category: "Accessories",
-    costPriceCents: 6400,
+    standardCostCents: 6400,
     sellingPriceCents: 12995,
     minimumStock: 10,
     // Temporarily off sale — the low-stock views should not nag about it.
@@ -205,7 +205,7 @@ const PRODUCTS = [
     name: "HDMI 2.1 Cable, 2m Braided",
     description: "48Gbps, 8K60/4K120, braided jacket with moulded strain relief.",
     category: "Cables",
-    costPriceCents: 420,
+    standardCostCents: 420,
     sellingPriceCents: 1299,
     minimumStock: 50,
     status: "ACTIVE",
@@ -217,7 +217,7 @@ const PRODUCTS = [
     name: "Aldridge Ergonomic Task Chair, Black",
     description: "Mesh back, four-way adjustable arms, synchronised tilt.",
     category: "Furniture",
-    costPriceCents: 14800,
+    standardCostCents: 14800,
     sellingPriceCents: 29900,
     minimumStock: 4,
     status: "ACTIVE",
@@ -229,7 +229,7 @@ const PRODUCTS = [
     name: "Standing Desk 140cm, Oak",
     description: "Electric height adjustment 62-128cm, dual motor, oak veneer top.",
     category: "Furniture",
-    costPriceCents: 26250,
+    standardCostCents: 26250,
     sellingPriceCents: 54900,
     minimumStock: 3,
     status: "ACTIVE",
@@ -241,7 +241,7 @@ const PRODUCTS = [
     name: "A4 Copy Paper 80gsm, 500 Sheets",
     description: "FSC-certified white copier paper, one ream.",
     category: "Stationery",
-    costPriceCents: 310,
+    standardCostCents: 310,
     sellingPriceCents: 749,
     minimumStock: 100,
     status: "ACTIVE",
@@ -253,7 +253,7 @@ const PRODUCTS = [
     name: "Shipping Carton, Medium 300x200x150mm",
     description: "Double-wall corrugated carton, sold singly.",
     category: "Packaging",
-    costPriceCents: 62,
+    standardCostCents: 62,
     sellingPriceCents: 185,
     minimumStock: 200,
     status: "ACTIVE",
@@ -266,7 +266,7 @@ const PRODUCTS = [
     description:
       "Direct thermal, permanent adhesive. Superseded by the 500/roll line.",
     category: "Packaging",
-    costPriceCents: 890,
+    standardCostCents: 890,
     sellingPriceCents: 1950,
     minimumStock: 25,
     // Run-out stock: still sellable history, not reordered.
@@ -551,7 +551,7 @@ async function main(): Promise<void> {
 
   for (const {
     key,
-    costPriceCents,
+    standardCostCents,
     sellingPriceCents,
     status,
     supplier,
@@ -560,7 +560,7 @@ async function main(): Promise<void> {
     const row = await prisma.product.create({
       data: {
         ...product,
-        standardCost: money(costPriceCents),
+        standardCost: money(standardCostCents),
         sellingPrice: money(sellingPriceCents),
         status: status as ProductStatus,
         stockQuantity: 0,
@@ -569,7 +569,7 @@ async function main(): Promise<void> {
     });
 
     productIds.set(key, row.id);
-    productCost.set(key, costPriceCents);
+    productCost.set(key, standardCostCents);
     productPrice.set(key, sellingPriceCents);
   }
   console.log(`  ${productIds.size} products`);
