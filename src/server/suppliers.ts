@@ -3,6 +3,7 @@ import "server-only";
 import type { Prisma } from "@/generated/prisma/client";
 import type { PurchaseStatus, SupplierStatus } from "@/generated/prisma/enums";
 import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/errors";
+import { SPEND_STATUSES } from "@/lib/money-basis";
 import { prisma } from "@/lib/prisma";
 import type { SupplierListParams, SupplierSortKey } from "@/lib/supplier-query";
 import {
@@ -180,12 +181,14 @@ export type Result<T> = { ok: true; data: T } | { ok: false; error: SafeError };
 const PURCHASE_HISTORY_LIMIT = 25;
 const PRODUCT_LIST_LIMIT = 50;
 
-/**
+/*
  * Only received purchases count as money actually spent. A draft is a plan, and
- * a cancelled purchase is one that did not happen — the same rule the purchase
- * detail page has always used for supplier totals.
+ * a cancelled purchase is one that did not happen.
+ *
+ * Defined in src/lib/money-basis.ts rather than here: the dashboard needs the
+ * same rule, and a private copy in this module was already the second place
+ * that answer lived.
  */
-const SPEND_STATUSES = ["RECEIVED"] as const;
 
 // ---------------------------------------------------------------------------
 // Query building

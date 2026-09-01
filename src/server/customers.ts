@@ -9,6 +9,7 @@ import {
   toSafeError,
   type SafeError,
 } from "@/lib/errors";
+import { REVENUE_STATUSES as REVENUE } from "@/lib/money-basis";
 import { prisma } from "@/lib/prisma";
 import {
   createCustomerSchema,
@@ -50,7 +51,12 @@ import { requireRole, requireUser } from "@/server/auth";
 // ---------------------------------------------------------------------------
 
 /** The order statuses that count towards what a customer has spent. */
-export const REVENUE_STATUSES = ["CONFIRMED", "COMPLETED"] as const;
+/*
+ * Re-exported rather than defined. The rule lives in src/lib/money-basis.ts
+ * now — this module having its own copy is how it came to differ from the
+ * orders module's idea of "value" without anybody noticing.
+ */
+export { REVENUE_STATUSES } from "@/lib/money-basis";
 
 /** The order statuses that are raised but not yet committed. */
 export const OPEN_STATUSES = ["DRAFT", "PENDING"] as const;
@@ -211,7 +217,7 @@ async function revenueByCustomer(
     by: ["customerId"],
     where: {
       customerId: { in: customerIds },
-      status: { in: [...REVENUE_STATUSES] },
+      status: { in: [...REVENUE] },
     },
     _sum: { total: true },
   });
@@ -381,7 +387,7 @@ export async function getCustomerDetail(
 
       const sum = Number(group._sum.total?.toString() ?? "0");
 
-      if ((REVENUE_STATUSES as readonly string[]).includes(group.status)) {
+      if ((REVENUE as readonly string[]).includes(group.status)) {
         lifetime += sum;
       } else if ((OPEN_STATUSES as readonly string[]).includes(group.status)) {
         open += sum;
