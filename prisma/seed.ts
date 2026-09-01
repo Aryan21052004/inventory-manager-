@@ -2,10 +2,10 @@
  * Development seed — a small but *coherent* warehouse.
  *
  * The point of this data is not just to fill tables. It is to leave the
- * database in a state the app's future screens can be built against: stock
- * levels that are actually explained by the ledger, orders whose totals add up,
- * and a couple of products sitting below their reorder level so the low-stock
- * views have something to show.
+ * database in a state the app's screens can be built against: stock levels that
+ * are actually explained by the ledger, orders whose totals add up, and a
+ * spread of quantities, large and small, so every screen that reports one has
+ * something real to report.
  *
  * Two rules keep it honest:
  *
@@ -157,7 +157,6 @@ const PRODUCTS = [
     category: "Peripherals",
     standardCostCents: 4250,
     sellingPriceCents: 8999,
-    minimumStock: 15,
     status: "ACTIVE",
     supplier: "kestrel",
   },
@@ -169,7 +168,6 @@ const PRODUCTS = [
     category: "Peripherals",
     standardCostCents: 1875,
     sellingPriceCents: 4450,
-    minimumStock: 20,
     status: "ACTIVE",
     supplier: "kestrel",
   },
@@ -181,7 +179,6 @@ const PRODUCTS = [
     category: "Displays",
     standardCostCents: 18900,
     sellingPriceCents: 32900,
-    minimumStock: 6,
     status: "ACTIVE",
     supplier: "kestrel",
   },
@@ -194,8 +191,7 @@ const PRODUCTS = [
     category: "Accessories",
     standardCostCents: 6400,
     sellingPriceCents: 12995,
-    minimumStock: 10,
-    // Temporarily off sale — the low-stock views should not nag about it.
+    // Temporarily off sale while the firmware revision lands.
     status: "INACTIVE",
     supplier: "northwind",
   },
@@ -207,7 +203,6 @@ const PRODUCTS = [
     category: "Cables",
     standardCostCents: 420,
     sellingPriceCents: 1299,
-    minimumStock: 50,
     status: "ACTIVE",
     supplier: "northwind",
   },
@@ -219,7 +214,6 @@ const PRODUCTS = [
     category: "Furniture",
     standardCostCents: 14800,
     sellingPriceCents: 29900,
-    minimumStock: 4,
     status: "ACTIVE",
     supplier: "aldridge",
   },
@@ -231,7 +225,6 @@ const PRODUCTS = [
     category: "Furniture",
     standardCostCents: 26250,
     sellingPriceCents: 54900,
-    minimumStock: 3,
     status: "ACTIVE",
     supplier: "aldridge",
   },
@@ -243,7 +236,6 @@ const PRODUCTS = [
     category: "Stationery",
     standardCostCents: 310,
     sellingPriceCents: 749,
-    minimumStock: 100,
     status: "ACTIVE",
     supplier: "meridian",
   },
@@ -255,7 +247,6 @@ const PRODUCTS = [
     category: "Packaging",
     standardCostCents: 62,
     sellingPriceCents: 185,
-    minimumStock: 200,
     status: "ACTIVE",
     supplier: "harbour",
   },
@@ -268,8 +259,7 @@ const PRODUCTS = [
     category: "Packaging",
     standardCostCents: 890,
     sellingPriceCents: 1950,
-    minimumStock: 25,
-    // Run-out stock: still sellable history, not reordered.
+    // Run-out stock: still sellable history, superseded by the 500/roll line.
     status: "DISCONTINUED",
     supplier: "harbour",
   },
@@ -920,12 +910,7 @@ async function main(): Promise<void> {
   console.log("\nStock on hand:");
   for (const product of PRODUCTS) {
     const quantity = onHand.get(product.key)!;
-    const low = quantity <= product.minimumStock;
-    console.log(
-      `  ${product.sku.padEnd(12)} ${String(quantity).padStart(4)}  (min ${String(
-        product.minimumStock,
-      ).padStart(3)})${low ? "  ← low stock" : ""}`,
-    );
+    console.log(`  ${product.sku.padEnd(12)} ${String(quantity).padStart(4)}`);
   }
 }
 

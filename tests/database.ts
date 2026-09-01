@@ -43,7 +43,6 @@ export async function createProduct(
       standardCost: "5.00",
       sellingPrice: "12.50",
       stockQuantity,
-      minimumStock: 10,
     },
   });
 
@@ -152,8 +151,8 @@ export async function expectConsumptionsReconcile(): Promise<void> {
  *
  * Only for fixtures. The tests that care about *how* stock gets written call
  * the real functions; the ones that only need a row in a particular state —
- * a catalogue to search, a quantity sitting at its minimum — set it up here so
- * the arrangement does not depend on the code under test.
+ * a catalogue to search, a product holding nothing — set it up here so the
+ * arrangement does not depend on the code under test.
  */
 export async function seedProduct(overrides: {
   sku: string;
@@ -162,7 +161,6 @@ export async function seedProduct(overrides: {
   standardCost?: string | null;
   sellingPrice?: string;
   stockQuantity?: number;
-  minimumStock?: number;
   status?: "ACTIVE" | "INACTIVE" | "DISCONTINUED";
   supplierId?: string | null;
   /**
@@ -183,7 +181,6 @@ export async function seedProduct(overrides: {
         overrides.standardCost === undefined ? "5.00" : overrides.standardCost,
       sellingPrice: overrides.sellingPrice ?? "12.50",
       stockQuantity,
-      minimumStock: overrides.minimumStock ?? 10,
       status: overrides.status ?? "ACTIVE",
       supplierId: overrides.supplierId ?? null,
     },

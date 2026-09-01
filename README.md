@@ -69,9 +69,10 @@ npm run db:seed
 Prisma 7 does not run this as part of `db:reset`, so run it yourself after a
 reset. It fills the database with a small, self-consistent warehouse: 2 users, 5
 suppliers, 10 products, 5 customers, 6 purchase orders, 7 sales orders, and the
-26 stock transactions that explain every unit on hand. Two products are left
-below their minimum stock so the low-stock views have something to show. The
-seed clears the tables first, so it is safe to re-run.
+26 stock transactions that explain every unit on hand. The quantities range
+from single figures to a few hundred, so every screen that reports one has
+something real to report. The seed clears the tables first, so it is safe to
+re-run.
 
 ### 4. Run it
 
@@ -144,7 +145,7 @@ src/
     layout/              Shell: sidebar, header, mobile drawer, user menu
     ui/                  Button, Card, Table, Dialog, Select, Badge,
                          Skeleton, EmptyState, ErrorState, StatCard,
-                         Pagination, StockStatusBadge, Toaster…
+                         Pagination, Toaster…
   lib/
     env.ts               Validated environment configuration
     prisma.ts            Prisma singleton + connection health check
@@ -152,7 +153,6 @@ src/
     format.ts            Locale-pinned currency, number and date formatters
     nav.ts               Single source of truth for navigation
     product-query.ts     The products list's URL state, parsed and serialised
-    stock-status.ts      The derived in-stock / low / out rule, in one place
     certificate-status.ts  The derived valid / expiring / expired / missing rule
     validation/          Zod schemas shared by forms and server actions
   server/
@@ -178,12 +178,10 @@ quantity can be explained by replaying its history. The ledger is append-only: a
 mistake is corrected with a `REVERSAL` row pointing at the transaction it undoes,
 never by editing or deleting one.
 
-**Derived values are never stored.** Stock status (in stock / low / out) is
-computed from `stockQuantity` against `minimumStock` rather than persisted, so it
-cannot drift from the numbers it describes. Certificate status is the same idea
-with sharper consequences: it changes on its own as dates pass, so a stored
-column would be wrong every morning until something remembered to recalculate
-it.
+**Derived values are never stored.** Certificate status — valid, expiring,
+expired, missing — is computed from the expiry date rather than persisted,
+because it changes on its own as dates pass: a stored column would be wrong
+every morning until something remembered to recalculate it.
 
 **No tax, anywhere.** An order's grand total is `subtotal - discount` and there
 is no tax column to reintroduce one. The column was dropped rather than left
@@ -260,12 +258,13 @@ pages in Postgres against the query string, so the browser receives one page of
 rows rather than the catalogue plus the code to sift it. The state lives in the
 URL, which makes a filtered view something you can bookmark or send someone.
 
-**Stock status is derived, in one place and two languages.** `stockStatus()` in
-`src/lib/stock-status.ts` is the rule; `stockStatusWhere()` in
-`src/server/products.ts` is the same rule as a SQL filter, because a page of
-products has to be narrowed in the database rather than after loading all of
-them. They cannot share an implementation, so a test asserts they agree rather
-than assuming it.
+**Stock is a quantity, not a classification.** The catalogue reports how many
+units a product holds and stops there. A product holding four units shows four;
+one holding none shows zero. There is no minimum-stock level, no low- or
+out-of-stock status, no threshold filter and no reorder point — the business
+does not work to fixed thresholds, so a threshold would turn a physical count
+into an alert nobody had asked for. What the stock is *worth* is a separate
+question, answered from the lots.
 
 **Editing a product cannot change its stock.** `updateProductSchema` has no
 `stockQuantity` field, so there is nothing for a tampered request to land on.

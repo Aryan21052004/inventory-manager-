@@ -118,7 +118,6 @@ describe("a product without a certificate", () => {
       category: "Actuators",
       sellingPrice: "1850.00",
       stockQuantity: "3",
-      minimumStock: "1",
       status: "ACTIVE",
     });
 
@@ -248,7 +247,6 @@ describe("attaching a certificate", () => {
         category: "Airframe",
         sellingPrice: "480.00",
         stockQuantity: "2",
-        minimumStock: "1",
         status: "ACTIVE",
       },
       { metadata: metadata(), file: fileFrom(PDF_BYTES, "certificate.pdf") },
@@ -693,7 +691,6 @@ describe("deleting a product with certificates", () => {
       category: "Airframe",
       sellingPrice: "20.00",
       stockQuantity: "1",
-      minimumStock: "0",
       status: "ACTIVE",
     });
 

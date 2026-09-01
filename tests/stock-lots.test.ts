@@ -63,7 +63,6 @@ async function part(sku: string, sellingPrice = "12000.00") {
     sku,
     name: `Part ${sku}`,
     stockQuantity: 0,
-    minimumStock: 0,
     sellingPrice,
   });
 }
@@ -166,7 +165,6 @@ describe("receiving a purchase records what it cost", () => {
     const a = await seedProduct({
       sku: "A-1",
       stockQuantity: 0,
-      minimumStock: 0,
       standardCost: "8000.00",
     });
 
@@ -318,7 +316,6 @@ describe("stock with no known cost", () => {
     const a = await seedProduct({
       sku: "A-1",
       stockQuantity: 10,
-      minimumStock: 0,
       sellingPrice: "12000.00",
       lotUnitCost: null,
     });
@@ -353,7 +350,6 @@ describe("stock with no known cost", () => {
     const a = await seedProduct({
       sku: "A-1",
       stockQuantity: 5,
-      minimumStock: 0,
       sellingPrice: "12000.00",
       lotUnitCost: null,
     });
@@ -404,7 +400,6 @@ describe("stock with no known cost", () => {
     const a = await seedProduct({
       sku: "A-1",
       stockQuantity: 10,
-      minimumStock: 0,
       standardCost: "9999.00",
       sellingPrice: "12000.00",
       lotUnitCost: null,
@@ -657,7 +652,6 @@ describe("cancelling an order confirmed before cost tracking existed", () => {
     const a = await seedProduct({
       sku: "A-1",
       stockQuantity: 0,
-      minimumStock: 0,
       standardCost: "9999.00",
       sellingPrice: "12000.00",
     });
@@ -912,7 +906,6 @@ describe("opening stock", () => {
       sellingPrice: "12000.00",
       stockQuantity: "50",
       openingStockUnitCost: "7500.00",
-      minimumStock: "5",
       status: "ACTIVE",
     });
 
@@ -936,7 +929,6 @@ describe("opening stock", () => {
       sellingPrice: "12000.00",
       stockQuantity: "50",
       openingStockUnitCost: "",
-      minimumStock: "5",
       status: "ACTIVE",
     });
 

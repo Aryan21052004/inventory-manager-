@@ -13,7 +13,6 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Pagination } from "@/components/ui/pagination";
-import { StockStatusBadge } from "@/components/ui/stock-status-badge";
 import {
   Table,
   TableBody,
@@ -41,9 +40,6 @@ import { cn } from "@/lib/utils";
  * around it shows a skeleton for exactly as long as the query takes. It also
  * means the whole catalogue never crosses the network: the filtering, sorting
  * and paging happen in Postgres, and one page of rows comes back as HTML.
- *
- * Stock status is computed from the two quantities on each row rather than read
- * from a column, because there is no column — see src/lib/stock-status.ts.
  */
 
 async function ProductsTable({
@@ -121,15 +117,6 @@ async function ProductsTable({
             <SortableHead params={params} column="stockQuantity" className="text-right" align="right">
               Stock
             </SortableHead>
-            <SortableHead
-              params={params}
-              column="minimumStock"
-              className="hidden text-right lg:table-cell"
-              align="right"
-            >
-              Minimum
-            </SortableHead>
-            <TableHead>Stock status</TableHead>
             <TableHead className="w-12">
               <span className="sr-only">Actions</span>
             </TableHead>
@@ -185,14 +172,6 @@ async function ProductsTable({
                 {formatNumber(product.stockQuantity)}
               </TableCell>
 
-              <TableCell className="tabular hidden text-right text-muted-foreground lg:table-cell">
-                {formatNumber(product.minimumStock)}
-              </TableCell>
-
-              <TableCell>
-                <StockStatusBadge status={product.stockStatus} />
-              </TableCell>
-
               <TableCell className="text-right">
                 <ProductRowActions
                   canManage={canManage}
@@ -207,7 +186,6 @@ async function ProductsTable({
                     standardCost: product.standardCost,
                     sellingPrice: product.sellingPrice,
                     stockQuantity: product.stockQuantity,
-                    minimumStock: product.minimumStock,
                     status: product.status,
                     supplierId: product.supplierId,
                     supplierName: product.supplierName,

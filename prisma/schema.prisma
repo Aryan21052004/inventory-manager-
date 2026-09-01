@@ -252,9 +252,10 @@ model Supplier {
   ///
   /// A planning figure an operator types, not something measured from the
   /// purchase history — that would be a different and much more careful
-  /// calculation, and this is the number someone wants when deciding whether
-  /// to reorder now. The unit is in the name so an integer cannot be read as
-  /// weeks by the next person.
+  /// calculation, and this is the number someone wants when deciding when to
+  /// buy. It describes a supplier's turnaround, not a stock threshold, and
+  /// nothing derives a reorder point from it. The unit is in the name so an
+  /// integer cannot be read as weeks by the next person.
   typicalLeadTimeDays Int? @map("typical_lead_time_days")
 
   /// ACTIVE suppliers can be assigned to products and raised purchases against;
@@ -313,11 +314,13 @@ model Product {
 
   /// Stock on hand. Never write this directly — go through the stock engine so
   /// a StockTransaction is recorded in the same database transaction.
+  ///
+  /// A physical count and nothing more. It is deliberately not classified: this
+  /// model carried a `minimumStock` companion, and a derived low/out-of-stock
+  /// status over the pair, until both were removed. The business does not work
+  /// to fixed stock thresholds, so the threshold turned a quantity into an
+  /// alert nobody had asked for. Zero here means zero units, not a status.
   stockQuantity Int @default(0) @map("stock_quantity")
-
-  /// At or below this level the product counts as low stock. The derived
-  /// status is never stored, so it cannot drift from the quantity it describes.
-  minimumStock Int @default(0) @map("minimum_stock")
 
   status    ProductStatus @default(ACTIVE)
   createdAt DateTime      @default(now()) @map("created_at")

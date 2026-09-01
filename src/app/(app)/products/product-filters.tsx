@@ -20,7 +20,6 @@ import {
   type ProductListParams,
   type ProductStatusFilter,
 } from "@/lib/product-query";
-import { STOCK_STATUSES, stockStatusLabel } from "@/lib/stock-status";
 
 /**
  * The search and filter bar.
@@ -156,21 +155,6 @@ function ProductFilters({
         />
 
         <FilterSelect
-          label="Stock status"
-          value={params.stockStatus}
-          onChange={(value) =>
-            setFilter({
-              stockStatus: value as ProductListParams["stockStatus"],
-            })
-          }
-          placeholder="Any stock level"
-          options={STOCK_STATUSES.map((status) => ({
-            value: status,
-            label: stockStatusLabel(status),
-          }))}
-        />
-
-        <FilterSelect
           label="Status"
           value={params.status}
           onChange={(value) =>
@@ -191,7 +175,6 @@ function ProductFilters({
                 ...params,
                 search: "",
                 category: null,
-                stockStatus: null,
                 status: null,
                 supplierId: null,
                 page: 1,

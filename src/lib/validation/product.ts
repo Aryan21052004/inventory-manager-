@@ -9,15 +9,11 @@ import { z } from "zod";
  * guard — anything that reaches the server has to be checked there, against
  * rules that cannot have been edited on the way in.
  *
- * Two things are deliberately absent:
- *
- *   Stock, from the update schema. Editing a product must not be able to
- *   overwrite `stockQuantity`; a quantity that changes without a ledger row
- *   explaining it is exactly the state this application exists to prevent.
- *   Corrections go through a stock adjustment — see validation/adjustment.ts.
- *
- *   Stock status. It is derived from the quantity and the minimum (see
- *   src/lib/stock-status.ts), so there is nothing to submit.
+ * One thing is deliberately absent: stock, from the update schema. Editing a
+ * product must not be able to overwrite `stockQuantity`; a quantity that
+ * changes without a ledger row explaining it is exactly the state this
+ * application exists to prevent. Corrections go through a stock adjustment —
+ * see validation/adjustment.ts.
  */
 
 /**
@@ -148,7 +144,6 @@ const productFields = {
    */
   standardCost: optionalPrice("Standard cost"),
   sellingPrice: price("Selling price"),
-  minimumStock: quantity("Minimum stock"),
   supplierId,
   status: productStatus,
 };

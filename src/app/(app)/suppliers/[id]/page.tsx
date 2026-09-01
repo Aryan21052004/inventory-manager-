@@ -30,7 +30,6 @@ import { ErrorState } from "@/components/ui/error-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { PurchaseStatusBadge } from "@/components/ui/purchase-status-badge";
 import { StatCard } from "@/components/ui/stat-card";
-import { StockStatusBadge } from "@/components/ui/stock-status-badge";
 import {
   Table,
   TableBody,
@@ -45,7 +44,6 @@ import {
   formatDateTime,
   formatNumber,
 } from "@/lib/format";
-import { stockStatus } from "@/lib/stock-status";
 import { getCurrentUser } from "@/server/auth";
 import { getSupplierDetail, type SupplierDetail } from "@/server/suppliers";
 
@@ -410,7 +408,6 @@ export default async function SupplierDetailPage({
                     Category
                   </TableHead>
                   <TableHead className="text-right">On hand</TableHead>
-                  <TableHead>Stock</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -432,14 +429,6 @@ export default async function SupplierDetailPage({
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
                       {formatNumber(product.stockQuantity)}
-                    </TableCell>
-                    <TableCell>
-                      <StockStatusBadge
-                        status={stockStatus({
-                          stockQuantity: product.stockQuantity,
-                          minimumStock: 0,
-                        })}
-                      />
                     </TableCell>
                   </TableRow>
                 ))}

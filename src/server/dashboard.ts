@@ -44,8 +44,6 @@ export type Result<T> = { ok: true; data: T } | { ok: false; error: SafeError };
 // ---------------------------------------------------------------------------
 
 export interface AttentionSnapshot {
-  outOfStockCount: number;
-  lowStockCount: number;
   /** Orders that need somebody to act — PENDING and CONFIRMED, never DRAFT. */
   actionableOrderCount: number;
   /** Purchases raised but not yet on the shelf, drafts included. */
@@ -237,30 +235,22 @@ const CERTIFICATE_LIST_LIMIT = 5;
 // Needs attention
 // ---------------------------------------------------------------------------
 
-interface AttentionRow {
-  out_of_stock: number;
-  low_stock: number;
-  uncosted_units: number;
-}
-
+/**
+ * Uncosted stock is a property of the lots, not of the catalogue.
+ *
+ * This used to ride along inside a raw query over `products` that existed to
+ * host two threshold counts. Those counts are gone, and the aggregate goes back
+ * to the table it was always describing — `stock_lots` — where an empty
+ * catalogue can no longer decide how many rows come back.
+ */
 export async function loadAttention(): Promise<Result<AttentionSnapshot>> {
   try {
-    const [rows, actionableOrderCount, outstandingPurchaseCount, certificates] =
+    const [uncosted, actionableOrderCount, outstandingPurchaseCount, certificates] =
       await Promise.all([
-        prisma.$queryRaw<AttentionRow[]>`
-          SELECT
-            COUNT(*) FILTER (WHERE stock_quantity <= 0)::int      AS out_of_stock,
-            COUNT(*) FILTER (
-              WHERE stock_quantity > 0 AND stock_quantity <= minimum_stock
-            )::int                                               AS low_stock,
-            COALESCE((
-              SELECT SUM(l.quantity_remaining)
-              FROM stock_lots l
-              WHERE l.quantity_remaining > 0 AND l.unit_cost IS NULL
-            ), 0)::int                                           AS uncosted_units
-          FROM products
-          WHERE status = 'ACTIVE'
-        `,
+        prisma.stockLot.aggregate({
+          _sum: { quantityRemaining: true },
+          where: { quantityRemaining: { gt: 0 }, unitCost: null },
+        }),
         prisma.order.count({ where: { status: { in: actionableOrderStatuses() } } }),
         prisma.purchase.count({
           where: { status: { in: outstandingPurchaseStatuses() } },
@@ -268,20 +258,12 @@ export async function loadAttention(): Promise<Result<AttentionSnapshot>> {
         loadCertificateAttention(),
       ]);
 
-    const totals = rows[0] ?? {
-      out_of_stock: 0,
-      low_stock: 0,
-      uncosted_units: 0,
-    };
-
     return {
       ok: true,
       data: {
-        outOfStockCount: totals.out_of_stock,
-        lowStockCount: totals.low_stock,
         actionableOrderCount,
         outstandingPurchaseCount,
-        uncostedUnits: totals.uncosted_units,
+        uncostedUnits: uncosted._sum.quantityRemaining ?? 0,
         certificates,
       },
     };

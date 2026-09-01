@@ -159,7 +159,6 @@ async function preCostingProduct(sku: string, stockQuantity: number) {
       standardCost: "9999.00",
       sellingPrice: "12000.00",
       stockQuantity,
-      minimumStock: 0,
       createdAt: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000),
     },
   });

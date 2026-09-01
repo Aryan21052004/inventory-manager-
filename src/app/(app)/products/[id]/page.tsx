@@ -24,7 +24,6 @@ import {
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { PageHeader } from "@/components/ui/page-header";
-import { StockStatusBadge } from "@/components/ui/stock-status-badge";
 import {
   Table,
   TableBody,
@@ -141,7 +140,6 @@ export default async function ProductDetailPage({
                   standardCost: product.standardCost,
                   sellingPrice: product.sellingPrice,
                   stockQuantity: product.stockQuantity,
-                  minimumStock: product.minimumStock,
                   status: product.status,
                   supplierId: product.supplierId,
                   supplierName: product.supplierName,
@@ -529,96 +527,40 @@ export default async function ProductDetailPage({
 }
 
 /**
- * The four numbers someone came to this page for, above everything else.
+ * The two numbers someone came to this page for, above everything else.
  *
- * The bar underneath plots stock against the minimum, because "40 units" and
- * "a minimum of 35" are two figures a reader has to hold in their head at once
- * to know whether anything is wrong. The bar does that comparison for them.
+ * Both are reported as they stand. Nothing here compares the quantity against
+ * a threshold or turns it into a status: a product holding four units holds
+ * four units, and one holding none holds none. What the stock is worth is a
+ * separate question, answered from the lots rather than from the count.
  */
 function StockSummary({ product }: { product: ProductDetail }) {
-  // Scaled against twice the minimum, so the reorder line lands in the middle
-  // and there is room above it to show healthy stock rather than pinning every
-  // in-stock product to a full bar.
-  const ceiling = Math.max(product.minimumStock * 2, product.stockQuantity, 1);
-  const fill = Math.min(100, (product.stockQuantity / ceiling) * 100);
-  const threshold = Math.min(100, (product.minimumStock / ceiling) * 100);
-
-  const barTone =
-    product.stockStatus === "OUT_OF_STOCK"
-      ? "bg-destructive"
-      : product.stockStatus === "LOW_STOCK"
-        ? "bg-warning"
-        : "bg-success";
-
   return (
     <Card>
-      <CardContent className="flex flex-col gap-5">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div className="flex flex-wrap items-end gap-8">
-            <div>
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                On hand
-              </p>
-              <p className="tabular mt-1 text-3xl font-semibold tracking-tight">
-                {formatNumber(product.stockQuantity)}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Minimum
-              </p>
-              <p className="tabular mt-1 text-3xl font-semibold tracking-tight text-muted-foreground">
-                {formatNumber(product.minimumStock)}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Value at cost
-              </p>
-              <p className="tabular mt-1 text-3xl font-semibold tracking-tight">
-                {formatCurrency(product.stockValue)}
-              </p>
-              {product.uncostedUnits > 0 ? (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {formatNumber(product.costedUnits)} of{" "}
-                  {formatNumber(product.stockQuantity)} units costed
-                </p>
-              ) : null}
-            </div>
+      <CardContent>
+        <div className="flex flex-wrap items-end gap-8">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              On hand
+            </p>
+            <p className="tabular mt-1 text-3xl font-semibold tracking-tight">
+              {formatNumber(product.stockQuantity)}
+            </p>
           </div>
-
-          <StockStatusBadge status={product.stockStatus} />
-        </div>
-
-        <div>
-          <div
-            className="relative h-2 w-full overflow-hidden rounded-full bg-muted"
-            role="img"
-            aria-label={`${formatNumber(product.stockQuantity)} units on hand against a minimum of ${formatNumber(product.minimumStock)}`}
-          >
-            <div
-              className={cn("h-full rounded-full transition-all", barTone)}
-              style={{ width: `${fill}%` }}
-            />
-            {product.minimumStock > 0 ? (
-              <span
-                className="absolute top-0 h-full w-px bg-foreground/50"
-                style={{ left: `${threshold}%` }}
-                aria-hidden
-              />
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Value at cost
+            </p>
+            <p className="tabular mt-1 text-3xl font-semibold tracking-tight">
+              {formatCurrency(product.stockValue)}
+            </p>
+            {product.uncostedUnits > 0 ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {formatNumber(product.costedUnits)} of{" "}
+                {formatNumber(product.stockQuantity)} units costed
+              </p>
             ) : null}
           </div>
-          {product.minimumStock > 0 ? (
-            <p className="mt-2 text-xs text-muted-foreground">
-              The marker is the reorder point — at or below it, the product
-              counts as low stock.
-            </p>
-          ) : (
-            <p className="mt-2 text-xs text-muted-foreground">
-              No minimum is set, so this product is only ever flagged when it
-              runs out entirely.
-            </p>
-          )}
         </div>
       </CardContent>
     </Card>

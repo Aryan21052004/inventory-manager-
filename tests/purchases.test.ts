@@ -56,7 +56,6 @@ async function product(sku: string, stockQuantity: number, cost = "10.00") {
     sku,
     name: `Part ${sku}`,
     stockQuantity,
-    minimumStock: 0,
     standardCost: cost,
   });
 }
@@ -377,7 +376,6 @@ describe("cancelling a received purchase", () => {
       sku: "C-7",
       name: "Scarce Part",
       stockQuantity: 0,
-      minimumStock: 0,
       sellingPrice: "50.00",
     });
 
@@ -518,7 +516,6 @@ describe("retired products", () => {
       sku: "T-1",
       name: "Retired Part",
       stockQuantity: 10,
-      minimumStock: 0,
       status: "DISCONTINUED",
     });
 
@@ -559,7 +556,6 @@ describe("retired products", () => {
       sku: "T-3",
       name: "Obsolete Actuator",
       stockQuantity: 10,
-      minimumStock: 0,
     });
 
     const purchase = await draftPurchase(supplier.id, [
@@ -1016,7 +1012,6 @@ describe("certificates", () => {
       sku: "CERT-P1",
       name: "Certified Part",
       stockQuantity: 10,
-      minimumStock: 0,
     });
 
     await attachCertificate({
@@ -1054,7 +1049,6 @@ describe("certificates", () => {
       sku: "CERT-P2",
       name: "Certified Actuator",
       stockQuantity: 0,
-      minimumStock: 0,
     });
 
     await attachCertificate({
@@ -1101,7 +1095,6 @@ describe("inventory impact", () => {
       sku: "IMP-1",
       name: "Test Aviation Part",
       stockQuantity: 50,
-      minimumStock: 0,
     });
 
     const purchase = await draftPurchase(supplier.id, [

@@ -48,7 +48,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatCurrency, formatNumber } from "@/lib/format";
-import type { StockStatus } from "@/lib/stock-status";
 
 /**
  * The purchase builder.
@@ -80,8 +79,6 @@ export interface ProductOption {
   /** The catalogue cost — a default for the line, not a constraint on it. */
   standardCost: string | null;
   stockQuantity: number;
-  minimumStock: number;
-  stockStatus: StockStatus;
   isActive: boolean;
 }
 

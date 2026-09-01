@@ -77,7 +77,6 @@ export interface ProductFormValues {
   standardCost: string | null;
   sellingPrice: string;
   stockQuantity: number;
-  minimumStock: number;
   status: string;
   supplierId: string | null;
   /**
@@ -402,24 +401,6 @@ function ProductFormDialog({
                 />
               </Field>
             )}
-
-            <Field
-              label="Minimum stock"
-              htmlFor={id("minimumStock")}
-              hint="At or below this, the product counts as low stock."
-              error={errors.minimumStock}
-            >
-              <Input
-                id={id("minimumStock")}
-                name="minimumStock"
-                type="number"
-                min="0"
-                step="1"
-                defaultValue={String(product?.minimumStock ?? 0)}
-                aria-invalid={Boolean(errors.minimumStock)}
-                className="tabular"
-              />
-            </Field>
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">

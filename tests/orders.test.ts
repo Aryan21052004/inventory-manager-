@@ -51,7 +51,6 @@ async function product(sku: string, stockQuantity: number, price = "10.00") {
     sku,
     name: `Part ${sku}`,
     stockQuantity,
-    minimumStock: 0,
     sellingPrice: price,
   });
 }
@@ -202,7 +201,6 @@ describe("insufficient stock", () => {
       sku: "B-2",
       name: "Hydraulic Actuator",
       stockQuantity: 40,
-      minimumStock: 0,
     });
 
     const order = await draftOrder(customer.id, [
@@ -936,7 +934,6 @@ describe("certificate display", () => {
       sku: "ABC-123",
       name: "Certified Actuator",
       stockQuantity: 100,
-      minimumStock: 0,
     });
 
     await attachCertificate({
@@ -997,7 +994,6 @@ describe("certificate display", () => {
     const part = await seedProduct({
       sku: "CERTSAFE-1",
       stockQuantity: 100,
-      minimumStock: 0,
     });
 
     await attachCertificate({
@@ -1041,7 +1037,6 @@ describe("inventory impact", () => {
       sku: "IMP-1",
       name: "Test Aviation Part",
       stockQuantity: 200,
-      minimumStock: 0,
     });
 
     const order = await draftOrder(customer.id, [
@@ -1637,7 +1632,6 @@ describe("editing rejects the same bad input as creating", () => {
       sku: "D-7",
       name: "Retired Part",
       stockQuantity: 100,
-      minimumStock: 0,
     });
 
     const order = await draftOrder(customer.id, [

@@ -6,8 +6,12 @@ vi.mock("@clerk/nextjs/server", async () => {
 });
 
 import { prisma } from "@/lib/prisma";
-import { DEFAULT_LIST_PARAMS, type ProductListParams } from "@/lib/product-query";
-import { stockStatus } from "@/lib/stock-status";
+import {
+  DEFAULT_LIST_PARAMS,
+  hasActiveFilters,
+  parseProductListParams,
+  type ProductListParams,
+} from "@/lib/product-query";
 import {
   createProduct,
   deleteProduct,
@@ -30,9 +34,9 @@ import {
  *
  * These run against a real Postgres, because most of what is worth proving here
  * is Postgres behaviour: that the unique index actually rejects a duplicate SKU,
- * that a filter comparing two columns returns what the derived status says it
- * should, that a `Restrict` foreign key really does stop a delete. Mocking
- * Prisma would only prove that the mock was written to agree with the test.
+ * that filters and sorts return what the query string asked for, that a
+ * `Restrict` foreign key really does stop a delete. Mocking Prisma would only
+ * prove that the mock was written to agree with the test.
  */
 
 beforeEach(async () => {
@@ -50,7 +54,6 @@ function productForm(overrides: Record<string, string> = {}) {
     standardCost: "45.00",
     sellingPrice: "89.99",
     stockQuantity: "25",
-    minimumStock: "5",
     status: "ACTIVE",
     ...overrides,
   };
@@ -81,7 +84,6 @@ describe("creating a product", () => {
     // Money round-trips through Decimal, not through a float.
     expect(product.standardCost?.toString()).toBe("45");
     expect(product.sellingPrice.toString()).toBe("89.99");
-    expect(product.minimumStock).toBe(5);
     expect(product.status).toBe("ACTIVE");
   });
 
@@ -214,7 +216,6 @@ describe("SKU uniqueness", () => {
         category: "General",
         standardCost: "1.00",
         sellingPrice: "2.00",
-        minimumStock: "1",
         status: "ACTIVE",
       }),
     ).rejects.toMatchObject({ code: "CONFLICT", details: { field: "sku" } });
@@ -282,18 +283,6 @@ describe("input validation", () => {
     expect(await prisma.product.count()).toBe(0);
   });
 
-  it("rejects a negative minimum stock", async () => {
-    await signInWithRole("ADMIN");
-
-    await expect(
-      createProduct(productForm({ minimumStock: "-1" })),
-    ).rejects.toMatchObject({
-      code: "BAD_REQUEST",
-      message: "Minimum stock cannot be negative",
-      details: { field: "minimumStock" },
-    });
-  });
-
   it("rejects a fractional quantity", async () => {
     await signInWithRole("ADMIN");
 
@@ -350,7 +339,6 @@ describe("editing a product", () => {
       category: "Accessories",
       standardCost: "9.99",
       sellingPrice: "19.99",
-      minimumStock: "12",
       status: "INACTIVE",
       supplierId: supplier.id,
     });
@@ -362,7 +350,6 @@ describe("editing a product", () => {
     expect(updated.name).toBe("Renamed Widget");
     expect(updated.sku).toBe("EDIT-002");
     expect(updated.category).toBe("Accessories");
-    expect(updated.minimumStock).toBe(12);
     expect(updated.status).toBe("INACTIVE");
     expect(updated.supplierId).toBe(supplier.id);
   });
@@ -380,7 +367,6 @@ describe("editing a product", () => {
       category: product.category,
       standardCost: "5.00",
       sellingPrice: "12.50",
-      minimumStock: "10",
       status: "ACTIVE",
       stockQuantity: "999999",
     });
@@ -406,7 +392,6 @@ describe("editing a product", () => {
         category: "General",
         standardCost: "1.00",
         sellingPrice: "2.00",
-        minimumStock: "0",
         status: "ACTIVE",
       }),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
@@ -427,7 +412,6 @@ describe("editing a product", () => {
         category: "General",
         standardCost: "1.00",
         sellingPrice: "2.00",
-        minimumStock: "0",
         status: "ACTIVE",
       }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
@@ -497,125 +481,70 @@ describe("deleting a product", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stock status
+// Stock quantity
 // ---------------------------------------------------------------------------
 
-describe("stock status", () => {
-  it("derives the three states from quantity and minimum", () => {
-    expect(stockStatus({ stockQuantity: 50, minimumStock: 10 })).toBe("NORMAL");
-    expect(stockStatus({ stockQuantity: 11, minimumStock: 10 })).toBe("NORMAL");
-
-    // At the minimum is low, not normal — the minimum is the reorder point, so
-    // reaching it is the signal.
-    expect(stockStatus({ stockQuantity: 10, minimumStock: 10 })).toBe(
-      "LOW_STOCK",
-    );
-    expect(stockStatus({ stockQuantity: 1, minimumStock: 10 })).toBe(
-      "LOW_STOCK",
-    );
-
-    expect(stockStatus({ stockQuantity: 0, minimumStock: 10 })).toBe(
-      "OUT_OF_STOCK",
-    );
-    // Out of stock outranks low stock: zero is zero even when the minimum is 0.
-    expect(stockStatus({ stockQuantity: 0, minimumStock: 0 })).toBe(
-      "OUT_OF_STOCK",
-    );
-    expect(stockStatus({ stockQuantity: 1, minimumStock: 0 })).toBe("NORMAL");
-  });
-
-  it("labels a low-stock product in the list", async () => {
-    await seedProduct({ sku: "LOW-001", stockQuantity: 8, minimumStock: 10 });
-    await seedProduct({ sku: "LOW-002", stockQuantity: 10, minimumStock: 10 });
-    await seedProduct({ sku: "OK-001", stockQuantity: 11, minimumStock: 10 });
-
-    const result = await listProducts(listParams({ sort: "sku" }));
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-
-    const bySku = Object.fromEntries(
-      result.data.items.map((item) => [item.sku, item.stockStatus]),
-    );
-
-    expect(bySku["LOW-001"]).toBe("LOW_STOCK");
-    expect(bySku["LOW-002"]).toBe("LOW_STOCK");
-    expect(bySku["OK-001"]).toBe("NORMAL");
-  });
-
-  it("labels an out-of-stock product in the list", async () => {
-    await seedProduct({ sku: "OUT-001", stockQuantity: 0, minimumStock: 10 });
-    await seedProduct({ sku: "OUT-002", stockQuantity: 0, minimumStock: 0 });
+describe("stock quantity", () => {
+  it("reports the quantity on hand as a number, not a classification", async () => {
+    // The point of removing the threshold feature: a product holding nothing
+    // holds nothing, and a product holding four units holds four. The list
+    // reports the count and stops there.
+    await seedProduct({ sku: "QTY-000", stockQuantity: 0 });
+    await seedProduct({ sku: "QTY-004", stockQuantity: 4 });
+    await seedProduct({ sku: "QTY-400", stockQuantity: 400 });
 
     const result = await listProducts(listParams({ sort: "sku" }));
     if (!result.ok) throw new Error("expected the list to load");
 
-    expect(result.data.items.map((item) => item.stockStatus)).toEqual([
-      "OUT_OF_STOCK",
-      "OUT_OF_STOCK",
+    expect(
+      result.data.items.map((item) => [item.sku, item.stockQuantity]),
+    ).toEqual([
+      ["QTY-000", 0],
+      ["QTY-004", 4],
+      ["QTY-400", 400],
     ]);
-  });
 
-  it("filters by the same boundaries it displays", async () => {
-    // The SQL filter and the TypeScript function are two implementations of one
-    // rule. This is what proves they agree, rather than assuming it.
-    await seedProduct({ sku: "S-NORMAL", stockQuantity: 40, minimumStock: 10 });
-    await seedProduct({ sku: "S-EDGE", stockQuantity: 10, minimumStock: 10 });
-    await seedProduct({ sku: "S-LOW", stockQuantity: 3, minimumStock: 10 });
-    await seedProduct({ sku: "S-OUT", stockQuantity: 0, minimumStock: 10 });
-
-    for (const status of ["NORMAL", "LOW_STOCK", "OUT_OF_STOCK"] as const) {
-      const result = await listProducts(
-        listParams({ stockStatus: status, sort: "sku" }),
-      );
-      if (!result.ok) throw new Error("expected the list to load");
-
-      // Everything the filter returned really is that status…
-      for (const item of result.data.items) {
-        expect(stockStatus(item)).toBe(status);
-      }
-
-      // …and nothing of that status was left behind.
-      const all = await listProducts(listParams({ sort: "sku" }));
-      if (!all.ok) throw new Error("expected the list to load");
-      const expected = all.data.items.filter(
-        (item) => stockStatus(item) === status,
-      );
-      expect(result.data.items.map((item) => item.sku)).toEqual(
-        expected.map((item) => item.sku),
-      );
+    // A product holding nothing is still an ordinary row, and nothing on it
+    // classifies the number.
+    for (const item of result.data.items) {
+      expect(item).not.toHaveProperty("stockStatus");
+      expect(item).not.toHaveProperty("minimumStock");
     }
   });
 
-  it("counts low and out-of-stock products for the summary tiles", async () => {
-    await seedProduct({
-      sku: "T-1",
-      stockQuantity: 40,
-      minimumStock: 10,
-      lotUnitCost: "2.00",
-    });
-    await seedProduct({
-      sku: "T-2",
-      stockQuantity: 10,
-      minimumStock: 10,
-      lotUnitCost: "3.00",
-    });
-    await seedProduct({
-      sku: "T-3",
-      stockQuantity: 0,
-      minimumStock: 10,
-      lotUnitCost: "4.00",
-    });
+  it("ignores a stale stock filter left in a bookmarked URL", () => {
+    // The old dashboard handed out links to /products?stock=LOW_STOCK, and
+    // some are still in people's bookmarks. The parser discards what it does
+    // not recognise, so one of those lands on an unfiltered list rather than
+    // an error.
+    const params = parseProductListParams({ stock: "LOW_STOCK" });
+
+    expect(params).toEqual(DEFAULT_LIST_PARAMS);
+    expect(hasActiveFilters(params)).toBe(false);
+  });
+
+  it("drops a stale minimum-stock sort key rather than failing", () => {
+    expect(parseProductListParams({ sort: "minimumStock" }).sort).toBe(
+      DEFAULT_LIST_PARAMS.sort,
+    );
+  });
+
+  it("totals the catalogue and values it from the lots", async () => {
+    await seedProduct({ sku: "T-1", stockQuantity: 40, lotUnitCost: "2.00" });
+    await seedProduct({ sku: "T-2", stockQuantity: 10, lotUnitCost: "3.00" });
+    await seedProduct({ sku: "T-3", stockQuantity: 0, lotUnitCost: "4.00" });
 
     const result = await loadProductStats();
     if (!result.ok) throw new Error("expected stats to load");
 
     expect(result.data.total).toBe(3);
-    expect(result.data.lowStock).toBe(1);
-    expect(result.data.outOfStock).toBe(1);
     // Valued from the lots, not from a catalogue column: 40 × 2.00 + 10 × 3.00.
     // T-3 holds nothing, so its cost contributes nothing.
     expect(Number(result.data.stockValue)).toBe(110);
     expect(result.data.uncostedUnits).toBe(0);
+    // And no threshold counts survive on the tiles.
+    expect(result.data).not.toHaveProperty("lowStock");
+    expect(result.data).not.toHaveProperty("outOfStock");
   });
 
   it("values only the units whose cost is known, and counts the rest", async () => {
@@ -728,28 +657,28 @@ describe("filtering", () => {
   it("combines filters rather than replacing them", async () => {
     await seedProduct({
       sku: "COMBO-1",
-      name: "Low peripheral",
+      name: "Retired peripheral",
       category: "Peripherals",
       stockQuantity: 2,
-      minimumStock: 10,
+      status: "DISCONTINUED",
     });
     await seedProduct({
       sku: "COMBO-2",
-      name: "Healthy peripheral",
+      name: "Stocked peripheral",
       category: "Peripherals",
       stockQuantity: 200,
-      minimumStock: 10,
+      status: "ACTIVE",
     });
     await seedProduct({
       sku: "COMBO-3",
-      name: "Low display",
+      name: "Retired display",
       category: "Displays",
       stockQuantity: 1,
-      minimumStock: 10,
+      status: "DISCONTINUED",
     });
 
     const result = await listProducts(
-      listParams({ category: "Peripherals", stockStatus: "LOW_STOCK" }),
+      listParams({ category: "Peripherals", status: "DISCONTINUED" }),
     );
     if (!result.ok) throw new Error("expected the list to load");
 
@@ -845,7 +774,7 @@ describe("product detail", () => {
     expect(result).toEqual({ ok: true, data: null });
   });
 
-  it("includes the derived status, the supplier, and the movement history", async () => {
+  it("includes the quantity on hand, the supplier, and the movement history", async () => {
     const admin = await signInWithRole("ADMIN");
     const supplier = await createSupplier("Detail Supplies");
 
@@ -853,7 +782,6 @@ describe("product detail", () => {
       productForm({
         sku: "DET-001",
         stockQuantity: "4",
-        minimumStock: "10",
         supplierId: supplier.id,
       }),
     );
@@ -861,7 +789,10 @@ describe("product detail", () => {
     const result = await getProductDetail(created.id);
     if (!result.ok || !result.data) throw new Error("expected a product");
 
-    expect(result.data.stockStatus).toBe("LOW_STOCK");
+    // The quantity is reported as it stands, and carries no classification.
+    expect(result.data.stockQuantity).toBe(4);
+    expect(result.data).not.toHaveProperty("stockStatus");
+    expect(result.data).not.toHaveProperty("minimumStock");
     expect(result.data.supplierName).toBe("Detail Supplies");
     expect(result.data.movements).toHaveLength(1);
     expect(result.data.movements[0]).toMatchObject({

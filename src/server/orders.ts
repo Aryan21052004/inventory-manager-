@@ -19,7 +19,6 @@ import {
   type OrderStatus,
 } from "@/lib/order-status";
 import { prisma } from "@/lib/prisma";
-import { stockStatus, type StockStatus } from "@/lib/stock-status";
 import {
   calculateTotals,
   centsToDecimalString,
@@ -115,7 +114,6 @@ export interface OrderDetailLine {
   costedQuantity: number;
   /** Stock on hand now, for context — not what was deducted. */
   currentStock: number;
-  stockStatus: StockStatus;
   /**
    * The product's current certificate, referenced rather than copied. Orders
    * never own certificate data; this is a read of the product's own paperwork
@@ -195,8 +193,6 @@ export interface OrderProductOption {
    */
   sellingPrice: string;
   stockQuantity: number;
-  minimumStock: number;
-  stockStatus: StockStatus;
   /**
    * Always true for search results, which only return ACTIVE products. It can
    * be false for a line already on an order whose product was retired since —
@@ -442,7 +438,6 @@ export async function searchOrderProducts(
         sku: true,
         sellingPrice: true,
         stockQuantity: true,
-        minimumStock: true,
       },
     });
 
@@ -452,8 +447,6 @@ export async function searchOrderProducts(
       sku: row.sku,
       sellingPrice: row.sellingPrice.toString(),
       stockQuantity: row.stockQuantity,
-      minimumStock: row.minimumStock,
-      stockStatus: stockStatus(row),
       isActive: true,
     }));
   } catch (error) {
@@ -485,7 +478,6 @@ export async function loadOrderProducts(
         sku: true,
         sellingPrice: true,
         stockQuantity: true,
-        minimumStock: true,
         status: true,
       },
     });
@@ -496,8 +488,6 @@ export async function loadOrderProducts(
       sku: row.sku,
       sellingPrice: row.sellingPrice.toString(),
       stockQuantity: row.stockQuantity,
-      minimumStock: row.minimumStock,
-      stockStatus: stockStatus(row),
       isActive: row.status === "ACTIVE",
     }));
   } catch (error) {
@@ -573,7 +563,6 @@ export async function getOrderDetail(
                 name: true,
                 sku: true,
                 stockQuantity: true,
-                minimumStock: true,
                 /*
                  * The product's *current* certificate, read through the
                  * relation. Nothing is copied onto the order: an order
@@ -649,7 +638,6 @@ export async function getOrderDetail(
             costTotal: item.costTotal?.toString() ?? null,
             costedQuantity: item.costedQuantity,
             currentStock: item.product.stockQuantity,
-            stockStatus: stockStatus(item.product),
             certificateType: certificate?.certificateType ?? null,
             certificateNumber: certificate?.certificateNumber ?? null,
             certificateStatus: certificateStatus(certificate),

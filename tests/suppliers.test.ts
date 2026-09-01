@@ -83,7 +83,6 @@ function productForm(overrides: Record<string, string> = {}) {
     standardCost: "",
     sellingPrice: "12.50",
     stockQuantity: "0",
-    minimumStock: "0",
     status: "ACTIVE",
     supplierId: NO_SUPPLIER,
     ...overrides,
@@ -99,7 +98,6 @@ async function part(sku: string, supplierId?: string | null) {
     sku,
     name: `Part ${sku}`,
     stockQuantity: 0,
-    minimumStock: 0,
     supplierId: supplierId ?? null,
   });
 }
@@ -595,7 +593,6 @@ describe("archived suppliers and products", () => {
         category: product.category,
         standardCost: "5.00",
         sellingPrice: "12.50",
-        minimumStock: "0",
         status: "ACTIVE",
         supplierId: archived.id,
       }),
@@ -729,7 +726,6 @@ describe("assigning a supplier to a new product", () => {
         category: "Airframe",
         standardCost: "5.00",
         sellingPrice: "12.50",
-        minimumStock: "0",
         status: "ACTIVE",
         supplierId: supplier.id,
       }),
@@ -763,7 +759,6 @@ describe("changing the supplier on an existing product", () => {
       category: product.category,
       standardCost: "5.00",
       sellingPrice: "12.50",
-      minimumStock: "0",
       status: "ACTIVE",
       supplierId,
     });
@@ -1206,7 +1201,6 @@ describe("supplier detail", () => {
     const product = await seedProduct({
       sku: "A-1",
       stockQuantity: 40,
-      minimumStock: 0,
       supplierId: supplier.id,
       lotUnitCost: null,
     });

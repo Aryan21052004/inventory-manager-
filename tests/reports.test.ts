@@ -78,7 +78,6 @@ async function part(sku: string, sellingPrice = "100.00", category = "Airframe")
     sku,
     name: `Part ${sku}`,
     stockQuantity: 0,
-    minimumStock: 0,
     sellingPrice,
     category,
   });

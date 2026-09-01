@@ -11,7 +11,6 @@ import {
   type PurchaseStatus,
 } from "@/lib/purchase-status";
 import { prisma } from "@/lib/prisma";
-import { stockStatus, type StockStatus } from "@/lib/stock-status";
 import {
   calculatePurchaseTotal,
   centsToDecimalString,
@@ -98,7 +97,6 @@ export interface PurchaseDetailLine {
   total: string;
   /** Stock on hand now, for context — not what was added. */
   currentStock: number;
-  stockStatus: StockStatus;
   /**
    * True when the product is no longer ACTIVE. The line stays visible — history
    * must remain readable — but it blocks receiving until someone resolves it.
@@ -180,8 +178,6 @@ export interface PurchaseProductOption {
    */
   standardCost: string | null;
   stockQuantity: number;
-  minimumStock: number;
-  stockStatus: StockStatus;
   isActive: boolean;
 }
 
@@ -393,7 +389,6 @@ export async function searchPurchaseProducts(
         sku: true,
         standardCost: true,
         stockQuantity: true,
-        minimumStock: true,
       },
     });
 
@@ -403,8 +398,6 @@ export async function searchPurchaseProducts(
       sku: row.sku,
       standardCost: row.standardCost?.toString() ?? null,
       stockQuantity: row.stockQuantity,
-      minimumStock: row.minimumStock,
-      stockStatus: stockStatus(row),
       isActive: true,
     }));
   } catch (error) {
@@ -516,7 +509,6 @@ export async function getPurchaseDetail(
                 sku: true,
                 status: true,
                 stockQuantity: true,
-                minimumStock: true,
                 /*
                  * The product's current certificate, read through the relation.
                  * Nothing is copied onto the purchase: a purchase references
@@ -558,7 +550,6 @@ export async function getPurchaseDetail(
         unitCost: item.unitCost.toString(),
         total: item.total.toString(),
         currentStock: item.product.stockQuantity,
-        stockStatus: stockStatus(item.product),
         productRetired: item.product.status !== "ACTIVE",
         certificateType: certificate?.certificateType ?? null,
         certificateNumber: certificate?.certificateNumber ?? null,
@@ -1359,7 +1350,6 @@ export async function loadPurchaseProducts(
         sku: true,
         standardCost: true,
         stockQuantity: true,
-        minimumStock: true,
         status: true,
       },
     });
@@ -1370,8 +1360,6 @@ export async function loadPurchaseProducts(
       sku: row.sku,
       standardCost: row.standardCost?.toString() ?? null,
       stockQuantity: row.stockQuantity,
-      minimumStock: row.minimumStock,
-      stockStatus: stockStatus(row),
       isActive: row.status === "ACTIVE",
     }));
   } catch (error) {

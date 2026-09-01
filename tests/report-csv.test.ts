@@ -187,7 +187,6 @@ describe("the CSV totals match the page totals", () => {
     const a = await seedProduct({
       sku: "A-1",
       stockQuantity: 0,
-      minimumStock: 0,
       sellingPrice: "100.00",
     });
 

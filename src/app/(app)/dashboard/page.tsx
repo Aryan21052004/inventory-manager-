@@ -2,7 +2,6 @@ import { Suspense } from "react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import {
-  AlertTriangle,
   ArrowLeftRight,
   Boxes,
   CheckCircle2,
@@ -160,9 +159,7 @@ async function AttentionSection() {
     certificates.expiringSoonCount +
     certificates.missingCount;
 
-  const stockAlerts = data.outOfStockCount + data.lowStockCount;
   const nothingToDo =
-    stockAlerts === 0 &&
     paperwork === 0 &&
     data.actionableOrderCount === 0 &&
     data.outstandingPurchaseCount === 0;
@@ -174,7 +171,7 @@ async function AttentionSection() {
           <EmptyState
             icon={CheckCircle2}
             title="Nothing needs attention"
-            description="No stock alerts, no certificate problems, and no orders or deliveries outstanding."
+            description="No certificate problems, and no orders or deliveries outstanding."
           />
         </CardContent>
       </Card>
@@ -183,23 +180,7 @@ async function AttentionSection() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <LinkedStat
-          href="/products?stock=OUT_OF_STOCK"
-          label="Out of stock"
-          value={formatNumber(data.outOfStockCount)}
-          hint="Active products with nothing on the shelf"
-          icon={PackageX}
-          tone={data.outOfStockCount > 0 ? "destructive" : "default"}
-        />
-        <LinkedStat
-          href="/products?stock=LOW_STOCK"
-          label="Low stock"
-          value={formatNumber(data.lowStockCount)}
-          hint="At or below their minimum"
-          icon={AlertTriangle}
-          tone={data.lowStockCount > 0 ? "warning" : "default"}
-        />
+      <div className="grid gap-4 sm:grid-cols-2">
         <LinkedStat
           href="/orders"
           label="Orders to action"

@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
-import { AlertTriangle, Boxes, PackageX, Wallet } from "lucide-react";
+import { Boxes, Wallet } from "lucide-react";
 
 import { NewProductButton } from "@/app/(app)/products/new-product-button";
 import { ProductFilters } from "@/app/(app)/products/product-filters";
@@ -69,26 +69,12 @@ export default async function ProductsPage({
       />
 
       {stats.ok ? (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2">
           <StatCard
             label="Products"
             value={formatNumber(stats.data.total)}
             hint="Items in the catalogue"
             icon={Boxes}
-          />
-          <StatCard
-            label="Low stock"
-            value={formatNumber(stats.data.lowStock)}
-            hint="At or below the minimum"
-            icon={AlertTriangle}
-            tone={stats.data.lowStock > 0 ? "warning" : "default"}
-          />
-          <StatCard
-            label="Out of stock"
-            value={formatNumber(stats.data.outOfStock)}
-            hint="Nothing on hand"
-            icon={PackageX}
-            tone={stats.data.outOfStock > 0 ? "destructive" : "default"}
           />
           <StatCard
             label="Stock value"
@@ -116,7 +102,7 @@ export default async function ProductsPage({
           */}
           <Suspense
             key={toSearchParams(params).toString()}
-            fallback={<TableSkeleton rows={params.pageSize > 10 ? 10 : 6} columns={7} />}
+            fallback={<TableSkeleton rows={params.pageSize > 10 ? 10 : 6} columns={6} />}
           >
             <ProductsTable
               params={params}

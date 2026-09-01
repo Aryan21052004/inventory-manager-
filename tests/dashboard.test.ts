@@ -56,7 +56,6 @@ async function part(sku: string, sellingPrice = "100.00") {
     sku,
     name: `Part ${sku}`,
     stockQuantity: 0,
-    minimumStock: 0,
     sellingPrice,
   });
 }
@@ -106,9 +105,8 @@ describe("an empty database", () => {
     const costing = unwrap(await loadCosting());
     const movements = unwrap(await loadRecentMovements());
 
-    expect(attention.outOfStockCount).toBe(0);
-    expect(attention.lowStockCount).toBe(0);
     expect(attention.certificates.expiredCount).toBe(0);
+    expect(attention.uncostedUnits).toBe(0);
     expect(inventory.productCount).toBe(0);
     expect(Number(inventory.stockValue)).toBe(0);
     expect(Number(sales.realisedRevenue)).toBe(0);
@@ -391,15 +389,22 @@ describe("inventory value", () => {
 // ---------------------------------------------------------------------------
 
 describe("needs attention", () => {
-  it("counts low and out-of-stock products", async () => {
+  it("reports uncosted units, and classifies no stock at all", async () => {
+    // This figure used to ride inside a raw query over `products` whose only
+    // reason to exist was hosting the two threshold counts. It aggregates the
+    // lots directly now, so an empty catalogue can no longer decide how many
+    // rows come back — and a product holding nothing is simply a product
+    // holding nothing.
     await signInWithRole("STAFF");
-    await seedProduct({ sku: "T-1", stockQuantity: 40, minimumStock: 10 });
-    await seedProduct({ sku: "T-2", stockQuantity: 10, minimumStock: 10 });
-    await seedProduct({ sku: "T-3", stockQuantity: 0, minimumStock: 10 });
+    await seedProduct({ sku: "T-1", stockQuantity: 40, lotUnitCost: "2.00" });
+    await seedProduct({ sku: "T-2", stockQuantity: 25 });
+    await seedProduct({ sku: "T-3", stockQuantity: 0 });
 
     const attention = unwrap(await loadAttention());
-    expect(attention.lowStockCount).toBe(1);
-    expect(attention.outOfStockCount).toBe(1);
+
+    expect(attention.uncostedUnits).toBe(25);
+    expect(attention).not.toHaveProperty("lowStockCount");
+    expect(attention).not.toHaveProperty("outOfStockCount");
   });
 
   it("excludes drafts from the orders needing action", async () => {

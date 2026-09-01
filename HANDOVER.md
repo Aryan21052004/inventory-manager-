@@ -8,9 +8,10 @@ Written for whoever picks this up next — a new developer, or a new session. It
 covers what exists, the rules the code is built around, and the things that will
 waste your afternoon if nobody tells you.
 
-**Last updated:** 1 September 2026, after a dead-code audit and cleanup pass
-over the whole repository (§15), on top of the Tier 1 Reports module (§13) and
-the Dashboard rebuild (§12).
+**Last updated:** 1 September 2026, after removing threshold-based stock
+classification from the product entirely (§16), on top of the dead-code audit
+and cleanup pass (§15), the Tier 1 Reports module (§13) and the Dashboard
+rebuild (§12).
 
 ---
 
@@ -34,6 +35,8 @@ the Dashboard rebuild (§12).
 ### Commit history
 
 ```
+403f811        refactor: remove dead code and settle two ambiguous names
+b3eccfa        feat: add Tier 1 reports with CSV export
 83e8d55        feat: rebuild the dashboard on real data, with honest costing
 8bdaa65        fix: return pre-costing stock to a lot when an order is cancelled
 9f5069e        feat: add the suppliers module with an archive lifecycle
@@ -51,8 +54,8 @@ Four older commits precede these: the Clerk work, the domain model, and the
 original scaffold, back to `03536e4`.
 
 **Current branch:** `db/inventory-domain-model`
-**Latest commit:** `83e8d55` — with the Tier 1 Reports module (§13) and the
-cleanup pass (§15) uncommitted in the working tree on top of it.
+**Latest commit:** `403f811` — with the threshold-removal change set (§16)
+uncommitted in the working tree on top of it.
 
 There is **no git remote** — everything is local. `master` is still back at
 `03536e4`; all real work is on the branch.
@@ -98,10 +101,17 @@ indistinguishable from a real one once written. Quantity and cost are separate
 concerns: an order for 15 units against 10 costed and 5 uncosted **confirms**,
 and reports a cost covering 10 of 15 rather than a whole-line figure.
 
-**Derived values are never stored.** Stock status (in stock / low / out) and
-certificate status (valid / expiring / expired / missing) are computed from the
-data they describe. Certificate status especially: it changes on its own as
-dates pass, so a stored column would be wrong every morning.
+**Derived values are never stored.** Certificate status (valid / expiring /
+expired / missing) is computed from the data it describes rather than persisted:
+it changes on its own as dates pass, so a stored column would be wrong every
+morning.
+
+**Stock is a quantity, not a classification.** `Product.stockQuantity` is a
+count, and nothing turns it into a status. There is no minimum-stock level, no
+low- or out-of-stock state, no threshold filter and no reorder point — see §16
+for what was removed and why. A product holding four units holds four units; one
+holding none holds none. What that stock is *worth* is a different question, and
+it is answered from the lots.
 
 **The server decides who did something.** `createdBy` is never a parameter, in
 any module. It is read from the Clerk session, resolved through `clerkId` to a
@@ -334,12 +344,24 @@ tiles. They describe the customer base, not the current view.
 
 ## 8. What is not built
 
-**Reports beyond Tier 1.** Three are built (§13). Six more are designed and
-deliberately not built: profitability and cost coverage, low and dead stock,
-stock movement summary, inventory ageing by lot, supplier provenance, and a
-certificate compliance register. The last is the one worth doing next — an
-exportable airworthiness register is not something generic ERP ships, and the
-data already supports it.
+**Reports beyond Tier 1.** Three are built (§13). Five more are designed and
+deliberately not built: profitability and cost coverage, stock movement summary,
+inventory ageing by lot, supplier provenance, and a certificate compliance
+register. The last is the one worth doing next — an exportable airworthiness
+register is not something generic ERP ships, and the data already supports it.
+
+**Low and dead stock is removed from the product, not deferred.** It was the
+sixth Tier 2 report, and the threshold machinery behind it was *built* — a
+`minimumStock` column, a derived low/out-of-stock status, dashboard cards,
+product tiles, a filter and a reorder marker. All of it has been removed at the
+owner's direction (1 September 2026), column included; §16 records the removal.
+Nothing threshold-driven is to be added back — no low- or out-of-stock report,
+dashboard card or alert, no reorder points, no replenishment suggestions —
+unless the owner asks for it explicitly. Physical stock quantity and the
+inventory reporting that reads it are untouched; what is gone is turning a
+quantity into an alert or a classification. The inventory reports that remain in
+scope are **stock valuation** (built), **stock movement summary**, **inventory
+ageing by lot** and **supplier provenance**.
 
 **Other gaps.** No user management UI. No Clerk webhook, so a name or email
 changed in Clerk leaves a stale local mirror and a deletion is invisible
@@ -353,7 +375,7 @@ refused because the goods have shipped.
 
 The most logical next steps for the application:
 
-1. **Reports Tier 2** — six are designed and unbuilt; see §13. Profitability is
+1. **Reports Tier 2** — five are designed and unbuilt; see §13. Profitability is
    the obvious next one and carries the sharpest trap: it cannot report a margin
    until cost coverage is non-zero, and today it is zero. Use the helpers in
    `src/lib/cost-coverage.ts` and the dashboard's rules rather than subtracting
@@ -531,6 +553,11 @@ procurement, costing and coverage, recent activity — each loading behind its o
 Suspense boundary so a slow aggregate delays its own card rather than the page.
 A section that fails renders an error in place; the rest still paints.
 
+"Needs attention" holds two stats — orders to action and deliveries outstanding
+— plus the certificate table. It used to lead with low-stock and out-of-stock
+cards; those are gone (§16), and nothing threshold-based replaced them. What is
+left is work somebody has to do, which is what the section was for.
+
 ### The margin trap
 
 `revenue - knownCost` is not margin when some units sold have no recorded
@@ -682,7 +709,7 @@ reproduces `quantityRemaining` exactly — but backfilled lots carry a
 before that boundary would misstate them. There is deliberately no date picker
 implying otherwise.
 
-**The certificate compliance register is deferred**, along with the other five
+**The certificate compliance register is deferred**, along with the other four
 Tier 2 reports. Certificates are unchanged, and `Certificate.stockLotId` was not
 introduced.
 
@@ -783,3 +810,88 @@ proving an index is unused needs a measurement on realistic volume, the way the
 report indexes in §13 were measured, and dropping one costs a migration. Left in
 place, recorded here for a future schema review.
 
+
+---
+
+## 16. Low and out-of-stock, and why the column went
+
+The product used to classify stock. `Product.minimumStock` held a threshold,
+`stockStatus()` compared the balance against it, and the result — NORMAL, LOW_STOCK
+or OUT_OF_STOCK — drove two dashboard cards, two product tiles, a list filter, a
+badge in four places, and a marker on the product detail bar. All of it is gone,
+including the column.
+
+### Why
+
+The business does not work to fixed stock thresholds or reorder levels. Nobody
+sets a minimum per part, so every minimum in the system was either zero or a
+number somebody typed once to fill the field in. A threshold nobody maintains
+does not produce a signal; it produces an alert whose only real input is whether
+the field happened to get filled in. The dashboard led with two such cards.
+
+This was a product decision, not a technical one, and it was made in both
+directions deliberately: **the quantity stays, the classification goes.**
+
+### The distinction that matters
+
+"Out of stock" as a *physical fact* is useful and is still reported. A product
+holding nothing shows `0`. A product holding four units shows `4`. Neither
+carries a colour, a badge, or a status, and neither appears on a list of things
+demanding action. If you find yourself adding one back, that is the line this
+section exists to mark.
+
+### What went
+
+The schema column and its check constraint, dropped in
+`20260901120000_remove_minimum_stock`. Two files: `src/lib/stock-status.ts` and
+`src/components/ui/stock-status-badge.tsx`. `stockStatusWhere()` in the products
+module — which was the only caller of Prisma's `product.fields.*` column
+references anywhere in the codebase. The `low_stock` and `out_of_stock` counts
+from `loadProductStats` and `loadAttention`. The `?stock=` query parameter and
+the `minimumStock` sort key. The form field, the table column, the filter
+select, the detail bar and its reorder marker, and the badges on the order
+builder and the supplier detail page.
+
+Two of the removals were already dead: `OrderLine.stockStatus` and
+`PurchaseLine.stockStatus` were computed on every order and purchase detail load
+and rendered nowhere.
+
+### The one place removal could have broken a number
+
+`loadAttention` ran a raw query shaped like this:
+
+```sql
+SELECT <out_of_stock count>, <low_stock count>, (uncorrelated subquery) AS uncosted_units
+FROM products WHERE status = 'ACTIVE'
+```
+
+Delete the two counts and the `FROM products` becomes a row multiplier for a
+scalar subquery — one row per active product, and **zero rows on an empty
+catalogue**, at which point the `rows[0] ?? { uncosted_units: 0 }` fallback would
+have reported no uncosted stock while uncosted lots sat in the table. The count
+was never scoped to active products in the first place; the `FROM` was there to
+host the threshold counts.
+
+So the query was not trimmed, it was replaced: `loadAttention` now aggregates
+`stock_lots` directly through Prisma. `loadProductStats` kept its raw SQL, since
+its `FROM products` is still doing real work for `total`.
+
+### What was deliberately not touched
+
+The stock engine, the ledger, `StockLot`, `StockLotConsumption`, FIFO allocation
+and consumption, inventory locking, valuation, order confirmation and stock
+deduction, receiving, supplier provenance, certificates, and all three Tier 1
+reports. Nothing threshold-shaped replaced what was removed, and no new stock
+status concept was introduced.
+
+The invariants and the report figures were re-checked afterwards and are
+unchanged: I-1 and I-3 both clean, valuation ₹18,104.96, 355 uncosted units,
+realised revenue ₹19,592.36, received spend ₹24,847.00.
+
+### A stale link degrades rather than breaks
+
+The old dashboard handed out `/products?stock=LOW_STOCK`, and some of those are
+in people's bookmarks. `parseProductListParams` discards what it does not
+recognise, so such a link now lands on an unfiltered list. Same for
+`?sort=minimumStock`, which falls back to sorting by name. Both are pinned by
+tests rather than left to chance.

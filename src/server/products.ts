@@ -6,7 +6,6 @@ import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/erro
 import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
 import { prisma } from "@/lib/prisma";
 import type { ProductListParams, ProductSortKey } from "@/lib/product-query";
-import { stockStatus, type StockStatus } from "@/lib/stock-status";
 import {
   adjustmentDelta,
   stockAdjustmentSchema,
@@ -65,12 +64,9 @@ export interface ProductListItem {
   standardCost: string | null;
   sellingPrice: string;
   stockQuantity: number;
-  minimumStock: number;
   status: ProductStatus;
   supplierId: string | null;
   supplierName: string | null;
-  /** Derived from the two quantities above — never read from a column. */
-  stockStatus: StockStatus;
   createdAt: Date;
 }
 
@@ -85,8 +81,6 @@ export interface ProductListPage {
 
 export interface ProductStats {
   total: number;
-  lowStock: number;
-  outOfStock: number;
   /**
    * Stock at actual acquisition cost, summed over the lots still holding units.
    *
@@ -171,9 +165,7 @@ export interface ProductDetail {
   standardCost: string | null;
   sellingPrice: string;
   stockQuantity: number;
-  minimumStock: number;
   status: ProductStatus;
-  stockStatus: StockStatus;
   supplierId: string | null;
   supplierName: string | null;
   createdAt: Date;
@@ -224,34 +216,8 @@ const SORT_COLUMNS: Record<Exclude<ProductSortKey, "supplier">, string> = {
   standardCost: "standardCost",
   sellingPrice: "sellingPrice",
   stockQuantity: "stockQuantity",
-  minimumStock: "minimumStock",
   createdAt: "createdAt",
 };
-
-/**
- * The three stock-status rules, as a database filter.
- *
- * These have to match `stockStatus()` in src/lib/stock-status.ts exactly. They
- * cannot share an implementation — one is a comparison on two numbers, the
- * other is SQL — so the boundaries are written out here in the same order, and
- * the tests check the two agree rather than trusting that they do.
- *
- * `prisma.product.fields.minimumStock` is a column reference: it compares
- * `stock_quantity` against `minimum_stock` row by row, which is the whole point
- * — a literal would only ever filter against one threshold for every product.
- */
-function stockStatusWhere(status: StockStatus): Prisma.ProductWhereInput {
-  switch (status) {
-    case "OUT_OF_STOCK":
-      return { stockQuantity: { lte: 0 } };
-    case "LOW_STOCK":
-      return {
-        stockQuantity: { gt: 0, lte: prisma.product.fields.minimumStock },
-      };
-    case "NORMAL":
-      return { stockQuantity: { gt: prisma.product.fields.minimumStock } };
-  }
-}
 
 function buildWhere(params: ProductListParams): Prisma.ProductWhereInput {
   const filters: Prisma.ProductWhereInput[] = [];
@@ -271,7 +237,6 @@ function buildWhere(params: ProductListParams): Prisma.ProductWhereInput {
   if (params.category) filters.push({ category: params.category });
   if (params.status) filters.push({ status: params.status });
   if (params.supplierId) filters.push({ supplierId: params.supplierId });
-  if (params.stockStatus) filters.push(stockStatusWhere(params.stockStatus));
 
   return filters.length > 0 ? { AND: filters } : {};
 }
@@ -321,7 +286,6 @@ export async function listProducts(
           standardCost: true,
           sellingPrice: true,
           stockQuantity: true,
-          minimumStock: true,
           status: true,
           supplierId: true,
           createdAt: true,
@@ -342,11 +306,9 @@ export async function listProducts(
           standardCost: row.standardCost?.toString() ?? null,
           sellingPrice: row.sellingPrice.toString(),
           stockQuantity: row.stockQuantity,
-          minimumStock: row.minimumStock,
           status: row.status,
           supplierId: row.supplierId,
           supplierName: row.supplier?.name ?? null,
-          stockStatus: stockStatus(row),
           createdAt: row.createdAt,
         })),
         total,
@@ -363,14 +325,11 @@ export async function listProducts(
 /**
  * Catalogue totals for the tiles above the table.
  *
- * One pass rather than four counts, and the low/out-of-stock figures use the
- * same boundaries as `stockStatus()`. Counted across the whole catalogue, not
+ * One pass rather than three queries. Counted across the whole catalogue, not
  * the current filter — these describe the warehouse, not the page.
  */
 interface StatsRow {
   total: number;
-  low_stock: number;
-  out_of_stock: number;
   stock_value: string;
   uncosted_units: number;
 }
@@ -397,10 +356,6 @@ export async function loadProductStats(): Promise<Result<ProductStats>> {
     const rows = await prisma.$queryRaw<StatsRow[]>`
       SELECT
         COUNT(*)::int                                    AS total,
-        COUNT(*) FILTER (
-          WHERE stock_quantity > 0 AND stock_quantity <= minimum_stock
-        )::int                                           AS low_stock,
-        COUNT(*) FILTER (WHERE stock_quantity <= 0)::int AS out_of_stock,
         COALESCE((
           SELECT SUM(l.quantity_remaining * l.unit_cost)
           FROM stock_lots l
@@ -416,8 +371,6 @@ export async function loadProductStats(): Promise<Result<ProductStats>> {
 
     const totals = rows[0] ?? {
       total: 0,
-      low_stock: 0,
-      out_of_stock: 0,
       stock_value: "0",
       uncosted_units: 0,
     };
@@ -426,8 +379,6 @@ export async function loadProductStats(): Promise<Result<ProductStats>> {
       ok: true,
       data: {
         total: totals.total,
-        lowStock: totals.low_stock,
-        outOfStock: totals.out_of_stock,
         stockValue: totals.stock_value,
         uncostedUnits: totals.uncosted_units,
       },
@@ -614,9 +565,7 @@ export async function getProductDetail(
         standardCost: product.standardCost?.toString() ?? null,
         sellingPrice: product.sellingPrice.toString(),
         stockQuantity: product.stockQuantity,
-        minimumStock: product.minimumStock,
         status: product.status,
-        stockStatus: stockStatus(product),
         supplierId: product.supplier?.id ?? null,
         supplierName: product.supplier?.name ?? null,
         createdAt: product.createdAt,
@@ -831,7 +780,6 @@ export async function createProduct(
           sellingPrice: data.sellingPrice.toFixed(2),
           // Zero, then moved by the ledger — never written straight from input.
           stockQuantity: 0,
-          minimumStock: data.minimumStock,
           status: data.status,
           supplierId: data.supplierId,
           certificates: prepared
@@ -951,7 +899,6 @@ export async function updateProduct(
           category: data.category,
           standardCost: data.standardCost?.toFixed(2) ?? null,
           sellingPrice: data.sellingPrice.toFixed(2),
-          minimumStock: data.minimumStock,
           status: data.status,
           supplierId: data.supplierId,
         },

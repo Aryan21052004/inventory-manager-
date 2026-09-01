@@ -1,5 +1,4 @@
 import { readOne, type RawSearchParams } from "@/lib/date-range";
-import { isStockStatus, type StockStatus } from "@/lib/stock-status";
 
 /**
  * The products list's state, and how it maps to the URL.
@@ -22,7 +21,6 @@ const PRODUCT_SORT_KEYS = [
   "standardCost",
   "sellingPrice",
   "stockQuantity",
-  "minimumStock",
   "supplier",
   "createdAt",
 ] as const;
@@ -45,7 +43,6 @@ export interface ProductListParams {
   /** Matches product name or SKU, case-insensitively. */
   search: string;
   category: string | null;
-  stockStatus: StockStatus | null;
   status: ProductStatusFilter | null;
   supplierId: string | null;
   sort: ProductSortKey;
@@ -57,7 +54,6 @@ export interface ProductListParams {
 export const DEFAULT_LIST_PARAMS: ProductListParams = {
   search: "",
   category: null,
-  stockStatus: null,
   status: null,
   supplierId: null,
   sort: "name",
@@ -86,7 +82,6 @@ export function parseProductListParams(
 ): ProductListParams {
   const sort = readOne(raw, "sort");
   const direction = readOne(raw, "dir");
-  const stockStatus = readOne(raw, "stock");
   const status = readOne(raw, "status");
   const page = Number(readOne(raw, "page") ?? "1");
   const pageSize = Number(readOne(raw, "size") ?? DEFAULT_PAGE_SIZE);
@@ -94,7 +89,6 @@ export function parseProductListParams(
   return {
     search: readOne(raw, "q") ?? "",
     category: readOne(raw, "category"),
-    stockStatus: isStockStatus(stockStatus) ? stockStatus : null,
     status: PRODUCT_STATUSES.includes(status as ProductStatusFilter)
       ? (status as ProductStatusFilter)
       : null,
@@ -123,7 +117,6 @@ export function toSearchParams(params: ProductListParams): URLSearchParams {
 
   if (params.search) query.set("q", params.search);
   if (params.category) query.set("category", params.category);
-  if (params.stockStatus) query.set("stock", params.stockStatus);
   if (params.status) query.set("status", params.status);
   if (params.supplierId) query.set("supplier", params.supplierId);
   if (params.sort !== DEFAULT_LIST_PARAMS.sort) query.set("sort", params.sort);
@@ -171,7 +164,6 @@ export function hasActiveFilters(params: ProductListParams): boolean {
   return Boolean(
     params.search ||
       params.category ||
-      params.stockStatus ||
       params.status ||
       params.supplierId,
   );

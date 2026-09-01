@@ -1,8 +1,8 @@
 /**
  * Certificate status, derived — never stored.
  *
- * Same reasoning as stock status (src/lib/stock-status.ts), but with sharper
- * consequences: this one changes on its own. A certificate that is valid today
+ * Derived rather than stored, and with sharper consequences than most: this
+ * one changes on its own. A certificate that is valid today
  * is expired tomorrow with nothing having been written, so a stored column
  * would be wrong every morning until something remembered to recalculate it.
  * Deriving it from the expiry date cannot go stale.

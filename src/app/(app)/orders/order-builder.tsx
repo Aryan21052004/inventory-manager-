@@ -39,7 +39,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { StockStatusBadge } from "@/components/ui/stock-status-badge";
 import {
   Table,
   TableBody,
@@ -49,7 +48,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatCurrency, formatNumber } from "@/lib/format";
-import type { StockStatus } from "@/lib/stock-status";
 import { cn } from "@/lib/utils";
 
 /**
@@ -100,8 +98,6 @@ export interface ProductOption {
   /** The product's price now — what the server will recalculate the line from. */
   sellingPrice: string;
   stockQuantity: number;
-  minimumStock: number;
-  stockStatus: StockStatus;
   /**
    * False only for a line already on an order whose product has since been
    * retired. Search results are always active.
@@ -357,9 +353,6 @@ function OrderBuilder({
                       <TableHead className="hidden sm:table-cell">SKU</TableHead>
                       <TableHead className="text-right">Stock</TableHead>
                       <TableHead className="text-right">Price</TableHead>
-                      <TableHead className="hidden md:table-cell">
-                        Stock status
-                      </TableHead>
                       <TableHead className="w-12">
                         <span className="sr-only">Add</span>
                       </TableHead>
@@ -382,9 +375,6 @@ function OrderBuilder({
                           </TableCell>
                           <TableCell className="tabular text-right font-medium">
                             {formatCurrency(option.sellingPrice)}
-                          </TableCell>
-                          <TableCell className="hidden md:table-cell">
-                            <StockStatusBadge status={option.stockStatus} />
                           </TableCell>
                           <TableCell className="text-right">
                             <Button
