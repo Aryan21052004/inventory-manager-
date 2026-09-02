@@ -23,11 +23,9 @@ import {
   certificateKeysForProduct,
   deleteStoredFiles,
   getCertificateHistory,
-  getCurrentCertificate,
-  prepareCertificate,
+  getLotCertificates,
   type CertificateView,
 } from "@/server/certificates";
-import { fileStorage } from "@/server/storage";
 import { recordOpeningStock, recordStockMovement } from "@/server/stock";
 
 /**
@@ -153,6 +151,16 @@ export interface ProductLot {
   sourceType: string;
   sourceId: string | null;
   purchaseNumber: string | null;
+  /**
+   * The paperwork covering *these* units, or null if none has been filed.
+   *
+   * Per lot rather than per product, which is the whole point: two batches of
+   * one part can arrive under different releases, and one can be covered while
+   * the other is not.
+   */
+  certificate: CertificateView | null;
+  /** Derived from that certificate's expiry date; never stored. */
+  certificateStatus: CertificateStatus;
 }
 
 export interface ProductDetail {
@@ -182,12 +190,17 @@ export interface ProductDetail {
   /** Units on hand with no established cost. Never valued, always disclosed. */
   uncostedUnits: number;
 
-  /** The product's current certificate, or null if it has none. */
-  certificate: CertificateView | null;
-  /** Retired certificates, newest first — the paperwork's audit trail. */
+  /**
+   * Retired certificates across every batch of this product, newest first.
+   *
+   * Deliberately product-wide rather than per lot, because it is also the only
+   * place the legacy rows surface — documents filed before certificates moved
+   * to batches carry no lot and would otherwise be invisible.
+   *
+   * There is no product-level *current* certificate. A product does not have
+   * one; its lots do, and `lots[].certificate` is where they live.
+   */
   certificateHistory: CertificateView[];
-  /** Derived from the certificate's expiry date; never stored. */
-  certificateStatus: CertificateStatus;
   /**
    * Whether a hard delete is possible. False once the product has appeared on
    * an order or a purchase — see `deleteProduct`.
@@ -440,7 +453,6 @@ export async function getProductDetail(
       orderLines,
       purchaseLines,
       tradedCount,
-      certificate,
       certificateHistory,
       lots,
     ] = await Promise.all([
@@ -490,7 +502,6 @@ export async function getProductDetail(
               ? orders
               : prisma.purchaseItem.count({ where: { productId: id } }),
           ),
-        getCurrentCertificate(id),
         getCertificateHistory(id),
         /*
          * The batches still holding stock, in the order FIFO will take them.
@@ -554,6 +565,12 @@ export async function getProductDetail(
       for (const row of rows) purchaseNumbers.set(row.id, row.purchaseNumber);
     }
 
+    /*
+     * The paperwork for every batch on the page, in one query rather than one
+     * per lot. A lot absent from the map simply has none, which is MISSING.
+     */
+    const lotCertificates = await getLotCertificates(lots.map((lot) => lot.id));
+
     return {
       ok: true,
       data: {
@@ -571,12 +588,7 @@ export async function getProductDetail(
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
         deletable: tradedCount === 0,
-        certificate,
         certificateHistory,
-        // Derived here rather than stored, for the reason in
-        // src/lib/certificate-status.ts: this value changes on its own as
-        // dates pass, so a column would be wrong every morning.
-        certificateStatus: certificateStatus(certificate),
         movements: movements.map((movement) => ({
           id: movement.id,
           type: movement.type,
@@ -609,19 +621,28 @@ export async function getProductDetail(
           total: line.total.toString(),
           purchaseDate: line.purchase.purchaseDate,
         })),
-        lots: lots.map((lot) => ({
-          id: lot.id,
-          unitCost: lot.unitCost?.toString() ?? null,
-          costSource: lot.costSource,
-          quantityReceived: lot.quantityReceived,
-          quantityRemaining: lot.quantityRemaining,
-          receivedAt: lot.receivedAt,
-          sourceType: lot.sourceType,
-          sourceId: lot.sourceId,
-          purchaseNumber: lot.sourceId
-            ? (purchaseNumbers.get(lot.sourceId) ?? null)
-            : null,
-        })),
+        lots: lots.map((lot) => {
+          const certificate = lotCertificates.get(lot.id) ?? null;
+
+          return {
+            id: lot.id,
+            unitCost: lot.unitCost?.toString() ?? null,
+            costSource: lot.costSource,
+            quantityReceived: lot.quantityReceived,
+            quantityRemaining: lot.quantityRemaining,
+            receivedAt: lot.receivedAt,
+            sourceType: lot.sourceType,
+            sourceId: lot.sourceId,
+            purchaseNumber: lot.sourceId
+              ? (purchaseNumbers.get(lot.sourceId) ?? null)
+              : null,
+            certificate,
+            // Derived here rather than stored, for the reason in
+            // src/lib/certificate-status.ts: this value changes on its own as
+            // dates pass, so a column would be wrong every morning.
+            certificateStatus: certificateStatus(certificate),
+          };
+        }),
         stockValue: (stockValueCents / 100).toFixed(2),
         costedUnits,
         uncostedUnits,
@@ -700,21 +721,16 @@ const ARCHIVED_SUPPLIER = (name: string) =>
  * followed by an insert has a gap between them, and two admins adding the same
  * code at once would both find nothing and both proceed; the index is the only
  * thing that can actually arbitrate.
+ *
+ * No certificate is accepted here, and the omission is the point. Paperwork
+ * covers the batch that arrived, so it cannot be filed before a batch exists:
+ * the workflow is create the product, receive or record stock, then attach the
+ * certificate to the lot that produced it. A product with no stock has no lot
+ * and therefore nothing to certify, which is why the create form offers no
+ * certificate field at all rather than one that sometimes works.
  */
-export interface CertificateUpload {
-  metadata: unknown;
-  file: unknown;
-}
-
 export async function createProduct(
   input: unknown,
-  /**
-   * A certificate to attach at the same time. Optional, deliberately: a product
-   * can exist before its paperwork arrives, and requiring one here would make
-   * the common case of "receive the part now, file the 8130 when it turns up"
-   * impossible to record.
-   */
-  certificate?: CertificateUpload | null,
 ): Promise<{ id: string; name: string; sku: string }> {
   const user = await requireRole("ADMIN");
 
@@ -731,15 +747,6 @@ export async function createProduct(
   }
 
   const data = parsed.data;
-
-  /*
-   * Validated and stored before the transaction opens, so the certificate row
-   * can be written in the *same* transaction as the product. Creating the
-   * product first and attaching afterwards would leave an unwanted product
-   * behind whenever the upload was rejected, and need a compensating delete
-   * that can itself fail. See `prepareCertificate`.
-   */
-  const prepared = certificate ? await prepareCertificate(certificate) : null;
 
   try {
     return await prisma.$transaction(async (tx) => {
@@ -782,9 +789,6 @@ export async function createProduct(
           stockQuantity: 0,
           status: data.status,
           supplierId: data.supplierId,
-          certificates: prepared
-            ? { create: [{ ...prepared.data, uploadedBy: user.id }] }
-            : undefined,
         },
         select: { id: true, name: true, sku: true },
       });
@@ -808,13 +812,6 @@ export async function createProduct(
       return product;
     });
   } catch (error) {
-    // The row was never written, so the file it would have pointed at is
-    // unreferenced. Best-effort: a failed cleanup leaves a harmless orphan and
-    // must not replace the real error with a second one.
-    if (prepared) {
-      await fileStorage.delete(prepared.storageKey).catch(() => {});
-    }
-
     if (isUniqueViolation(error)) throw DUPLICATE_SKU(data.sku);
     if (isForeignKeyViolation(error)) throw MISSING_SUPPLIER;
     throw error;
@@ -966,23 +963,28 @@ export async function deleteProduct(id: string): Promise<{ name: string }> {
     }
 
     /*
-     * The valuation layer first, then the ledger it hangs off, then the
-     * product. Both foreign keys are Restrict, so this order is not a
-     * preference — a lot pointing at a deleted STOCK_IN, or a consumption
-     * pointing at a deleted lot, is a state the database will not allow to
-     * exist, and doing this in the wrong order fails loudly rather than
-     * silently orphaning anything.
+     * Paperwork first, then the valuation layer, then the ledger it hangs off,
+     * then the product. Every foreign key involved is Restrict, so this order
+     * is not a preference — a certificate pointing at a deleted lot, a lot
+     * pointing at a deleted STOCK_IN, or a consumption pointing at a deleted
+     * lot is a state the database will not allow to exist, and doing this in
+     * the wrong order fails loudly rather than silently orphaning anything.
+     *
+     * Certificates are deleted explicitly rather than left to a cascade. They
+     * used to go with the product through `onDelete: Cascade`, which was
+     * enough when they pointed only at products; now that they also point at
+     * lots with `onDelete: Restrict`, the cascade would let the lot delete
+     * below fail on any product carrying paperwork.
      *
      * Safe only because of the check above: a product that has never appeared
      * on an order or a purchase has no history worth keeping, and its lots
      * describe opening stock that is about to stop existing. Anything that has
      * traded is refused before reaching here and gets discontinued instead.
      */
+    await tx.certificate.deleteMany({ where: { productId: id } });
     await tx.stockLotConsumption.deleteMany({ where: { lot: { productId: id } } });
     await tx.stockLot.deleteMany({ where: { productId: id } });
     await tx.stockTransaction.deleteMany({ where: { productId: id } });
-    // The certificates go with it through `onDelete: Cascade` — a certificate
-    // describes one product and has no meaning without it.
     await tx.product.delete({ where: { id } });
 
     return { name: product.name };

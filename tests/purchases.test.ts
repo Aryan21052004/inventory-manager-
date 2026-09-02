@@ -1005,6 +1005,15 @@ describe("validation", () => {
 // ---------------------------------------------------------------------------
 
 describe("certificates", () => {
+  /** The batch a seeded product holds — what paperwork attaches to. */
+  async function lotOf(productId: string): Promise<string> {
+    const lot = await prisma.stockLot.findFirstOrThrow({
+      where: { productId },
+      select: { id: true },
+    });
+    return lot.id;
+  }
+
   it("are not created or changed by receiving a delivery", async () => {
     await signInWithRole("ADMIN");
     const supplier = await createSupplier();
@@ -1015,7 +1024,7 @@ describe("certificates", () => {
     });
 
     await attachCertificate({
-      productId: part.id,
+      stockLotId: await lotOf(part.id),
       metadata: {
         certificateType: "EASA Form 1",
         certificateNumber: "E-77",
@@ -1042,7 +1051,12 @@ describe("certificates", () => {
     expect(await prisma.certificate.count()).toBe(1);
   });
 
-  it("show the product's current certificate on the purchase detail", async () => {
+  it("show the paperwork of the batch the delivery created", async () => {
+    /*
+     * The lot does not exist until the delivery is received, so an unreceived
+     * purchase has nothing to show. Inventing coverage for goods that are not
+     * here yet would be the same mistake as costing them before they arrive.
+     */
     await signInWithRole("ADMIN");
     const supplier = await createSupplier();
     const part = await seedProduct({
@@ -1051,8 +1065,20 @@ describe("certificates", () => {
       stockQuantity: 0,
     });
 
+    const draft = await draftPurchase(supplier.id, [
+      { productId: part.id, quantity: 5 },
+    ]);
+
+    const before = await getPurchaseDetail(draft.id);
+    if (!before.ok || !before.data) throw new Error("expected a purchase");
+    expect(before.data.lines[0]!.stockLotId).toBeNull();
+    expect(before.data.lines[0]!.certificateStatus).toBe("MISSING");
+
+    await receivePurchase(draft.id);
+    const lotId = await lotOf(part.id);
+
     await attachCertificate({
-      productId: part.id,
+      stockLotId: lotId,
       metadata: {
         certificateType: "FAA 8130-3",
         certificateNumber: "8130-5150",
@@ -1066,14 +1092,11 @@ describe("certificates", () => {
       ),
     });
 
-    const purchase = await draftPurchase(supplier.id, [
-      { productId: part.id, quantity: 5 },
-    ]);
-
-    const result = await getPurchaseDetail(purchase.id);
+    const result = await getPurchaseDetail(draft.id);
     if (!result.ok || !result.data) throw new Error("expected a purchase");
 
     const line = result.data.lines[0]!;
+    expect(line.stockLotId).toBe(lotId);
     expect(line.certificateType).toBe("FAA 8130-3");
     expect(line.certificateNumber).toBe("8130-5150");
     expect(line.certificateStatus).toBe("VALID");

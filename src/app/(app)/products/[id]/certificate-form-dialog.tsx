@@ -70,7 +70,7 @@ const COPY: Record<
   add: {
     title: "Add certificate",
     description:
-      "Record the certificate covering this part and upload a scan of the document.",
+      "Record the certificate covering this batch and upload a scan of the document.",
     submit: "Upload certificate",
   },
   replace: {
@@ -91,13 +91,13 @@ function CertificateFormDialog({
   open,
   onOpenChange,
   mode,
-  productId,
+  stockLotId,
   certificate,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   mode: CertificateFormMode;
-  productId: string;
+  stockLotId: string;
   /** Present for edit; absent for add. Ignored for replace. */
   certificate?: CertificateFormValues;
 }) {
@@ -152,8 +152,8 @@ function CertificateFormDialog({
 
     const result =
       editing && certificate
-        ? await updateCertificateAction(certificate.id, productId, formData)
-        : await saveCertificateAction(productId, formData);
+        ? await updateCertificateAction(certificate.id, formData)
+        : await saveCertificateAction(stockLotId, formData);
 
     setSubmitting(false);
 

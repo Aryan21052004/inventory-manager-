@@ -2,7 +2,7 @@
 
 import { useId, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronDown, FileCheck2, Loader2, Lock } from "lucide-react";
+import { Loader2, Lock } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -29,16 +29,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatNumber } from "@/lib/format";
-import {
-  certificateMetadataSchema,
-  checkFileClientSide,
-  COMMON_CERTIFICATE_TYPES,
-  FILE_ACCEPT_ATTRIBUTE,
-  formatFileSize,
-  MAX_FILE_LABEL,
-  toCertificateFieldErrors,
-  type CertificateFieldErrors,
-} from "@/lib/validation/certificate";
 import {
   createProductSchema,
   updateProductSchema,
@@ -110,10 +100,7 @@ function ProductFormDialog({
 }) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
-  const [errors, setErrors] = useState<
-    ProductFieldErrors & CertificateFieldErrors
-  >({});
-  const [certificateFile, setCertificateFile] = useState<File | null>(null);
+  const [errors, setErrors] = useState<ProductFieldErrors>({});
 
   // Ids are generated rather than hardcoded: two of these dialogs can be
   // mounted at once — one per table row — and duplicate ids would point every
@@ -123,7 +110,6 @@ function ProductFormDialog({
 
   const editing = product !== undefined;
   const categoryListId = `${fieldId}-categories`;
-  const certificateTypeListId = `${fieldId}-certificate-types`;
 
   /*
    * Active suppliers, plus this product's own if it has since been archived.
@@ -156,31 +142,9 @@ function ProductFormDialog({
     const schema = editing ? updateProductSchema : createProductSchema;
     const parsed = schema.safeParse(Object.fromEntries(formData));
 
-    let fieldErrors: ProductFieldErrors & CertificateFieldErrors = parsed.success
+    const fieldErrors: ProductFieldErrors = parsed.success
       ? {}
       : toFieldErrors(parsed.error);
-
-    /*
-     * The certificate is only validated when one was actually attached. Its
-     * fields are required *given a file* and irrelevant without one, so
-     * checking them unconditionally would block creating the many products
-     * whose paperwork has not arrived yet.
-     */
-    if (!editing && certificateFile) {
-      const certificate = certificateMetadataSchema.safeParse(
-        Object.fromEntries(formData),
-      );
-
-      if (!certificate.success) {
-        fieldErrors = {
-          ...fieldErrors,
-          ...toCertificateFieldErrors(certificate.error),
-        };
-      }
-
-      const fileProblem = checkFileClientSide(certificateFile);
-      if (fileProblem) fieldErrors = { ...fieldErrors, file: fileProblem };
-    }
 
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
@@ -206,7 +170,6 @@ function ProductFormDialog({
     }
 
     onOpenChange(false);
-    setCertificateFile(null);
     toast.success(result.message);
 
     // The server has already revalidated; this is what makes the open page pick
@@ -221,10 +184,7 @@ function ProductFormDialog({
       onOpenChange={(next) => {
         if (submitting) return;
         onOpenChange(next);
-        if (!next) {
-          setErrors({});
-          setCertificateFile(null);
-        }
+        if (!next) setErrors({});
       }}
     >
       <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
@@ -448,16 +408,6 @@ function ProductFormDialog({
             </Field>
           </div>
 
-          {editing ? null : (
-            <CertificateSection
-              id={id}
-              typeListId={certificateTypeListId}
-              errors={errors}
-              file={certificateFile}
-              onFileChange={setCertificateFile}
-            />
-          )}
-
           <DialogFooter>
             <DialogClose asChild>
               <Button type="button" variant="outline" disabled={submitting}>
@@ -504,154 +454,14 @@ function ReadOnlyStock({ quantity }: { quantity: number }) {
   );
 }
 
-/**
- * The optional certificate, folded away until it is wanted.
+/*
+ * There is deliberately no certificate section on this form.
  *
- * Collapsed by default, and that is a statement about the domain rather than
- * about screen space: a part frequently arrives before its paperwork does, and
- * a form that presents nine required-looking certificate fields would suggest
- * otherwise. Opening the section is a deliberate act; leaving it shut creates
- * the product with no certificate and a status of MISSING, which is a perfectly
- * ordinary state.
- *
- * A native `<details>` rather than a controlled disclosure — no state, no
- * animation to get wrong, and it works before hydration.
+ * A certificate covers the batch that arrived, and at creation there is no
+ * batch — opening stock produces one, but a product created with zero stock
+ * produces none, and a field that works only sometimes is worse than a field
+ * that is not there. Paperwork is filed against a lot from the product detail
+ * page once stock exists.
  */
-function CertificateSection({
-  id,
-  typeListId,
-  errors,
-  file,
-  onFileChange,
-}: {
-  id: (name: string) => string;
-  typeListId: string;
-  errors: CertificateFieldErrors;
-  file: File | null;
-  onFileChange: (file: File | null) => void;
-}) {
-  const hasErrors = Boolean(
-    errors.file ||
-      errors.certificateType ||
-      errors.certificateNumber ||
-      errors.issueDate ||
-      errors.expiryDate,
-  );
-
-  return (
-    <details
-      // Forced open when something inside is wrong, so a validation message
-      // cannot end up hidden behind a collapsed summary.
-      open={hasErrors || file !== null}
-      className="group rounded-lg border border-border bg-muted/30 [&[open]]:bg-transparent"
-    >
-      <summary className="flex cursor-pointer list-none items-center gap-2 p-3 text-sm font-medium">
-        <FileCheck2 className="size-4 text-muted-foreground" aria-hidden />
-        Certificate
-        <span className="font-normal text-muted-foreground">— optional</span>
-        <ChevronDown
-          className="ml-auto size-4 text-muted-foreground transition-transform group-open:rotate-180"
-          aria-hidden
-        />
-      </summary>
-
-      <div className="flex flex-col gap-4 border-t border-border p-3 pt-4">
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Attach the airworthiness or conformity document now if you have it. A
-          product can be created without one and the certificate added later
-          from its detail page.
-        </p>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="Certificate type"
-            htmlFor={id("certificateType")}
-            error={errors.certificateType}
-          >
-            <Input
-              id={id("certificateType")}
-              name="certificateType"
-              list={typeListId}
-              placeholder="FAA 8130-3"
-              autoComplete="off"
-              aria-invalid={Boolean(errors.certificateType)}
-            />
-            <datalist id={typeListId}>
-              {COMMON_CERTIFICATE_TYPES.map((type) => (
-                <option key={type} value={type} />
-              ))}
-            </datalist>
-          </Field>
-
-          <Field
-            label="Certificate number"
-            htmlFor={id("certificateNumber")}
-            error={errors.certificateNumber}
-          >
-            <Input
-              id={id("certificateNumber")}
-              name="certificateNumber"
-              placeholder="8130-123456"
-              autoComplete="off"
-              aria-invalid={Boolean(errors.certificateNumber)}
-              className="font-mono"
-            />
-          </Field>
-        </div>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="Issue date"
-            htmlFor={id("issueDate")}
-            error={errors.issueDate}
-          >
-            <Input
-              id={id("issueDate")}
-              name="issueDate"
-              type="date"
-              aria-invalid={Boolean(errors.issueDate)}
-            />
-          </Field>
-
-          <Field
-            label="Expiry date"
-            htmlFor={id("expiryDate")}
-            hint="Leave blank if it does not expire."
-            error={errors.expiryDate}
-          >
-            <Input
-              id={id("expiryDate")}
-              name="expiryDate"
-              type="date"
-              aria-invalid={Boolean(errors.expiryDate)}
-            />
-          </Field>
-        </div>
-
-        <Field
-          label="Certificate file"
-          htmlFor={id("file")}
-          hint={`PDF, JPG or PNG, up to ${MAX_FILE_LABEL}.`}
-          error={errors.file}
-        >
-          <Input
-            id={id("file")}
-            name="file"
-            type="file"
-            accept={FILE_ACCEPT_ATTRIBUTE}
-            onChange={(event) => onFileChange(event.target.files?.[0] ?? null)}
-            aria-invalid={Boolean(errors.file)}
-            className="h-auto py-2 file:mr-3 file:rounded file:px-2 file:py-1 file:text-xs"
-          />
-          {file ? (
-            <p className="text-xs text-muted-foreground">
-              {file.name} · {formatFileSize(file.size)}
-            </p>
-          ) : null}
-        </Field>
-      </div>
-    </details>
-  );
-}
 
 export { ProductFormDialog };

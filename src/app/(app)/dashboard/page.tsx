@@ -54,7 +54,7 @@ import {
   loadProcurement,
   loadRecentMovements,
   loadSales,
-  type CertificateAttentionProduct,
+  type CertificateAttentionLot,
 } from "@/server/dashboard";
 
 export const metadata: Metadata = { title: "Dashboard" };
@@ -225,7 +225,7 @@ async function AttentionSection() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Product</TableHead>
+                  <TableHead>Batch</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="hidden text-right sm:table-cell">
                     Expires
@@ -233,26 +233,25 @@ async function AttentionSection() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {certificates.products.map((product) => (
-                  <TableRow key={product.id}>
+                {certificates.lots.map((lot) => (
+                  <TableRow key={lot.lotId}>
                     <TableCell className="max-w-[18rem]">
                       <Link
-                        href={`/products/${product.id}`}
+                        href={`/products/${lot.productId}`}
                         className="block truncate font-medium hover:text-primary hover:underline"
                       >
-                        {product.name}
+                        {lot.name}
                       </Link>
                       <span className="font-mono text-xs text-muted-foreground">
-                        {product.sku}
+                        {lot.sku} · {formatNumber(lot.quantityRemaining)}{" "}
+                        {lot.quantityRemaining === 1 ? "unit" : "units"}
                       </span>
                     </TableCell>
                     <TableCell>
-                      <CertificateBadge product={product} />
+                      <CertificateBadge lot={lot} />
                     </TableCell>
                     <TableCell className="hidden text-right text-sm text-muted-foreground sm:table-cell">
-                      {product.expiryDate
-                        ? formatDate(product.expiryDate)
-                        : "—"}
+                      {lot.expiryDate ? formatDate(lot.expiryDate) : "—"}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -260,8 +259,8 @@ async function AttentionSection() {
             </Table>
             {certificates.hasMore ? (
               <p className="border-t px-6 py-3 text-xs text-muted-foreground">
-                Showing the {certificates.products.length} most urgent. Open a
-                product to file or replace its paperwork.
+                Showing the {certificates.lots.length} most urgent. Open a
+                product to file or replace a batch&apos;s paperwork.
               </p>
             ) : null}
           </CardContent>
@@ -271,17 +270,13 @@ async function AttentionSection() {
   );
 }
 
-function CertificateBadge({
-  product,
-}: {
-  product: CertificateAttentionProduct;
-}) {
-  if (product.status === "MISSING") {
+function CertificateBadge({ lot }: { lot: CertificateAttentionLot }) {
+  if (lot.status === "MISSING") {
     return <Badge variant="muted">No certificate</Badge>;
   }
 
-  if (product.status === "EXPIRED") {
-    const days = Math.abs(product.daysRemaining ?? 0);
+  if (lot.status === "EXPIRED") {
+    const days = Math.abs(lot.daysRemaining ?? 0);
     return (
       <Badge variant="destructive">
         Expired {days === 0 ? "today" : `${formatNumber(days)}d ago`}
@@ -291,9 +286,9 @@ function CertificateBadge({
 
   return (
     <Badge variant="warning">
-      {product.daysRemaining === 0
+      {lot.daysRemaining === 0
         ? "Expires today"
-        : `${formatNumber(product.daysRemaining ?? 0)}d left`}
+        : `${formatNumber(lot.daysRemaining ?? 0)}d left`}
     </Badge>
   );
 }

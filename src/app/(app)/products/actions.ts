@@ -44,11 +44,7 @@ export type ProductActionResult =
   | {
       ok: false;
       message: string;
-      /**
-       * Product fields, plus the certificate fields the create form also
-       * carries — creating a product can fail on either half.
-       */
-      fieldErrors?: ProductFieldErrors & CertificateFieldErrors;
+      fieldErrors?: ProductFieldErrors;
     };
 
 export type AdjustmentActionResult =
@@ -95,22 +91,12 @@ export async function createProductAction(
   formData: FormData,
 ): Promise<ProductActionResult> {
   try {
-    const fields = Object.fromEntries(formData);
-    const file = formData.get("file");
-
     /*
-     * A certificate is optional at creation. Its presence is decided by whether
-     * a file was actually chosen — an empty file input still submits a zero-byte
-     * `File`, which is not a document — rather than by whether the metadata
-     * fields happen to be filled in, so a half-typed certificate nobody attached
-     * a scan to does not block creating the product.
+     * No certificate here. Paperwork belongs to the batch that arrived, so it
+     * is attached to a stock lot after the product exists and has stock — see
+     * `saveCertificateAction`.
      */
-    const hasCertificate = file instanceof File && file.size > 0;
-
-    const product = await createProduct(
-      fields,
-      hasCertificate ? { metadata: fields, file } : null,
-    );
+    const product = await createProduct(Object.fromEntries(formData));
 
     revalidateProduct(product.id);
 
@@ -120,12 +106,7 @@ export async function createProductAction(
       message: `"${product.name}" added to the catalogue.`,
     };
   } catch (error) {
-    // The failure may name a product field or a certificate field — the create
-    // path validates both — so the union covers both.
-    return toFailure<keyof ProductFieldErrors | keyof CertificateFieldErrors>(
-      error,
-      "createProductAction",
-    );
+    return toFailure<keyof ProductFieldErrors>(error, "createProductAction");
   }
 }
 
@@ -197,17 +178,19 @@ export async function adjustStockAction(
  * leaves an orphan file rather than a row pointing at nothing.
  */
 export async function saveCertificateAction(
-  productId: string,
+  stockLotId: string,
   formData: FormData,
 ): Promise<CertificateActionResult> {
   try {
     const certificate = await attachCertificate({
-      productId,
+      stockLotId,
       metadata: Object.fromEntries(formData),
       file: formData.get("file"),
     });
 
-    revalidateProduct(productId);
+    // The product comes back with the certificate rather than being passed in:
+    // the lot decides it, and a caller supplying it could supply the wrong one.
+    revalidateProduct(certificate.productId);
 
     return {
       ok: true,
@@ -224,7 +207,6 @@ export async function saveCertificateAction(
 /** Corrects the details on the current certificate. The file is untouched. */
 export async function updateCertificateAction(
   certificateId: string,
-  productId: string,
   formData: FormData,
 ): Promise<CertificateActionResult> {
   try {
@@ -233,7 +215,7 @@ export async function updateCertificateAction(
       Object.fromEntries(formData),
     );
 
-    revalidateProduct(productId);
+    revalidateProduct(certificate.productId);
 
     return {
       ok: true,

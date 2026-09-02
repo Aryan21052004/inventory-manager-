@@ -11,15 +11,26 @@ import {
   attachCertificate,
   getCertificateFile,
   getCertificateHistory,
-  getCurrentCertificate,
+  getLotCertificate,
   removeCertificate,
   updateCertificateMetadata,
 } from "@/server/certificates";
-import { createProduct, deleteProduct, getProductDetail } from "@/server/products";
+import {
+  adjustStock,
+  createProduct,
+  deleteProduct,
+  getProductDetail,
+} from "@/server/products";
+import { createPurchase, receivePurchase } from "@/server/purchases";
 import { fileStorage } from "@/server/storage";
 
 import { signOut } from "./clerk-mock";
-import { resetDatabase, seedProduct, signInWithRole } from "./database";
+import {
+  createSupplier,
+  resetDatabase,
+  seedProduct,
+  signInWithRole,
+} from "./database";
 
 /**
  * Certificates.
@@ -93,15 +104,29 @@ function isoDaysFromNow(days: number): string {
 }
 
 async function attach(
-  productId: string,
+  stockLotId: string,
   overrides: Record<string, string> = {},
   file: File = fileFrom(PDF_BYTES, "certificate.pdf"),
 ) {
   return attachCertificate({
-    productId,
+    stockLotId,
     metadata: metadata(overrides),
     file,
   });
+}
+
+/**
+ * The batch a seeded product holds.
+ *
+ * `seedProduct` writes a lot to match the balance it creates, so every fixture
+ * product with stock has exactly one — which is what paperwork now attaches to.
+ */
+async function lotOf(productId: string): Promise<string> {
+  const lot = await prisma.stockLot.findFirstOrThrow({
+    where: { productId },
+    select: { id: true },
+  });
+  return lot.id;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +149,10 @@ describe("a product without a certificate", () => {
     const result = await getProductDetail(created.id);
     if (!result.ok || !result.data) throw new Error("expected a product");
 
-    expect(result.data.certificate).toBeNull();
-    expect(result.data.certificateStatus).toBe("MISSING");
+    // Opening stock created one batch, and it carries no paperwork.
+    expect(result.data.lots).toHaveLength(1);
+    expect(result.data.lots[0]!.certificate).toBeNull();
+    expect(result.data.lots[0]!.certificateStatus).toBe("MISSING");
     expect(await prisma.certificate.count()).toBe(0);
   });
 
@@ -144,7 +171,7 @@ describe("attaching a certificate", () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-001" });
 
-    await attach(product.id, {
+    await attach(await lotOf(product.id), {
       certificateType: "EASA Form 1",
       certificateNumber: "EASA-2026-0099",
       issueDate: "2026-08-12",
@@ -167,7 +194,7 @@ describe("attaching a certificate", () => {
     const product = await seedProduct({ sku: "CERT-002" });
 
     await attach(
-      product.id,
+      await lotOf(product.id),
       {},
       fileFrom(PDF_BYTES, "8130-scan.pdf", "application/pdf"),
     );
@@ -203,9 +230,14 @@ describe("attaching a certificate", () => {
     });
 
     await attachCertificate({
-      productId: product.id,
+      stockLotId: await lotOf(product.id),
       // Extra fields a tampered request might carry. None are in the schema.
-      metadata: { ...metadata(), uploadedBy: other.id, productId: "elsewhere" },
+      metadata: {
+        ...metadata(),
+        uploadedBy: other.id,
+        productId: "elsewhere",
+        stockLotId: "elsewhere",
+      },
       file: fileFrom(PDF_BYTES, "certificate.pdf"),
     });
 
@@ -221,10 +253,10 @@ describe("attaching a certificate", () => {
     await signInWithRole("ADMIN");
 
     const png = await seedProduct({ sku: "CERT-PNG" });
-    await attach(png.id, {}, fileFrom(PNG_BYTES, "scan.png", "image/png"));
+    await attach(await lotOf(png.id), {}, fileFrom(PNG_BYTES, "scan.png", "image/png"));
 
     const jpeg = await seedProduct({ sku: "CERT-JPG" });
-    await attach(jpeg.id, {}, fileFrom(JPEG_BYTES, "scan.jpg", "image/jpeg"));
+    await attach(await lotOf(jpeg.id), {}, fileFrom(JPEG_BYTES, "scan.jpg", "image/jpeg"));
 
     const types = await prisma.certificate.findMany({
       select: { contentType: true },
@@ -237,23 +269,29 @@ describe("attaching a certificate", () => {
     ]);
   });
 
-  it("can be attached while the product is being created", async () => {
+  it("attaches to the batch opening stock created, after the fact", async () => {
+    /*
+     * Creation deliberately takes no certificate any more: paperwork covers a
+     * batch, and at creation there may not be one. Opening stock produces a
+     * lot, and the document is filed against it afterwards.
+     */
     await signInWithRole("ADMIN");
 
-    const created = await createProduct(
-      {
-        name: "Landing Gear Pin",
-        sku: "LGP-001",
-        category: "Airframe",
-        sellingPrice: "480.00",
-        stockQuantity: "2",
-        status: "ACTIVE",
-      },
-      { metadata: metadata(), file: fileFrom(PDF_BYTES, "certificate.pdf") },
-    );
+    const created = await createProduct({
+      name: "Landing Gear Pin",
+      sku: "LGP-001",
+      category: "Airframe",
+      sellingPrice: "480.00",
+      stockQuantity: "2",
+      status: "ACTIVE",
+    });
 
-    const certificate = await getCurrentCertificate(created.id);
+    const lotId = await lotOf(created.id);
+    await attach(lotId);
+
+    const certificate = await getLotCertificate(lotId);
     expect(certificate?.certificateNumber).toBe("8130-123456");
+    expect(certificate?.stockLotId).toBe(lotId);
 
     // The product's opening stock movement still happened — attaching a
     // certificate must not disturb the inventory ledger.
@@ -276,7 +314,7 @@ describe("file validation", () => {
     // HTML. Only the bytes are evidence.
     await expect(
       attach(
-        product.id,
+        await lotOf(product.id),
         {},
         fileFrom(HTML_BYTES, "certificate.pdf", "application/pdf"),
       ),
@@ -293,7 +331,7 @@ describe("file validation", () => {
     const product = await seedProduct({ sku: "CERT-EMPTY" });
 
     await expect(
-      attach(product.id, {}, fileFrom(Buffer.alloc(0), "empty.pdf")),
+      attach(await lotOf(product.id), {}, fileFrom(Buffer.alloc(0), "empty.pdf")),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
@@ -303,7 +341,7 @@ describe("file validation", () => {
 
     await expect(
       attachCertificate({
-        productId: product.id,
+        stockLotId: await lotOf(product.id),
         metadata: metadata(),
         file: null,
       }),
@@ -315,7 +353,7 @@ describe("file validation", () => {
     const product = await seedProduct({ sku: "CERT-NONUM" });
 
     await expect(
-      attach(product.id, { certificateNumber: "   " }),
+      attach(await lotOf(product.id), { certificateNumber: "   " }),
     ).rejects.toMatchObject({
       code: "BAD_REQUEST",
       details: { field: "certificateNumber" },
@@ -327,7 +365,7 @@ describe("file validation", () => {
     const product = await seedProduct({ sku: "CERT-BACKWARDS" });
 
     await expect(
-      attach(product.id, { issueDate: "2026-08-12", expiryDate: "2020-01-01" }),
+      attach(await lotOf(product.id), { issueDate: "2026-08-12", expiryDate: "2020-01-01" }),
     ).rejects.toMatchObject({
       code: "BAD_REQUEST",
       details: { field: "expiryDate" },
@@ -339,7 +377,7 @@ describe("file validation", () => {
     const product = await seedProduct({ sku: "CERT-CLEANUP" });
 
     await expect(
-      attach(product.id, { certificateNumber: "" }),
+      attach(await lotOf(product.id), { certificateNumber: "" }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
 
     // Metadata is parsed before the file is written, so nothing was stored.
@@ -356,10 +394,10 @@ describe("replacing a certificate", () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-REPLACE" });
 
-    const first = await attach(product.id, { certificateNumber: "FIRST-001" });
-    const second = await attach(product.id, { certificateNumber: "SECOND-002" });
+    const first = await attach(await lotOf(product.id), { certificateNumber: "FIRST-001" });
+    const second = await attach(await lotOf(product.id), { certificateNumber: "SECOND-002" });
 
-    const current = await getCurrentCertificate(product.id);
+    const current = await getLotCertificate(await lotOf(product.id));
     expect(current?.id).toBe(second.id);
     expect(current?.certificateNumber).toBe("SECOND-002");
 
@@ -377,8 +415,8 @@ describe("replacing a certificate", () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-OLDFILE" });
 
-    const first = await attach(product.id, { certificateNumber: "OLD-1" });
-    await attach(product.id, { certificateNumber: "NEW-1" });
+    const first = await attach(await lotOf(product.id), { certificateNumber: "OLD-1" });
+    await attach(await lotOf(product.id), { certificateNumber: "NEW-1" });
 
     const oldRow = await prisma.certificate.findUniqueOrThrow({
       where: { id: first.id },
@@ -395,9 +433,9 @@ describe("replacing a certificate", () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-ONECURRENT" });
 
-    await attach(product.id, { certificateNumber: "A" });
-    await attach(product.id, { certificateNumber: "B" });
-    await attach(product.id, { certificateNumber: "C" });
+    await attach(await lotOf(product.id), { certificateNumber: "A" });
+    await attach(await lotOf(product.id), { certificateNumber: "B" });
+    await attach(await lotOf(product.id), { certificateNumber: "C" });
 
     const current = await prisma.certificate.count({
       where: { productId: product.id, supersededAt: null },
@@ -413,21 +451,21 @@ describe("removing a certificate", () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-REMOVE" });
 
-    const certificate = await attach(product.id);
+    const certificate = await attach(await lotOf(product.id));
     await removeCertificate(certificate.id);
 
-    expect(await getCurrentCertificate(product.id)).toBeNull();
+    expect(await getLotCertificate(await lotOf(product.id))).toBeNull();
 
     const result = await getProductDetail(product.id);
     if (!result.ok || !result.data) throw new Error("expected a product");
-    expect(result.data.certificateStatus).toBe("MISSING");
+    expect(result.data.lots[0]!.certificateStatus).toBe("MISSING");
   });
 
   it("keeps the record as history rather than destroying it", async () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-REMOVE-HIST" });
 
-    const certificate = await attach(product.id, {
+    const certificate = await attach(await lotOf(product.id), {
       certificateNumber: "WITHDRAWN-1",
     });
     await removeCertificate(certificate.id);
@@ -447,7 +485,7 @@ describe("removing a certificate", () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-DOUBLE" });
 
-    const certificate = await attach(product.id);
+    const certificate = await attach(await lotOf(product.id));
     await removeCertificate(certificate.id);
 
     await expect(removeCertificate(certificate.id)).rejects.toMatchObject({
@@ -461,7 +499,7 @@ describe("editing metadata", () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-EDIT" });
 
-    const certificate = await attach(product.id, {
+    const certificate = await attach(await lotOf(product.id), {
       certificateNumber: "TYPO-000",
     });
     const before = await prisma.certificate.findUniqueOrThrow({
@@ -492,8 +530,8 @@ describe("editing metadata", () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-EDITOLD" });
 
-    const first = await attach(product.id, { certificateNumber: "OLD" });
-    await attach(product.id, { certificateNumber: "NEW" });
+    const first = await attach(await lotOf(product.id), { certificateNumber: "OLD" });
+    await attach(await lotOf(product.id), { certificateNumber: "NEW" });
 
     await expect(
       updateCertificateMetadata(first.id, metadata()),
@@ -555,16 +593,16 @@ describe("certificate status", () => {
     await signInWithRole("ADMIN");
 
     const expired = await seedProduct({ sku: "CERT-EXPIRED" });
-    await attach(expired.id, {
+    await attach(await lotOf(expired.id), {
       issueDate: "2020-01-01",
       expiryDate: isoDaysFromNow(-1),
     });
 
     const noExpiry = await seedProduct({ sku: "CERT-NOEXPIRY" });
-    await attach(noExpiry.id, { expiryDate: "" });
+    await attach(await lotOf(noExpiry.id), { expiryDate: "" });
 
     const soon = await seedProduct({ sku: "CERT-SOON" });
-    await attach(soon.id, { issueDate: "2020-01-01", expiryDate: isoDaysFromNow(5) });
+    await attach(await lotOf(soon.id), { issueDate: "2020-01-01", expiryDate: isoDaysFromNow(5) });
 
     for (const [id, expected] of [
       [expired.id, "EXPIRED"],
@@ -573,7 +611,7 @@ describe("certificate status", () => {
     ] as const) {
       const result = await getProductDetail(id);
       if (!result.ok || !result.data) throw new Error("expected a product");
-      expect(result.data.certificateStatus).toBe(expected);
+      expect(result.data.lots[0]!.certificateStatus).toBe(expected);
     }
   });
 });
@@ -586,7 +624,7 @@ describe("who may read a certificate file", () => {
   it("refuses an unauthenticated request", async () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-AUTH" });
-    const certificate = await attach(product.id);
+    const certificate = await attach(await lotOf(product.id));
 
     signOut();
 
@@ -609,7 +647,7 @@ describe("who may read a certificate file", () => {
   it("lets STAFF read one — viewing is part of the job", async () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-STAFFREAD" });
-    const certificate = await attach(product.id);
+    const certificate = await attach(await lotOf(product.id));
 
     signOut();
     await signInWithRole("STAFF");
@@ -625,7 +663,7 @@ describe("who may change a certificate", () => {
     await signInWithRole("STAFF");
     const product = await seedProduct({ sku: "CERT-STAFFUP" });
 
-    await expect(attach(product.id)).rejects.toMatchObject({
+    await expect(attach(await lotOf(product.id))).rejects.toMatchObject({
       code: "FORBIDDEN",
       status: 403,
     });
@@ -636,7 +674,7 @@ describe("who may change a certificate", () => {
   it("refuses STAFF a metadata edit", async () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-STAFFEDIT" });
-    const certificate = await attach(product.id, {
+    const certificate = await attach(await lotOf(product.id), {
       certificateNumber: "UNTOUCHED",
     });
 
@@ -656,7 +694,7 @@ describe("who may change a certificate", () => {
   it("refuses STAFF a removal", async () => {
     await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "CERT-STAFFDEL" });
-    const certificate = await attach(product.id);
+    const certificate = await attach(await lotOf(product.id));
 
     signOut();
     await signInWithRole("STAFF");
@@ -665,13 +703,13 @@ describe("who may change a certificate", () => {
       code: "FORBIDDEN",
     });
 
-    expect(await getCurrentCertificate(product.id)).not.toBeNull();
+    expect(await getLotCertificate(await lotOf(product.id))).not.toBeNull();
   });
 
   it("refuses an unauthenticated upload", async () => {
     const product = await seedProduct({ sku: "CERT-ANONUP" });
 
-    await expect(attach(product.id)).rejects.toMatchObject({
+    await expect(attach(await lotOf(product.id))).rejects.toMatchObject({
       code: "UNAUTHORIZED",
     });
   });
@@ -694,8 +732,8 @@ describe("deleting a product with certificates", () => {
       status: "ACTIVE",
     });
 
-    await attach(created.id, { certificateNumber: "FIRST" });
-    await attach(created.id, { certificateNumber: "SECOND" });
+    await attach(await lotOf(created.id), { certificateNumber: "FIRST" });
+    await attach(await lotOf(created.id), { certificateNumber: "SECOND" });
 
     const keys = (
       await prisma.certificate.findMany({
@@ -713,5 +751,240 @@ describe("deleting a product with certificates", () => {
     for (const key of keys) {
       expect(await fileStorage.exists(key)).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Paperwork belongs to the batch
+// ---------------------------------------------------------------------------
+
+describe("certificates belong to lots", () => {
+  /** A second batch of an existing product, received from a supplier. */
+  async function secondLot(productId: string, quantity = 5) {
+    const supplier = await createSupplier("Second Source");
+    const purchase = await createPurchase({
+      supplierId: supplier.id,
+      items: [{ productId, quantity, unitCost: "10.00" }],
+    });
+    await receivePurchase(purchase.id);
+
+    const lot = await prisma.stockLot.findFirstOrThrow({
+      where: { sourceType: "PURCHASE", sourceId: purchase.id },
+      select: { id: true },
+    });
+    return lot.id;
+  }
+
+  it("lets two batches of one part hold different paperwork at once", async () => {
+    /*
+     * The reason the model moved off the product. A part whose catalogue entry
+     * reads "certified" can still have units on the shelf that arrived under a
+     * different release, or none at all — and now the system can say so.
+     */
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({ sku: "TWO-LOTS", stockQuantity: 10 });
+
+    const openingLot = await lotOf(product.id);
+    const deliveredLot = await secondLot(product.id);
+
+    // Only the newer batch gets paperwork.
+    await attach(deliveredLot, { certificateNumber: "COVERED-1" });
+
+    const result = await getProductDetail(product.id);
+    if (!result.ok || !result.data) throw new Error("expected a product");
+
+    const byLot = new Map(result.data.lots.map((lot) => [lot.id, lot]));
+    expect(byLot.size).toBe(2);
+
+    expect(byLot.get(openingLot)!.certificate).toBeNull();
+    expect(byLot.get(openingLot)!.certificateStatus).toBe("MISSING");
+
+    expect(byLot.get(deliveredLot)!.certificate?.certificateNumber).toBe(
+      "COVERED-1",
+    );
+    expect(byLot.get(deliveredLot)!.certificateStatus).toBe("VALID");
+  });
+
+  it("allows only one current certificate per batch, not per product", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({ sku: "ONE-PER-LOT", stockQuantity: 10 });
+
+    const first = await lotOf(product.id);
+    const second = await secondLot(product.id);
+
+    // Two current certificates on one product is now perfectly legal, because
+    // they cover different units.
+    await attach(first, { certificateNumber: "LOT-A" });
+    await attach(second, { certificateNumber: "LOT-B" });
+
+    expect(
+      await prisma.certificate.count({
+        where: { productId: product.id, supersededAt: null },
+      }),
+    ).toBe(2);
+
+    // A second one on the *same* batch retires the first.
+    await attach(second, { certificateNumber: "LOT-B-REPLACED" });
+
+    const current = await getLotCertificate(second);
+    expect(current?.certificateNumber).toBe("LOT-B-REPLACED");
+    expect(
+      await prisma.certificate.count({ where: { stockLotId: second } }),
+    ).toBe(2);
+    expect(
+      await prisma.certificate.count({
+        where: { stockLotId: second, supersededAt: null },
+      }),
+    ).toBe(1);
+  });
+
+  it("refuses a certificate whose product disagrees with its lot", async () => {
+    /*
+     * Enforced by the composite foreign key onto stock_lots (id, product_id)
+     * rather than by application code, so no write path can get it wrong.
+     */
+    await signInWithRole("ADMIN");
+    const a = await seedProduct({ sku: "MISMATCH-A", stockQuantity: 5 });
+    const b = await seedProduct({ sku: "MISMATCH-B", stockQuantity: 5 });
+
+    await expect(
+      prisma.certificate.create({
+        data: {
+          productId: b.id,
+          stockLotId: await lotOf(a.id),
+          certificateType: "FAA 8130-3",
+          certificateNumber: "WRONG-1",
+          issueDate: new Date("2026-01-01"),
+          expiryDate: null,
+          fileName: "c.pdf",
+          storageKey: "key-mismatch",
+          contentType: "application/pdf",
+          fileSize: 10,
+        },
+      }),
+    ).rejects.toThrow();
+
+    expect(await prisma.certificate.count()).toBe(0);
+  });
+
+  it("refuses a new certificate that names no batch", async () => {
+    /*
+     * The check constraint. A row with no lot is history by definition, so a
+     * current one without a lot cannot be written at all — which is what stops
+     * product-level coverage coming back through a side door.
+     */
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({ sku: "NO-LOT", stockQuantity: 5 });
+
+    await expect(
+      prisma.certificate.create({
+        data: {
+          productId: product.id,
+          certificateType: "FAA 8130-3",
+          certificateNumber: "ORPHAN-1",
+          issueDate: new Date("2026-01-01"),
+          expiryDate: null,
+          fileName: "c.pdf",
+          storageKey: "key-orphan",
+          contentType: "application/pdf",
+          fileSize: 10,
+        },
+      }),
+    ).rejects.toThrow();
+
+    expect(await prisma.certificate.count()).toBe(0);
+  });
+
+  it("keeps legacy product-level history readable", async () => {
+    /*
+     * Certificates filed before paperwork moved to batches carry no lot. The
+     * migration retires them rather than guessing which units they covered, and
+     * they stay readable as the record that the documents were ever filed.
+     */
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({ sku: "LEGACY-1", stockQuantity: 5 });
+
+    const legacy = await prisma.certificate.create({
+      data: {
+        productId: product.id,
+        stockLotId: null,
+        supersededAt: new Date("2026-02-01"),
+        certificateType: "Certificate of Conformity",
+        certificateNumber: "LEGACY-0001",
+        issueDate: new Date("2025-06-01"),
+        expiryDate: null,
+        fileName: "legacy.pdf",
+        storageKey: "key-legacy",
+        contentType: "application/pdf",
+        fileSize: 10,
+      },
+    });
+
+    const history = await getCertificateHistory(product.id);
+    expect(history.map((entry) => entry.id)).toContain(legacy.id);
+    expect(history[0]!.stockLotId).toBeNull();
+
+    // It covers nothing: the batch on the shelf still reads as MISSING.
+    const result = await getProductDetail(product.id);
+    if (!result.ok || !result.data) throw new Error("expected a product");
+    expect(result.data.lots[0]!.certificateStatus).toBe("MISSING");
+  });
+
+  it("keeps a batch's paperwork after its units are gone", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({ sku: "DRAWN-DOWN", stockQuantity: 4 });
+    const lotId = await lotOf(product.id);
+
+    const certificate = await attach(lotId, { certificateNumber: "SOLD-OUT" });
+
+    await adjustStock({
+      productId: product.id,
+      quantity: "4",
+      direction: "DECREASE",
+      reason: "Consumed for a test",
+    });
+
+    const lot = await prisma.stockLot.findUniqueOrThrow({
+      where: { id: lotId },
+      select: { quantityRemaining: true },
+    });
+    expect(lot.quantityRemaining).toBe(0);
+
+    // The document survives the units it covered.
+    const still = await getLotCertificate(lotId);
+    expect(still?.id).toBe(certificate.id);
+  });
+
+  it("deletes a never-traded product's certificates before its lots", async () => {
+    /*
+     * The lot foreign key is RESTRICT, so `deleteProduct` has to remove the
+     * paperwork first. Without that ordering this delete fails outright.
+     */
+    await signInWithRole("ADMIN");
+    const created = await createProduct({
+      name: "Untraded Part",
+      sku: "UNTRADED-1",
+      category: "Airframe",
+      sellingPrice: "20.00",
+      stockQuantity: "3",
+      status: "ACTIVE",
+    });
+
+    const lotId = await lotOf(created.id);
+    await attach(lotId, { certificateNumber: "BYE-1" });
+
+    // The storage key never leaves the server, so it is read from the row
+    // rather than from the view the UI gets.
+    const { storageKey } = await prisma.certificate.findFirstOrThrow({
+      where: { productId: created.id },
+      select: { storageKey: true },
+    });
+    expect(await fileStorage.exists(storageKey)).toBe(true);
+
+    await deleteProduct(created.id);
+
+    expect(await prisma.certificate.count()).toBe(0);
+    expect(await prisma.stockLot.count({ where: { id: lotId } })).toBe(0);
+    expect(await fileStorage.exists(storageKey)).toBe(false);
   });
 });

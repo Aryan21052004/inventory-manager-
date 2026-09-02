@@ -19,6 +19,10 @@
  *      is whatever the ledger says it is, so the two cannot disagree.
  */
 
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+
 import { PrismaPg } from "@prisma/adapter-pg";
 import { config } from "dotenv";
 
@@ -473,6 +477,160 @@ const ORDER_MOVES_STOCK: Record<OrderStatus, boolean> = {
 // Seed
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Certificates
+// ---------------------------------------------------------------------------
+
+/**
+ * Synthetic airworthiness paperwork, for development only.
+ *
+ * **None of this is a real aviation document, and none of it is meant to look
+ * like one.** The types, numbers and file contents all say so in as many words.
+ * A seed that produced plausible-looking 8130-3 or EASA Form 1 scans would be a
+ * set of forgeries sitting in a repository, and somebody would eventually
+ * mistake one for evidence.
+ *
+ * The point of seeding these at all is that certificates now belong to *lots*,
+ * and the states worth exercising only exist across several batches of the same
+ * part: one covered, one not, one expiring, one expired, one whose document was
+ * replaced. Two products carry that spread deliberately.
+ *
+ * Files are written straight to the local storage directory rather than through
+ * `fileStorage`, because that module is `server-only` and cannot be imported
+ * from a plain script. The key format and layout mirror it exactly —
+ * `certificates/<uuid>.pdf` under FILE_STORAGE_DIR — so the app reads them back
+ * through its normal path.
+ */
+
+/** A day offset from today, as a UTC calendar date. */
+function daysFromNow(days: number): Date {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + days);
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+  );
+}
+
+/**
+ * A minimal, valid PDF whose visible text says what it is.
+ *
+ * Begins with `%PDF-1.7` because that is the signature the upload path sniffs
+ * for, so a seeded file behaves like an uploaded one everywhere downstream.
+ */
+function syntheticPdf(label: string): Buffer {
+  const text = `SYNTHETIC DEVELOPMENT SAMPLE - NOT A REAL CERTIFICATE - ${label}`;
+  return Buffer.from(
+    `%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n% ${text}\n%%EOF\n`,
+    "utf8",
+  );
+}
+
+interface CertificateSpec {
+  /** Which product's batch this covers, and which batch of it. */
+  product: ProductKey;
+  /** 0 is the oldest surviving lot for that product. */
+  lotIndex: number;
+  certificateType: string;
+  certificateNumber: string;
+  issueDate: Date;
+  /** Null means it does not expire — a valid and common state. */
+  expiryDate: Date | null;
+  /** True for a document that was replaced; it stays as history. */
+  superseded?: boolean;
+}
+
+async function seedCertificates(
+  productIds: Map<ProductKey, string>,
+  uploadedBy: string,
+): Promise<void> {
+  const storageRoot = resolve(process.env["FILE_STORAGE_DIR"] ?? ".storage");
+
+  const specs: CertificateSpec[] = [
+    // KB-MECH-87 — one batch covered and current, another left with nothing.
+    {
+      product: "kb-87",
+      lotIndex: 0,
+      certificateType: "SAMPLE Conformity Record",
+      certificateNumber: "DEV-SAMPLE-0001",
+      issueDate: daysFromNow(-400),
+      // No expiry at all: a valid, complete answer, not a missing one.
+      expiryDate: null,
+    },
+    // MN-4K-27 — a replaced document plus its replacement, and an expiry
+    // close enough to read as EXPIRING_SOON.
+    {
+      product: "mon-27",
+      lotIndex: 0,
+      certificateType: "SAMPLE Release Record",
+      certificateNumber: "DEV-SAMPLE-0002-SUPERSEDED",
+      issueDate: daysFromNow(-500),
+      expiryDate: daysFromNow(-120),
+      superseded: true,
+    },
+    {
+      product: "mon-27",
+      lotIndex: 0,
+      certificateType: "SAMPLE Release Record",
+      certificateNumber: "DEV-SAMPLE-0003",
+      issueDate: daysFromNow(-90),
+      expiryDate: daysFromNow(14),
+    },
+    // MO-ERG-02 — expired, so the dashboard has something to flag.
+    {
+      product: "mouse-erg",
+      lotIndex: 0,
+      certificateType: "SAMPLE Conformity Record",
+      certificateNumber: "DEV-SAMPLE-0004",
+      issueDate: daysFromNow(-800),
+      expiryDate: daysFromNow(-30),
+    },
+  ];
+
+  let written = 0;
+
+  for (const spec of specs) {
+    const productId = productIds.get(spec.product)!;
+
+    const lots = await prisma.stockLot.findMany({
+      where: { productId },
+      orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+      select: { id: true },
+    });
+
+    const lot = lots[spec.lotIndex];
+    // A product may legitimately have fewer batches than the spec expects if
+    // the movement plan changes. Skipping is better than inventing a lot.
+    if (!lot) continue;
+
+    const key = `certificates/${randomUUID()}.pdf`;
+    const path = join(storageRoot, key);
+    await mkdir(dirname(path), { recursive: true });
+    const body = syntheticPdf(spec.certificateNumber);
+    await writeFile(path, body);
+
+    await prisma.certificate.create({
+      data: {
+        productId,
+        stockLotId: lot.id,
+        certificateType: spec.certificateType,
+        certificateNumber: spec.certificateNumber,
+        issueDate: spec.issueDate,
+        expiryDate: spec.expiryDate,
+        fileName: `SYNTHETIC-${spec.certificateNumber}.pdf`,
+        storageKey: key,
+        contentType: "application/pdf",
+        fileSize: body.byteLength,
+        uploadedBy,
+        supersededAt: spec.superseded ? daysFromNow(-90) : null,
+      },
+    });
+
+    written += 1;
+  }
+
+  console.log(`  ${written} synthetic certificates (development samples only)`);
+}
+
 async function main(): Promise<void> {
   console.log("Seeding inventory_manager…\n");
 
@@ -906,6 +1064,9 @@ async function main(): Promise<void> {
   }
 
   console.log(`  ${costedLots} costed lots, ${uncostedLots} uncosted`);
+
+  // After the lots exist, because paperwork attaches to a batch.
+  await seedCertificates(productIds, admin.id);
 
   console.log("\nStock on hand:");
   for (const product of PRODUCTS) {

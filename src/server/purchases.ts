@@ -21,6 +21,7 @@ import {
 } from "@/lib/validation/purchase";
 import type { SupplierStatus } from "@/generated/prisma/enums";
 import { requireUser } from "@/server/auth";
+import { getLotCertificates } from "@/server/certificates";
 import { getSupplierDetail } from "@/server/suppliers";
 import {
   applyStockMovement,
@@ -103,8 +104,18 @@ export interface PurchaseDetailLine {
    */
   productRetired: boolean;
   /**
-   * The product's current certificate, referenced rather than copied. A
-   * purchase never owns certificate data.
+   * The batch this line created when the delivery was received, if it has been.
+   *
+   * Null until receipt: a purchase that has not arrived has produced no lot,
+   * and therefore has no paperwork to show. Inventing coverage for goods that
+   * are not here yet would be the same mistake as costing them before they
+   * arrive.
+   */
+  stockLotId: string | null;
+  /**
+   * The paperwork covering the batch this delivery created — not the product's,
+   * which no longer exists as a concept. A purchase never owns certificate
+   * data; this is a read of the lot's own paperwork.
    */
   certificateType: string | null;
   certificateNumber: string | null;
@@ -509,21 +520,6 @@ export async function getPurchaseDetail(
                 sku: true,
                 status: true,
                 stockQuantity: true,
-                /*
-                 * The product's current certificate, read through the relation.
-                 * Nothing is copied onto the purchase: a purchase references
-                 * its products, and a product owns its paperwork. Receiving a
-                 * delivery never creates or changes a certificate.
-                 */
-                certificates: {
-                  where: { supersededAt: null },
-                  select: {
-                    certificateType: true,
-                    certificateNumber: true,
-                    expiryDate: true,
-                  },
-                  take: 1,
-                },
               },
             },
           },
@@ -533,13 +529,33 @@ export async function getPurchaseDetail(
 
     if (!purchase) return { ok: true, data: null };
 
-    const [impact, supplier] = await Promise.all([
+    const [impact, supplier, receivedLots] = await Promise.all([
       loadInventoryImpact(id),
       loadSupplierSummary(purchase.supplierId),
+      /*
+       * The batches this delivery created, one per line. Receiving never
+       * touches paperwork — it creates the lot the paperwork will later be
+       * filed against — so a purchase that has not been received has none of
+       * these and its lines show no certificate at all.
+       */
+      prisma.stockLot.findMany({
+        where: { sourceType: "PURCHASE", sourceId: id },
+        select: { id: true, productId: true },
+      }),
     ]);
 
+    const lotByProduct = new Map(
+      receivedLots.map((lot) => [lot.productId, lot.id] as const),
+    );
+    const lotCertificates = await getLotCertificates(
+      receivedLots.map((lot) => lot.id),
+    );
+
     const lines = purchase.items.map((item) => {
-      const certificate = item.product.certificates[0] ?? null;
+      const stockLotId = lotByProduct.get(item.product.id) ?? null;
+      const certificate = stockLotId
+        ? (lotCertificates.get(stockLotId) ?? null)
+        : null;
 
       return {
         id: item.id,
@@ -551,6 +567,7 @@ export async function getPurchaseDetail(
         total: item.total.toString(),
         currentStock: item.product.stockQuantity,
         productRetired: item.product.status !== "ACTIVE",
+        stockLotId,
         certificateType: certificate?.certificateType ?? null,
         certificateNumber: certificate?.certificateNumber ?? null,
         certificateStatus: certificateStatus(certificate),

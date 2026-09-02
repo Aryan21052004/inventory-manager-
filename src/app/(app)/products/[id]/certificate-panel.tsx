@@ -95,17 +95,37 @@ export interface CertificateHistoryEntry {
   uploadedByName: string | null;
 }
 
-function CertificatePanel({
-  productId,
+/**
+ * One batch, and the paperwork covering it.
+ *
+ * A card per lot rather than one per product, because that is where a
+ * certificate now lives. Two deliveries of the same part can be in different
+ * states — one released under a form that expires next month, one with nothing
+ * filed at all — and the only honest way to show that is side by side.
+ */
+function LotCertificatePanel({
+  stockLotId,
+  receivedAt,
+  quantityRemaining,
+  purchaseNumber,
   certificate,
   status,
-  history,
   canManage,
 }: {
-  productId: string;
+  stockLotId: string;
+  /**
+   * The instant the batch arrived, not a calendar day.
+   *
+   * Passed as the timestamp it is rather than truncated to a UTC day first:
+   * `formatDate` renders it in the reader's zone, which is what the lot table
+   * on this same page does. Truncating first moved the two out of step, so one
+   * batch could read "Aug 25" here and "Aug 26" ten lines further down.
+   */
+  receivedAt: Date;
+  quantityRemaining: number;
+  purchaseNumber: string | null;
   certificate: CertificatePanelData | null;
   status: CertificateStatus;
-  history: CertificateHistoryEntry[];
   canManage: boolean;
 }) {
   const [formMode, setFormMode] = useState<CertificateFormMode | null>(null);
@@ -115,12 +135,14 @@ function CertificatePanel({
     <>
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2.5">
-            Certificate
+          <CardTitle className="flex flex-wrap items-center gap-2.5">
+            <span>Received {formatDate(receivedAt)}</span>
             <CertificateStatusBadge status={status} />
           </CardTitle>
           <CardDescription>
-            Airworthiness and conformity paperwork for this part.
+            {quantityRemaining} {quantityRemaining === 1 ? "unit" : "units"} of
+            this batch still on the shelf
+            {purchaseNumber ? ` · arrived on ${purchaseNumber}` : " · no purchase behind it"}
           </CardDescription>
           {canManage ? (
             <CardAction>
@@ -163,75 +185,16 @@ function CertificatePanel({
           ) : (
             <EmptyState
               icon={ShieldOff}
-              title="No certificate on file"
+              title="No certificate on file for this batch"
               description={
                 canManage
-                  ? "This part has no airworthiness or conformity document recorded. Add one when the paperwork arrives — a product can exist without it."
-                  : "This part has no certificate recorded. An administrator can upload one."
+                  ? "These units have no airworthiness or conformity document recorded. Add one when the paperwork arrives — stock can be received before its document turns up."
+                  : "These units have no certificate recorded. An administrator can upload one."
               }
             />
           )}
         </CardContent>
       </Card>
-
-      {history.length > 0 ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Certificate history</CardTitle>
-            <CardDescription>
-              Documents this part was previously covered by. Retired rather than
-              deleted — each one is still readable.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Number</TableHead>
-                  <TableHead className="hidden sm:table-cell">Issued</TableHead>
-                  <TableHead className="hidden md:table-cell">Expiry</TableHead>
-                  <TableHead>Retired</TableHead>
-                  <TableHead className="text-right">File</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {history.map((entry) => (
-                  <TableRow key={entry.id}>
-                    <TableCell>
-                      <Badge variant="outline">{entry.certificateType}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {entry.certificateNumber}
-                    </TableCell>
-                    <TableCell className="hidden text-muted-foreground sm:table-cell">
-                      {formatDate(entry.issueDate)}
-                    </TableCell>
-                    <TableCell className="hidden text-muted-foreground md:table-cell">
-                      {entry.expiryDate ? formatDate(entry.expiryDate) : "—"}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatDate(entry.supersededAt)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button variant="ghost" size="sm" asChild>
-                        <a
-                          href={entry.fileUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          <Eye />
-                          View
-                        </a>
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      ) : null}
 
       {canManage ? (
         <>
@@ -239,7 +202,7 @@ function CertificatePanel({
             open={formMode !== null}
             onOpenChange={(next) => setFormMode(next ? formMode : null)}
             mode={formMode ?? "add"}
-            productId={productId}
+            stockLotId={stockLotId}
             certificate={
               certificate
                 ? {
@@ -263,6 +226,77 @@ function CertificatePanel({
         </>
       ) : null}
     </>
+  );
+}
+
+/**
+ * Every retired document for this part, across all of its batches.
+ *
+ * Product-wide rather than per batch, and deliberately so: it is also the only
+ * place the legacy rows appear. Certificates filed before paperwork moved to
+ * batches carry no lot, and leaving them out of this table would erase the only
+ * record that they were ever filed.
+ */
+function CertificateHistoryCard({
+  history,
+}: {
+  history: CertificateHistoryEntry[];
+}) {
+  if (history.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Certificate history</CardTitle>
+        <CardDescription>
+          Documents this part&apos;s batches were previously covered by. Retired
+          rather than deleted — each one is still readable.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="p-0">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Type</TableHead>
+              <TableHead>Number</TableHead>
+              <TableHead className="hidden sm:table-cell">Issued</TableHead>
+              <TableHead className="hidden md:table-cell">Expiry</TableHead>
+              <TableHead>Retired</TableHead>
+              <TableHead className="text-right">File</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {history.map((entry) => (
+              <TableRow key={entry.id}>
+                <TableCell>
+                  <Badge variant="outline">{entry.certificateType}</Badge>
+                </TableCell>
+                <TableCell className="font-mono text-xs">
+                  {entry.certificateNumber}
+                </TableCell>
+                <TableCell className="hidden text-muted-foreground sm:table-cell">
+                  {formatDate(entry.issueDate)}
+                </TableCell>
+                <TableCell className="hidden text-muted-foreground md:table-cell">
+                  {entry.expiryDate ? formatDate(entry.expiryDate) : "—"}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {formatDate(entry.supersededAt)}
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button variant="ghost" size="sm" asChild>
+                    <a href={entry.fileUrl} target="_blank" rel="noreferrer">
+                      <Eye />
+                      View
+                    </a>
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -431,7 +465,7 @@ function WithdrawCertificateDialog({
             <span className="font-mono text-xs">
               {certificate.certificateNumber}
             </span>{" "}
-            will no longer cover this part, and the product will show as having
+            will no longer cover this batch, and the batch will show as having
             no certificate.
           </DialogDescription>
         </DialogHeader>
@@ -463,4 +497,4 @@ function WithdrawCertificateDialog({
   );
 }
 
-export { CertificatePanel };
+export { LotCertificatePanel, CertificateHistoryCard };

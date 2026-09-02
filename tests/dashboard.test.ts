@@ -449,14 +449,33 @@ describe("needs attention", () => {
 // ---------------------------------------------------------------------------
 
 describe("certificate attention", () => {
+  /**
+   * Paperwork for a product's batch.
+   *
+   * Certificates belong to lots now, so the fixture finds the one `seedProduct`
+   * created for the balance it wrote. Attention is counted per open lot: a part
+   * with two batches, one covered and one not, is one problem rather than one
+   * product's worth of doubt over both.
+   */
   async function certificateFor(
     productId: string,
     expiryDate: Date | null,
     uploadedBy: string,
+    stockLotId?: string,
   ) {
+    const lotId =
+      stockLotId ??
+      (
+        await prisma.stockLot.findFirstOrThrow({
+          where: { productId },
+          select: { id: true },
+        })
+      ).id;
+
     return prisma.certificate.create({
       data: {
         productId,
+        stockLotId: lotId,
         certificateType: "EASA Form 1",
         certificateNumber: `C-${Math.random().toString(36).slice(2, 8)}`,
         issueDate: new Date("2026-01-01"),
@@ -476,14 +495,14 @@ describe("certificate attention", () => {
     return date;
   }
 
-  it("counts a product with no certificate as missing", async () => {
+  it("counts an open batch with no certificate as missing", async () => {
     await signInWithRole("ADMIN");
     await seedProduct({ sku: "NO-CERT" });
 
     const attention = unwrap(await loadAttention());
     expect(attention.certificates.missingCount).toBe(1);
-    expect(attention.certificates.products[0]!.status).toBe("MISSING");
-    expect(attention.certificates.products[0]!.expiryDate).toBeNull();
+    expect(attention.certificates.lots[0]!.status).toBe("MISSING");
+    expect(attention.certificates.lots[0]!.expiryDate).toBeNull();
   });
 
   it("counts an expired certificate", async () => {
@@ -495,7 +514,7 @@ describe("certificate attention", () => {
     expect(attention.certificates.expiredCount).toBe(1);
     expect(attention.certificates.missingCount).toBe(0);
 
-    const flagged = attention.certificates.products[0]!;
+    const flagged = attention.certificates.lots[0]!;
     expect(flagged.status).toBe("EXPIRED");
     expect(flagged.daysRemaining).toBeLessThan(0);
   });
@@ -508,8 +527,8 @@ describe("certificate attention", () => {
     const attention = unwrap(await loadAttention());
     expect(attention.certificates.expiringSoonCount).toBe(1);
     expect(attention.certificates.expiredCount).toBe(0);
-    expect(attention.certificates.products[0]!.status).toBe("EXPIRING_SOON");
-    expect(attention.certificates.products[0]!.daysRemaining).toBe(10);
+    expect(attention.certificates.lots[0]!.status).toBe("EXPIRING_SOON");
+    expect(attention.certificates.lots[0]!.daysRemaining).toBe(10);
   });
 
   it("leaves a certificate expiring beyond thirty days alone", async () => {
@@ -519,7 +538,7 @@ describe("certificate attention", () => {
 
     const attention = unwrap(await loadAttention());
     expect(attention.certificates.expiringSoonCount).toBe(0);
-    expect(attention.certificates.products).toHaveLength(0);
+    expect(attention.certificates.lots).toHaveLength(0);
   });
 
   it("treats a certificate with no expiry date as valid", async () => {
@@ -550,7 +569,7 @@ describe("certificate attention", () => {
 
     const attention = unwrap(await loadAttention());
     expect(attention.certificates.expiredCount).toBe(0);
-    expect(attention.certificates.products).toHaveLength(0);
+    expect(attention.certificates.lots).toHaveLength(0);
   });
 
   it("does not chase paperwork on retired products", async () => {
@@ -571,7 +590,7 @@ describe("certificate attention", () => {
     await certificateFor(expired.id, daysFromNow(-10), user.id);
 
     const attention = unwrap(await loadAttention());
-    const order = attention.certificates.products.map((p) => p.status);
+    const order = attention.certificates.lots.map((lot) => lot.status);
 
     expect(order[0]).toBe("EXPIRED");
     expect(order[1]).toBe("EXPIRING_SOON");

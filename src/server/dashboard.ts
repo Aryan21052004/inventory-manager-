@@ -58,8 +58,14 @@ export interface AttentionSnapshot {
  *
  * The counts alone would not be actionable: the products list has no
  * certificate filter, so there is no view to send somebody to. The affected
- * products travel with the counts instead, capped, each linking to its own
- * detail page where the certificate panel lives.
+ * lots travel with the counts instead, capped, each linking to the product
+ * detail page where its batch and paperwork live.
+ *
+ * **Counted per open lot, not per product.** Paperwork covers the units that
+ * arrived, so a part with two batches — one released under a valid 8130-3, one
+ * with nothing filed — contributes exactly one problem, not one product's
+ * worth of doubt over both. Lots drawn to zero are excluded: there is nothing
+ * on the shelf to be uncertain about.
  *
  * Scoped to ACTIVE products. A discontinued part is not being sold, so its
  * paperwork is not what anybody needs to act on this morning.
@@ -69,15 +75,18 @@ export interface CertificateAttention {
   expiringSoonCount: number;
   missingCount: number;
   /** Soonest problem first: expired before expiring, oldest expiry first. */
-  products: CertificateAttentionProduct[];
-  /** True when more products are affected than the list shows. */
+  lots: CertificateAttentionLot[];
+  /** True when more lots are affected than the list shows. */
   hasMore: boolean;
 }
 
-export interface CertificateAttentionProduct {
-  id: string;
+export interface CertificateAttentionLot {
+  lotId: string;
+  productId: string;
   name: string;
   sku: string;
+  /** Units still on the shelf in this batch — what the problem actually covers. */
+  quantityRemaining: number;
   status: "EXPIRED" | "EXPIRING_SOON" | "MISSING";
   expiryDate: Date | null;
   /** Negative once expired. Null when there is no certificate at all. */
@@ -273,22 +282,24 @@ export async function loadAttention(): Promise<Result<AttentionSnapshot>> {
 }
 
 interface CertificateRow {
-  id: string;
+  lot_id: string;
+  product_id: string;
   name: string;
   sku: string;
+  quantity_remaining: number;
   expiry_date: Date | null;
   has_certificate: boolean;
 }
 
 /**
- * Products whose airworthiness paperwork needs attention.
+ * Open stock lots whose airworthiness paperwork needs attention.
  *
- * The current certificate is the one with `superseded_at IS NULL`; a product
- * has at most one, enforced by a partial unique index. The three states mirror
+ * The current certificate is the one with `superseded_at IS NULL`; a lot has
+ * at most one, enforced by a partial unique index. The three states mirror
  * `certificateStatus()` in src/lib/certificate-status.ts exactly — expired,
  * within thirty days, or absent — and the boundaries are written out again
  * here because the filtering has to happen in Postgres rather than after
- * loading the catalogue.
+ * loading every batch.
  *
  * A certificate with **no expiry date is not a problem**. A Certificate of
  * Conformity typically never expires, and treating a null expiry as suspicious
@@ -298,15 +309,19 @@ interface CertificateRow {
 async function loadCertificateAttention(): Promise<CertificateAttention> {
   const rows = await prisma.$queryRaw<CertificateRow[]>`
     SELECT
-      p.id,
+      l.id           AS lot_id,
+      p.id           AS product_id,
       p.name,
       p.sku,
+      l.quantity_remaining,
       c.expiry_date,
       (c.id IS NOT NULL) AS has_certificate
-    FROM products p
+    FROM stock_lots l
+    JOIN products p ON p.id = l.product_id
     LEFT JOIN certificates c
-      ON c.product_id = p.id AND c.superseded_at IS NULL
+      ON c.stock_lot_id = l.id AND c.superseded_at IS NULL
     WHERE p.status = 'ACTIVE'
+      AND l.quantity_remaining > 0
       AND (
         c.id IS NULL
         OR (
@@ -319,7 +334,8 @@ async function loadCertificateAttention(): Promise<CertificateAttention> {
       -- at all. Nulls last puts missing certificates behind dated problems,
       -- which is the order somebody would work through them in.
       c.expiry_date ASC NULLS LAST,
-      p.name ASC
+      p.name ASC,
+      l.received_at ASC
   `;
 
   const today = new Date();
@@ -333,13 +349,15 @@ async function loadCertificateAttention(): Promise<CertificateAttention> {
   let expiringSoonCount = 0;
   let missingCount = 0;
 
-  const products: CertificateAttentionProduct[] = rows.map((row) => {
+  const lots: CertificateAttentionLot[] = rows.map((row) => {
     if (!row.has_certificate) {
       missingCount += 1;
       return {
-        id: row.id,
+        lotId: row.lot_id,
+        productId: row.product_id,
         name: row.name,
         sku: row.sku,
+        quantityRemaining: row.quantity_remaining,
         status: "MISSING" as const,
         expiryDate: null,
         daysRemaining: null,
@@ -358,9 +376,11 @@ async function loadCertificateAttention(): Promise<CertificateAttention> {
     else expiringSoonCount += 1;
 
     return {
-      id: row.id,
+      lotId: row.lot_id,
+      productId: row.product_id,
       name: row.name,
       sku: row.sku,
+      quantityRemaining: row.quantity_remaining,
       status: daysRemaining < 0 ? ("EXPIRED" as const) : ("EXPIRING_SOON" as const),
       expiryDate: expiry,
       daysRemaining,
@@ -371,8 +391,8 @@ async function loadCertificateAttention(): Promise<CertificateAttention> {
     expiredCount,
     expiringSoonCount,
     missingCount,
-    products: products.slice(0, CERTIFICATE_LIST_LIMIT),
-    hasMore: products.length > CERTIFICATE_LIST_LIMIT,
+    lots: lots.slice(0, CERTIFICATE_LIST_LIMIT),
+    hasMore: lots.length > CERTIFICATE_LIST_LIMIT,
   };
 }
 

@@ -8,10 +8,10 @@ Written for whoever picks this up next — a new developer, or a new session. It
 covers what exists, the rules the code is built around, and the things that will
 waste your afternoon if nobody tells you.
 
-**Last updated:** 1 September 2026, after adding the stock movement summary —
-the first Tier 2 report (§13) — on top of the removal of threshold-based stock
-classification (§16), the dead-code audit and cleanup pass (§15), the Tier 1
-Reports module (§13) and the Dashboard rebuild (§12).
+**Last updated:** 2 September 2026, after moving airworthiness paperwork from
+the product to the batch it arrived on (§17), on top of the stock movement
+summary (§13), the removal of threshold-based stock classification (§16), the
+dead-code audit and cleanup pass (§15) and the Dashboard rebuild (§12).
 
 ---
 
@@ -382,12 +382,11 @@ The most logical next steps for the application:
    the helpers in `src/lib/cost-coverage.ts` and the dashboard's rules rather
    than subtracting by hand.
 2. **Certificate compliance register** — Tier 2's most valuable report for this
-   business, and the one no generic ERP ships. The data already supports it.
-3. **Certificates on lots** — the change §10 was designed to make additive, and
-   deferred twice now. Worth settling the business workflow first: whether the
-   release authority is the supplier, the lot, or both. Deciding it alongside
-   the register above would avoid two migrations over the same table.
-4. **Historical as-of valuation** — reconstructible, but needs explicit handling
+   business, and the one no generic ERP ships. Now unblocked: certificates live
+   on lots (§17), so the register can be the lot-grain document it needs to be
+   rather than a product-grain approximation. It still needs development data —
+   the seed's synthetic samples are a start, not a substitute.
+3. **Historical as-of valuation** — reconstructible, but needs explicit handling
    of the pre-costing migration boundary. See §13.
 
 ---
@@ -539,11 +538,17 @@ raise purchases. Archive, reactivate and delete are `requireRole("ADMIN")`.
 
 ### What was deliberately not built
 
-No link between certificates and suppliers. `Certificate` still points only at a
-product. The release authority for an airworthiness document is often the
-supplier, and that question interacts with the `Certificate.stockLotId` change
-§10 was designed to make additive — both are deferred until the certificate
-workflow is defined, and should be decided together.
+No link between certificates and suppliers, and none is needed. A certificate
+now belongs to a **lot** (§17), and a lot already carries its provenance, so the
+supplier follows the chain `StockLot → Purchase → Supplier` without a second
+foreign key. Lots with no purchase behind them — opening stock, adjustments,
+backfilled batches — correctly have no supplier at all.
+
+What is still absent is an **issuing authority**. The release authority on an
+airworthiness document is often the supplier but not always, and this model has
+no field for it: `certificateType` is free text and the lot's supplier is an
+acquisition fact, not an attestation. Anything reporting on this must say
+"Supplier (lot provenance)" and must not imply the supplier issued the document.
 
 ---
 
@@ -589,14 +594,19 @@ for their basis in the code as well (`allSalesAtListPrice`,
 
 ### Certificates on the dashboard
 
-Expired, expiring within thirty days, and missing — over **ACTIVE products
-only**, since a discontinued part is not being sold. A certificate with **no
-expiry date is valid**; a Certificate of Conformity typically never expires and
-flagging null expiries would alarm about a large share of legitimate documents.
-Superseded certificates are ignored.
+Expired, expiring within thirty days, and missing — counted over **open stock
+lots of ACTIVE products**. Per batch, not per product (§17): a part with two
+batches, one released under a valid form and one with nothing filed, is exactly
+one problem rather than one product's worth of doubt over both. Lots drawn to
+zero are excluded — there is nothing on the shelf left to be uncertain about,
+though their paperwork history survives.
 
-The products list has no certificate filter, so the affected products travel
-with the counts rather than linking to a view that cannot filter.
+A certificate with **no expiry date is valid**; a Certificate of Conformity
+typically never expires and flagging null expiries would alarm about a large
+share of legitimate documents. Superseded certificates are ignored.
+
+The products list has no certificate filter, so the affected lots travel with
+the counts rather than linking to a view that cannot filter.
 
 ### Retired stock is counted, and separated
 
@@ -1013,3 +1023,143 @@ in people's bookmarks. `parseProductListParams` discards what it does not
 recognise, so such a link now lands on an unfiltered list. Same for
 `?sort=minimumStock`, which falls back to sorting by name. Both are pinned by
 tests rather than left to chance.
+---
+
+## 17. Certificates belong to the batch, not the part
+
+The change §10 was shaped to make additive, finally made. `Certificate` now
+points at a `StockLot`.
+
+```
+Supplier → Purchase → StockLot → Certificate
+```
+
+### Why the product was the wrong owner
+
+A certificate covers the units that arrived. Two deliveries of one part number
+under two different releases were previously indistinguishable: the table
+allowed one current certificate per product, so a part whose paperwork read as
+valid could still have differently certified units sitting on the shelf. In an
+aviation parts business that is not a rough edge — it is the system stating
+something it cannot know.
+
+The schema comment on `Certificate` had described this as a known limitation
+since the certificates module was built, and `StockLot` was deliberately shaped
+so the fix would be additive: one lot per receipt line, never merged even when
+the product and unit cost match, precisely so there would be a batch for a
+document to point at.
+
+### The model
+
+`stockLotId` is **nullable, for history only**. Certificates filed before this
+change have no batch to point at, and inventing one would fabricate coverage
+nobody can evidence. They keep a null and stay readable as the record of a
+document that was filed against a part.
+
+A check constraint makes that a database fact rather than a convention:
+
+```sql
+CHECK (stock_lot_id IS NOT NULL OR superseded_at IS NOT NULL)
+```
+
+A current certificate must name a batch. A row with no batch is history by
+definition, so product-level coverage cannot come back through a side door.
+
+`productId` is **kept**, and the two are made to agree by the database rather
+than by application code — a composite foreign key onto a redundant unique key:
+
+```sql
+UNIQUE (id, product_id) ON stock_lots
+
+FOREIGN KEY (stock_lot_id, product_id)
+  REFERENCES stock_lots (id, product_id) ON DELETE RESTRICT
+```
+
+`MATCH SIMPLE` is the default and is what makes this work: a row with a null
+`stock_lot_id` is exempt, so the legacy rows pass while every lot-linked row is
+checked. Writing `MATCH FULL` would reject all of them. `product_id` therefore
+sits in two foreign keys — this one and the existing `CASCADE` to `products` —
+which is intentional and legal.
+
+Uniqueness moved with the ownership: `certificates_one_current_per_product` was
+dropped for `certificates_one_current_per_lot`. Two current certificates on one
+product are now perfectly legal, because they cover different units.
+
+### What the migration did, and deliberately did not
+
+`20260901160000_certificates_on_lots` adds the column, the composite key, the
+index and the check; retires any product-level certificate that was still
+current; and swaps the partial unique indexes. On the development database the
+retirement affected **zero rows** — both existing certificates were already
+superseded — but other environments are not assumed to match.
+
+**No backfill.** Both surviving rows belong to a product that happens to have
+exactly one lot, so an "obvious" association was available and was not taken.
+Which units a historical document covered cannot be established from the data,
+and a product whose only batch looks obvious is still a guess. They stay with a
+null lot, which is the truthful record.
+
+No stock quantity, ledger row, lot, consumption or cost value was read or
+written. Certificates never affected FIFO allocation, valuation or stock
+movement and still do not.
+
+### The workflow
+
+Create the product → receive or record stock → attach the certificate to the
+lot. Attachment is **always** a post-lot operation.
+
+Receiving is untouched and must stay that way. Goods routinely arrive before
+their paperwork, and a receipt that demanded a document would push people to
+record stock they hold as stock they do not. `receivePurchase` creates the lot;
+the document is filed against it afterwards, from the product detail page.
+
+Creation no longer accepts a certificate at all. Opening stock does produce a
+lot, so an exception was possible — and was rejected. A field that works only
+when the operator happens to enter opening stock is worse than a field that is
+not there.
+
+### Where it surfaces
+
+**Product detail** shows one panel per open batch, each with its own status
+badge and attach/replace/withdraw controls, plus a product-wide history card.
+That history is deliberately product-scoped rather than per lot, because it is
+also the only place the legacy null-lot rows appear.
+
+**Order lines** show the paperwork of the batches the order *actually drew
+from*, read through `StockLotConsumption` — so the question answered is "what
+covered the units that shipped", not "what covers this part number today". An
+order drawing across three batches lists three; picking one would be presenting
+a guess as the answer. Consumption quantities are signed, so a cancellation
+nets its draws to zero and the line correctly lists nothing.
+
+**Purchase lines** show the paperwork of the batch that delivery created, and
+nothing at all before receipt — there is no lot yet, and inventing coverage for
+goods that have not arrived is the same mistake as costing them early.
+
+**The dashboard** counts open lots, not products (§12).
+
+### What is still not modelled
+
+There is no issuing authority. See §11: the supplier is an acquisition fact
+derived from the lot's provenance, not an attestation, and lots with no purchase
+behind them have no supplier at all. Anything reporting on this must label the
+column **"Supplier (lot provenance)"**.
+
+One certificate covers one lot. A single document covering a delivery split
+across two purchase lines produces two lots and must be uploaded twice. That is
+consistent with "two deliveries are two batches with two sets of paperwork", but
+it is duplication, and a `CertificateLot` join table is the additive path if it
+ever becomes a real problem.
+
+The product detail lists **open** lots only, so a batch drawn to zero keeps its
+paperwork but has no UI reaching it. Order lines are the route to it, and the
+certificate compliance register will be the other.
+
+### The trap worth knowing
+
+`deleteProduct` now removes certificates **explicitly, before lots**. They used
+to go with the product through `onDelete: Cascade`, which was enough when they
+pointed only at products; the lot foreign key is `RESTRICT`, so leaving them to
+the cascade makes the lot delete fail on any product carrying paperwork. The
+ordering is certificates → consumptions → lots → transactions → product, and a
+test pins it.

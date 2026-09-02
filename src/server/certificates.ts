@@ -20,7 +20,7 @@ import { ACCEPTED_TYPE_LABELS, sniffFileType } from "@/server/storage/file-type"
  *
  *   **Nothing is overwritten.** Replacing a certificate retires the current row
  *   and inserts a new one. The old row keeps pointing at the old file, both
- *   survive, and the product's history reads as a sequence. An aviation part's
+ *   survive, and the batch's history reads as a sequence. An aviation part's
  *   paperwork is the sort of thing someone asks about years later, and "we
  *   replaced it" is not an answer.
  *
@@ -40,6 +40,14 @@ import { ACCEPTED_TYPE_LABELS, sniffFileType } from "@/server/storage/file-type"
 
 export interface CertificateView {
   id: string;
+  /** The product the batch belongs to. Carried so callers can revalidate. */
+  productId: string;
+  /**
+   * The batch this paperwork covers. Null only on legacy rows filed before
+   * certificates moved to lots — all of which are superseded, so a null here
+   * always reads as history rather than as coverage of anything.
+   */
+  stockLotId: string | null;
   certificateType: string;
   certificateNumber: string;
   issueDate: Date;
@@ -75,6 +83,8 @@ export function toCertificateView(
 ): CertificateView {
   return {
     id: certificate.id,
+    productId: certificate.productId,
+    stockLotId: certificate.stockLotId,
     certificateType: certificate.certificateType,
     certificateNumber: certificate.certificateNumber,
     issueDate: certificate.issueDate,
@@ -94,19 +104,57 @@ export function toCertificateView(
 // Reads
 // ---------------------------------------------------------------------------
 
-/** The product's current certificate, or null if it has none. */
-export async function getCurrentCertificate(
-  productId: string,
+/**
+ * The current certificate for one batch, or null if it has none.
+ *
+ * There is deliberately no product-level equivalent. A product does not have a
+ * certificate — its batches do, and they can disagree: one lot released under
+ * an 8130-3 that expires next month sitting beside another with no paperwork
+ * at all is an ordinary state, not an inconsistency. Any function answering
+ * "this product's certificate" would have to pick one of them, and every way
+ * of picking is a guess presented as a fact.
+ */
+export async function getLotCertificate(
+  stockLotId: string,
 ): Promise<CertificateView | null> {
   const certificate = await prisma.certificate.findFirst({
-    where: { productId, supersededAt: null },
+    where: { stockLotId, supersededAt: null },
     include: { uploadedByUser: { select: { name: true } } },
   });
 
   return certificate ? toCertificateView(certificate) : null;
 }
 
-/** Retired certificates, newest first. The audit trail. */
+/**
+ * Current certificates for several batches at once, keyed by lot id.
+ *
+ * One query for a page of lots rather than one per lot. Lots with no current
+ * paperwork are simply absent from the map, which is what MISSING means.
+ */
+export async function getLotCertificates(
+  stockLotIds: readonly string[],
+): Promise<Map<string, CertificateView>> {
+  if (stockLotIds.length === 0) return new Map();
+
+  const rows = await prisma.certificate.findMany({
+    where: { stockLotId: { in: [...stockLotIds] }, supersededAt: null },
+    include: { uploadedByUser: { select: { name: true } } },
+  });
+
+  return new Map(
+    rows.map((row) => [row.stockLotId!, toCertificateView(row)] as const),
+  );
+}
+
+/**
+ * Every retired certificate for a product, newest first — the audit trail.
+ *
+ * Scoped to the product rather than to a lot on purpose, so it still surfaces
+ * the legacy rows that were filed before certificates moved to batches. Those
+ * carry a null `stockLotId` and are readable here and nowhere else; dropping
+ * them from this view would quietly erase the only record that the documents
+ * were ever filed.
+ */
 export async function getCertificateHistory(
   productId: string,
 ): Promise<CertificateView[]> {
@@ -248,24 +296,12 @@ function isUniqueViolation(error: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Attaches a certificate to a product, retiring whatever it had before.
+ * A validated certificate whose file is already in storage but which has no
+ * database row yet.
  *
- * This is both "add" and "replace" — they differ only in whether there was
- * something to retire, which is not a distinction worth two functions or two
- * code paths that can drift apart.
- *
- * The sequence is chosen for what it leaves behind when it fails:
- *
- *   1. Authorise, validate metadata, validate and read the file.
- *   2. Write the file under a *new* key. Nothing existing is touched, so a
- *      failure here changes nothing at all.
- *   3. In one database transaction, retire the current row and insert the new
- *      one. Either both happen or neither does, so a product cannot briefly
- *      have no certificate or two.
- *   4. If the transaction fails, delete the file written in step 2.
- *
- * The old file is never deleted. It belongs to the retired row, which is the
- * history this table exists to keep.
+ * `data` is the row to insert, shaped to be handed straight to Prisma.
+ * `storageKey` repeats what is inside it so a caller that has to abandon the
+ * write can delete the orphaned file without unpacking `data` to find it.
  */
 export interface PreparedCertificate {
   storageKey: string;
@@ -284,13 +320,11 @@ export interface PreparedCertificate {
 /**
  * Validates a certificate and puts its file in storage, without writing a row.
  *
- * Split out so a certificate can be created in the *same* database transaction
- * as the product it belongs to. Creating the product first and attaching
- * afterwards would mean a failed upload leaves a product behind that the user
- * did not ask for, and a compensating delete to clean it up — a second write
- * that can itself fail. Preparing first inverts the problem into the one that
- * is actually harmless: if the transaction fails, an unreferenced file is left
- * in storage and the caller deletes it.
+ * Split out so the upload can fail before anything is committed. The file and
+ * the row cannot be one transaction — a filesystem does not roll back — so the
+ * file is written first and the caller deletes it if the transaction that
+ * follows does not commit. That leaves the harmless failure rather than the
+ * damaging one.
  *
  * The file is written here rather than after the row for the reason stated at
  * the top of this file: a row pointing at bytes that are not there is a broken
@@ -326,19 +360,23 @@ export async function prepareCertificate(input: {
 }
 
 /**
- * Attaches a certificate to a product, retiring whatever it had before.
+ * Attaches a certificate to a stock lot, retiring whatever that lot had before.
  *
  * This is both "add" and "replace" — they differ only in whether there was
  * something to retire, which is not a distinction worth two functions or two
  * code paths that can drift apart.
  *
+ * **The lot is the subject, not the product.** Paperwork covers the units that
+ * arrived, so attaching it to a batch is the only way two deliveries of one
+ * part number under two different releases can both be recorded truthfully.
+ *
  * The sequence is chosen for what it leaves behind when it fails:
  *
- *   1. Authorise, validate metadata, validate and read the file.
+ *   1. Authorise, find the lot, validate metadata, validate and read the file.
  *   2. Write the file under a *new* key. Nothing existing is touched, so a
  *      failure here changes nothing at all.
- *   3. In one database transaction, retire the current row and insert the new
- *      one. Either both happen or neither does, so a product cannot briefly
+ *   3. In one database transaction, retire the lot's current row and insert the
+ *      new one. Either both happen or neither does, so a lot cannot briefly
  *      have no certificate or two.
  *   4. If the transaction fails, delete the file written in step 2.
  *
@@ -346,17 +384,23 @@ export async function prepareCertificate(input: {
  * history this table exists to keep.
  */
 export async function attachCertificate(params: {
-  productId: string;
+  stockLotId: string;
   metadata: unknown;
   file: unknown;
 }): Promise<CertificateView> {
   const user = await requireRole("ADMIN");
 
-  const product = await prisma.product.findUnique({
-    where: { id: params.productId },
-    select: { id: true },
+  /*
+   * The lot decides the product; the caller does not get to supply both. A
+   * shape that accepted the pair would make a mismatched one expressible, and
+   * although the composite foreign key would refuse it, the better place to
+   * stop that is here.
+   */
+  const lot = await prisma.stockLot.findUnique({
+    where: { id: params.stockLotId },
+    select: { id: true, productId: true },
   });
-  if (!product) throw new NotFoundError("Product");
+  if (!lot) throw new NotFoundError("Stock lot");
 
   const prepared = await prepareCertificate({
     metadata: params.metadata,
@@ -365,18 +409,19 @@ export async function attachCertificate(params: {
 
   try {
     const created = await prisma.$transaction(async (tx) => {
-      // Retire whatever is current. `updateMany` rather than find-then-update:
-      // one statement, and a no-op when there is nothing to retire, which is
-      // the "add" case.
+      // Retire whatever is current *for this lot*. `updateMany` rather than
+      // find-then-update: one statement, and a no-op when there is nothing to
+      // retire, which is the "add" case.
       await tx.certificate.updateMany({
-        where: { productId: params.productId, supersededAt: null },
+        where: { stockLotId: lot.id, supersededAt: null },
         data: { supersededAt: new Date() },
       });
 
       return tx.certificate.create({
         data: {
           ...prepared.data,
-          productId: params.productId,
+          stockLotId: lot.id,
+          productId: lot.productId,
           // From the session. Not a parameter, so no caller can attribute an
           // upload to somebody else.
           uploadedBy: user.id,
@@ -393,11 +438,11 @@ export async function attachCertificate(params: {
     await fileStorage.delete(prepared.storageKey).catch(() => {});
 
     if (isUniqueViolation(error)) {
-      // The partial unique index caught two uploads racing for the same
-      // product. Neither is wrong; one simply has to go second.
+      // The partial unique index caught two uploads racing for the same lot.
+      // Neither is wrong; one simply has to go second.
       throw new AppError(
         "CONFLICT",
-        "Someone else updated this product's certificate at the same time. Reload and try again.",
+        "Someone else updated this lot's certificate at the same time. Reload and try again.",
       );
     }
 
@@ -451,10 +496,10 @@ export async function updateCertificateMetadata(
 }
 
 /**
- * Withdraws a product's current certificate.
+ * Withdraws a lot's current certificate.
  *
  * A retirement, not a deletion. The row is marked superseded and the file stays
- * where it is, so the product reads as having no certificate — status MISSING,
+ * where it is, so the batch reads as having no certificate — status MISSING,
  * nothing to view or download — while the record of the document that once
  * covered it survives in the history.
  *
@@ -466,7 +511,11 @@ export async function updateCertificateMetadata(
  */
 export async function removeCertificate(
   certificateId: string,
-): Promise<{ productId: string; certificateNumber: string }> {
+): Promise<{
+  productId: string;
+  stockLotId: string | null;
+  certificateNumber: string;
+}> {
   await requireRole("ADMIN");
 
   const certificate = await prisma.certificate.findUnique({
@@ -474,6 +523,7 @@ export async function removeCertificate(
     select: {
       id: true,
       productId: true,
+      stockLotId: true,
       certificateNumber: true,
       supersededAt: true,
     },
@@ -495,6 +545,7 @@ export async function removeCertificate(
 
   return {
     productId: certificate.productId,
+    stockLotId: certificate.stockLotId,
     certificateNumber: certificate.certificateNumber,
   };
 }

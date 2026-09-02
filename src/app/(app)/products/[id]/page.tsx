@@ -10,7 +10,10 @@ import {
   Warehouse,
 } from "lucide-react";
 
-import { CertificatePanel } from "@/app/(app)/products/[id]/certificate-panel";
+import {
+  CertificateHistoryCard,
+  LotCertificatePanel,
+} from "@/app/(app)/products/[id]/certificate-panel";
 import { ProductDetailActions } from "@/app/(app)/products/[id]/product-detail-actions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -154,33 +157,61 @@ export default async function ProductDetailPage({
       <StockSummary product={product} />
 
       {/*
+        One panel per open batch, because that is where paperwork lives now.
+        Two lots of the same part can be in different states, and showing them
+        side by side is the only truthful way to say so.
+
         Dates are handed over as `YYYY-MM-DD` strings rather than Date objects.
         The panel feeds them straight back into `<input type="date">`, which
         accepts exactly that format and nothing else, and the conversion belongs
         on the server where the value is already known to be a UTC calendar day.
       */}
-      <CertificatePanel
-        productId={product.id}
-        status={product.certificateStatus}
-        canManage={canManage}
-        certificate={
-          product.certificate
-            ? {
-                id: product.certificate.id,
-                certificateType: product.certificate.certificateType,
-                certificateNumber: product.certificate.certificateNumber,
-                issueDate: isoDay(product.certificate.issueDate),
-                expiryDate: product.certificate.expiryDate
-                  ? isoDay(product.certificate.expiryDate)
-                  : null,
-                fileName: product.certificate.fileName,
-                fileSize: product.certificate.fileSize,
-                fileUrl: product.certificate.fileUrl,
-                uploadedByName: product.certificate.uploadedByName,
-                createdAt: product.certificate.createdAt.toISOString(),
+      {product.lots.length > 0 ? (
+        <div className="flex flex-col gap-4">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight">
+              Certification by batch
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Airworthiness and conformity paperwork covers the units that
+              arrived, not the catalogue entry. Each batch on the shelf carries
+              its own.
+            </p>
+          </div>
+
+          {product.lots.map((lot) => (
+            <LotCertificatePanel
+              key={lot.id}
+              stockLotId={lot.id}
+              receivedAt={lot.receivedAt}
+              quantityRemaining={lot.quantityRemaining}
+              purchaseNumber={lot.purchaseNumber}
+              status={lot.certificateStatus}
+              canManage={canManage}
+              certificate={
+                lot.certificate
+                  ? {
+                      id: lot.certificate.id,
+                      certificateType: lot.certificate.certificateType,
+                      certificateNumber: lot.certificate.certificateNumber,
+                      issueDate: isoDay(lot.certificate.issueDate),
+                      expiryDate: lot.certificate.expiryDate
+                        ? isoDay(lot.certificate.expiryDate)
+                        : null,
+                      fileName: lot.certificate.fileName,
+                      fileSize: lot.certificate.fileSize,
+                      fileUrl: lot.certificate.fileUrl,
+                      uploadedByName: lot.certificate.uploadedByName,
+                      createdAt: lot.certificate.createdAt.toISOString(),
+                    }
+                  : null
               }
-            : null
-        }
+            />
+          ))}
+        </div>
+      ) : null}
+
+      <CertificateHistoryCard
         history={product.certificateHistory.map((entry) => ({
           id: entry.id,
           certificateType: entry.certificateType,

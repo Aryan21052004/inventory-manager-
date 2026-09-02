@@ -655,6 +655,18 @@ model StockLot {
 
   consumptions StockLotConsumption[]
 
+  /// The airworthiness paperwork filed against this batch. A lot may have any
+  /// number over time and at most one current — the same supersession
+  /// mechanism certificates have always used, re-keyed from the product to the
+  /// batch, because paperwork covers the units that arrived rather than the
+  /// catalogue entry they were booked against.
+  certificates Certificate[]
+
+  /// The target of the composite foreign key on `certificates`, which is what
+  /// stops a certificate naming one product while its lot names another.
+  /// Redundant on its own — `id` is already unique — and present only so the
+  /// pair can be referenced.
+  @@unique([id, productId])
   /// The FIFO scan: a product's open lots, oldest first. `id` breaks ties so
   /// the order is total — two lots received in the same millisecond must still
   /// be consumed in a deterministic sequence, or two concurrent orders could
@@ -801,8 +813,31 @@ model Certificate {
   /// only products that can be deleted are ones that never traded. The stored
   /// file is removed explicitly by `deleteProduct`, because a foreign key
   /// cannot reach into a filesystem or a bucket.
+  ///
+  /// Kept alongside `stockLotId` rather than derived from it, for three
+  /// reasons: legacy rows have no lot to derive it from; the delete path and
+  /// the file cleanup both key on it; and holding both lets the database
+  /// enforce that they agree, through a composite foreign key onto
+  /// `stock_lots (id, product_id)` written by hand in the migration.
   productId String  @map("product_id")
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  /// The batch this paperwork covers.
+  ///
+  /// **Nullable for history only.** Certificates filed before the model moved
+  /// to lots have no batch to point at, and inventing one would fabricate
+  /// coverage nobody can evidence — so they keep a null here and stay readable
+  /// as the record of a document that was filed against a part. A check
+  /// constraint requires every row with a null lot to be superseded, which
+  /// makes "product-level certificates are history" a fact the database
+  /// enforces rather than a convention the code remembers.
+  ///
+  /// Restrict, not Cascade: a lot is only ever deleted for a product that has
+  /// never traded, and the delete path removes the certificates first so the
+  /// files go with them. Cascading here would let a lot delete quietly destroy
+  /// paperwork history.
+  stockLotId String?   @map("stock_lot_id")
+  stockLot   StockLot? @relation(fields: [stockLotId, productId], references: [id, productId], onDelete: Restrict, onUpdate: Cascade)
 
   /// Who uploaded it, resolved from the Clerk session on the server. Nulled
   /// rather than cascaded if the user is later removed — the upload still
@@ -811,6 +846,7 @@ model Certificate {
   uploadedByUser User?   @relation(fields: [uploadedBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@index([productId, supersededAt])
+  @@index([stockLotId, supersededAt])
   @@index([expiryDate])
   @@index([certificateType])
   @@index([uploadedBy])

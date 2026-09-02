@@ -28,6 +28,7 @@ import {
   type OrderFieldErrors,
 } from "@/lib/validation/order";
 import { requireUser } from "@/server/auth";
+import { getLotCertificates } from "@/server/certificates";
 import {
   allocateFifo,
   applyStockMovement,
@@ -115,10 +116,26 @@ export interface OrderDetailLine {
   /** Stock on hand now, for context — not what was deducted. */
   currentStock: number;
   /**
-   * The product's current certificate, referenced rather than copied. Orders
-   * never own certificate data; this is a read of the product's own paperwork
-   * at the moment the page is rendered.
+   * The paperwork covering the batches this line actually drew from.
+   *
+   * Read through `StockLotConsumption`, which records exactly which lots the
+   * confirmation consumed — so this answers "what covered the units that
+   * shipped" rather than "what covers this part number today". An order can
+   * draw across several batches, and those batches can be in different
+   * certification states; all of them are listed rather than one being picked.
+   *
+   * Empty before confirmation, because nothing has been drawn yet.
    */
+  lotCertificates: ConsumedLotCertificate[];
+}
+
+/** One batch an order line drew from, and the paperwork covering it. */
+export interface ConsumedLotCertificate {
+  lotId: string;
+  /** Net units this order took from the batch, after any cancellation returns. */
+  quantity: number;
+  /** The purchase the batch arrived on, when there was one. */
+  purchaseNumber: string | null;
   certificateType: string | null;
   certificateNumber: string | null;
   certificateStatus: CertificateStatus;
@@ -497,6 +514,95 @@ export async function loadOrderProducts(
 }
 
 /**
+ * The batches an order actually drew from, and the paperwork covering them.
+ *
+ * `StockLotConsumption` records which lots a confirmation consumed, so this is
+ * a fact about the units that shipped rather than a guess from the product's
+ * catalogue entry. That distinction is the point: a product no longer has "a
+ * certificate", its batches do, and an order that drew across three batches
+ * drew across three sets of paperwork.
+ *
+ * Consumption quantities are signed — a cancellation writes negative rows
+ * against the draws it undoes — so they are summed and a net of zero is
+ * dropped. A fully cancelled order therefore lists nothing, which is correct:
+ * it consumed nothing in the end.
+ *
+ * Read-only. Nothing here touches a lot, a consumption, a quantity or a cost.
+ */
+async function loadConsumedLotCertificates(
+  orderId: string,
+): Promise<Map<string, ConsumedLotCertificate[]>> {
+  const rows = await prisma.$queryRaw<
+    {
+      lot_id: string;
+      product_id: string;
+      quantity: number;
+      source_type: string;
+      source_id: string | null;
+    }[]
+  >`
+    SELECT
+      c.lot_id,
+      l.product_id,
+      SUM(c.quantity)::int AS quantity,
+      l.source_type::text  AS source_type,
+      l.source_id
+    FROM stock_lot_consumptions c
+    JOIN stock_transactions st ON st.id = c.stock_transaction_id
+    JOIN stock_lots l          ON l.id = c.lot_id
+    WHERE st.reference_type = 'ORDER'
+      AND st.reference_id = ${orderId}
+    GROUP BY c.lot_id, l.product_id, l.source_type, l.source_id
+    HAVING SUM(c.quantity) <> 0
+    ORDER BY l.product_id, c.lot_id
+  `;
+
+  if (rows.length === 0) return new Map();
+
+  const [certificates, purchaseNumbers] = await Promise.all([
+    getLotCertificates(rows.map((row) => row.lot_id)),
+    (async () => {
+      const ids = [
+        ...new Set(
+          rows
+            .filter((row) => row.source_type === "PURCHASE" && row.source_id)
+            .map((row) => row.source_id!),
+        ),
+      ];
+      if (ids.length === 0) return new Map<string, string>();
+
+      const purchases = await prisma.purchase.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, purchaseNumber: true },
+      });
+      return new Map(purchases.map((p) => [p.id, p.purchaseNumber] as const));
+    })(),
+  ]);
+
+  const byProduct = new Map<string, ConsumedLotCertificate[]>();
+
+  for (const row of rows) {
+    const certificate = certificates.get(row.lot_id) ?? null;
+    const entry: ConsumedLotCertificate = {
+      lotId: row.lot_id,
+      quantity: row.quantity,
+      purchaseNumber: row.source_id
+        ? (purchaseNumbers.get(row.source_id) ?? null)
+        : null,
+      certificateType: certificate?.certificateType ?? null,
+      certificateNumber: certificate?.certificateNumber ?? null,
+      certificateStatus: certificateStatus(certificate),
+    };
+
+    const list = byProduct.get(row.product_id);
+    if (list) list.push(entry);
+    else byProduct.set(row.product_id, [entry]);
+  }
+
+  return byProduct;
+}
+
+/**
  * The inventory an order actually moved, read from the ledger.
  *
  * Deliberately not derived from the order's status. The stock transactions are
@@ -563,22 +669,6 @@ export async function getOrderDetail(
                 name: true,
                 sku: true,
                 stockQuantity: true,
-                /*
-                 * The product's *current* certificate, read through the
-                 * relation. Nothing is copied onto the order: an order
-                 * references its products, and a product owns its paperwork.
-                 * Duplicating it here would mean two records of one document
-                 * that drift the moment the certificate is replaced.
-                 */
-                certificates: {
-                  where: { supersededAt: null },
-                  select: {
-                    certificateType: true,
-                    certificateNumber: true,
-                    expiryDate: true,
-                  },
-                  take: 1,
-                },
               },
             },
           },
@@ -588,8 +678,9 @@ export async function getOrderDetail(
 
     if (!order) return { ok: true, data: null };
 
-    const [impact, customerHistory] = await Promise.all([
+    const [impact, consumedLots, customerHistory] = await Promise.all([
       loadInventoryImpact(id),
+      loadConsumedLotCertificates(id),
       prisma.order.findMany({
         where: { customerId: order.customerId, id: { not: id } },
         orderBy: { createdAt: "desc" },
@@ -624,25 +715,19 @@ export async function getOrderDetail(
         customerPhone: order.customer.phone,
         customerAddress: order.customer.address,
         createdByName: order.createdByUser?.name ?? null,
-        lines: order.items.map((item) => {
-          const certificate = item.product.certificates[0] ?? null;
-
-          return {
-            id: item.id,
-            productId: item.product.id,
-            productName: item.product.name,
-            sku: item.product.sku,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice.toString(),
-            total: item.total.toString(),
-            costTotal: item.costTotal?.toString() ?? null,
-            costedQuantity: item.costedQuantity,
-            currentStock: item.product.stockQuantity,
-            certificateType: certificate?.certificateType ?? null,
-            certificateNumber: certificate?.certificateNumber ?? null,
-            certificateStatus: certificateStatus(certificate),
-          };
-        }),
+        lines: order.items.map((item) => ({
+          id: item.id,
+          productId: item.product.id,
+          productName: item.product.name,
+          sku: item.product.sku,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice.toString(),
+          total: item.total.toString(),
+          costTotal: item.costTotal?.toString() ?? null,
+          costedQuantity: item.costedQuantity,
+          currentStock: item.product.stockQuantity,
+          lotCertificates: consumedLots.get(item.product.id) ?? [],
+        })),
         impact,
         customerHistory: customerHistory.map((row) => ({
           id: row.id,

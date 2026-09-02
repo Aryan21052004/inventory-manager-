@@ -192,21 +192,45 @@ export default async function OrderDetailPage({
 
                     <TableCell className="hidden md:table-cell">
                       {/*
-                        Referenced, not copied. This reads the product's current
-                        certificate — if it is replaced tomorrow, this page shows
-                        the new one, because the order never owned a copy.
+                        The batches this line actually drew from, read through
+                        StockLotConsumption. Referenced, not copied: if a lot's
+                        paperwork is replaced tomorrow this page shows the new
+                        document, because the order never owned a copy.
+
+                        An order can draw across several batches in different
+                        states. All of them are listed — picking one would be
+                        presenting a guess as the answer.
                       */}
-                      <div className="flex flex-col gap-1">
-                        <CertificateStatusBadge status={line.certificateStatus} />
-                        {line.certificateType ? (
-                          <span className="text-xs text-muted-foreground">
-                            {line.certificateType}
-                            {line.certificateNumber
-                              ? ` · ${line.certificateNumber}`
-                              : ""}
-                          </span>
-                        ) : null}
-                      </div>
+                      {line.lotCertificates.length === 0 ? (
+                        <span className="text-xs text-muted-foreground">
+                          Not yet drawn from stock
+                        </span>
+                      ) : (
+                        <div className="flex flex-col gap-2">
+                          {line.lotCertificates.map((lot) => (
+                            <div key={lot.lotId} className="flex flex-col gap-1">
+                              <CertificateStatusBadge
+                                status={lot.certificateStatus}
+                              />
+                              <span className="text-xs text-muted-foreground">
+                                {formatNumber(lot.quantity)}{" "}
+                                {lot.quantity === 1 ? "unit" : "units"}
+                                {lot.purchaseNumber
+                                  ? ` · ${lot.purchaseNumber}`
+                                  : ""}
+                              </span>
+                              {lot.certificateType ? (
+                                <span className="text-xs text-muted-foreground">
+                                  {lot.certificateType}
+                                  {lot.certificateNumber
+                                    ? ` · ${lot.certificateNumber}`
+                                    : ""}
+                                </span>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </TableCell>
 
                     <TableCell className="tabular text-right font-medium">

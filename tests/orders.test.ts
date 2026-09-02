@@ -17,10 +17,16 @@ import {
   updateOrder,
 } from "@/server/orders";
 import { attachCertificate } from "@/server/certificates";
+import { createPurchase, receivePurchase } from "@/server/purchases";
 import { DEFAULT_ORDER_PARAMS } from "@/lib/order-query";
 
 import { signOut } from "./clerk-mock";
-import { resetDatabase, seedProduct, signInWithRole } from "./database";
+import {
+  createSupplier,
+  resetDatabase,
+  seedProduct,
+  signInWithRole,
+} from "./database";
 
 /**
  * Orders, and the inventory they move.
@@ -923,11 +929,20 @@ describe("validation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 14 — certificates, referenced not copied
+// Test 14 — certificates, from the batches the order actually drew from
 // ---------------------------------------------------------------------------
 
 describe("certificate display", () => {
-  it("shows the product's current certificate on the order without copying it", async () => {
+  /** The batch a seeded product holds — what paperwork attaches to. */
+  async function lotOf(productId: string): Promise<string> {
+    const lot = await prisma.stockLot.findFirstOrThrow({
+      where: { productId },
+      select: { id: true },
+    });
+    return lot.id;
+  }
+
+  it("shows the paperwork of the batch the order consumed, without copying it", async () => {
     await signInWithRole("ADMIN");
     const customer = await createCustomer();
     const part = await seedProduct({
@@ -937,7 +952,7 @@ describe("certificate display", () => {
     });
 
     await attachCertificate({
-      productId: part.id,
+      stockLotId: await lotOf(part.id),
       metadata: {
         certificateType: "FAA 8130-3",
         certificateNumber: "8130-9911",
@@ -955,24 +970,34 @@ describe("certificate display", () => {
       { productId: part.id, quantity: 5 },
     ]);
 
+    // A draft has drawn nothing, so there is no batch to report yet.
+    const draft = await getOrderDetail(order.id);
+    if (!draft.ok || !draft.data) throw new Error("expected an order");
+    expect(draft.data.lines[0]!.lotCertificates).toHaveLength(0);
+
+    await confirmOrder(order.id);
+
     const result = await getOrderDetail(order.id);
     if (!result.ok || !result.data) throw new Error("expected an order");
 
     const line = result.data.lines[0]!;
     expect(line.sku).toBe("ABC-123");
     expect(line.quantity).toBe(5);
-    expect(line.certificateType).toBe("FAA 8130-3");
-    expect(line.certificateNumber).toBe("8130-9911");
-    expect(line.certificateStatus).toBe("VALID");
+    expect(line.lotCertificates).toHaveLength(1);
+    expect(line.lotCertificates[0]!.quantity).toBe(5);
+    expect(line.lotCertificates[0]!.certificateType).toBe("FAA 8130-3");
+    expect(line.lotCertificates[0]!.certificateNumber).toBe("8130-9911");
+    expect(line.lotCertificates[0]!.certificateStatus).toBe("VALID");
 
     // Referenced, not duplicated: still exactly one certificate row, still
-    // belonging to the product.
+    // belonging to the batch it was filed against.
     const certificates = await prisma.certificate.findMany();
     expect(certificates).toHaveLength(1);
     expect(certificates[0]!.productId).toBe(part.id);
+    expect(certificates[0]!.stockLotId).toBe(await lotOf(part.id));
   });
 
-  it("reports MISSING for a product with no certificate", async () => {
+  it("reports MISSING for a consumed batch with no certificate", async () => {
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const part = await product("NOCERT-1", 50);
@@ -980,12 +1005,15 @@ describe("certificate display", () => {
     const order = await draftOrder(customer.id, [
       { productId: part.id, quantity: 1 },
     ]);
+    await confirmOrder(order.id);
 
     const result = await getOrderDetail(order.id);
     if (!result.ok || !result.data) throw new Error("expected an order");
 
-    expect(result.data.lines[0]!.certificateStatus).toBe("MISSING");
-    expect(result.data.lines[0]!.certificateType).toBeNull();
+    const line = result.data.lines[0]!;
+    expect(line.lotCertificates).toHaveLength(1);
+    expect(line.lotCertificates[0]!.certificateStatus).toBe("MISSING");
+    expect(line.lotCertificates[0]!.certificateType).toBeNull();
   });
 
   it("does not touch certificates when an order is confirmed", async () => {
@@ -997,7 +1025,7 @@ describe("certificate display", () => {
     });
 
     await attachCertificate({
-      productId: part.id,
+      stockLotId: await lotOf(part.id),
       metadata: {
         certificateType: "EASA Form 1",
         certificateNumber: "E-1",
@@ -1022,6 +1050,178 @@ describe("certificate display", () => {
     const after = await prisma.certificate.findFirstOrThrow();
     expect(after).toEqual(before);
     expect(await prisma.certificate.count()).toBe(1);
+  });
+
+  /** A second batch of an existing product, delivered by a supplier. */
+  async function secondLot(productId: string, quantity: number) {
+    const supplier = await createSupplier(`Source ${productId.slice(-6)}`);
+    const purchase = await createPurchase({
+      supplierId: supplier.id,
+      items: [{ productId, quantity, unitCost: "10.00" }],
+    });
+    await receivePurchase(purchase.id);
+
+    const lot = await prisma.stockLot.findFirstOrThrow({
+      where: { sourceType: "PURCHASE", sourceId: purchase.id },
+      select: { id: true },
+    });
+    return lot.id;
+  }
+
+  /** Files a document against one batch. */
+  async function attachTo(
+    stockLotId: string,
+    metadata: {
+      certificateType: string;
+      certificateNumber: string;
+      issueDate: string;
+      expiryDate: string;
+    },
+  ) {
+    await attachCertificate({
+      stockLotId,
+      metadata,
+      file: new File(
+        [new Uint8Array(Buffer.from("%PDF-1.7\ncert\n"))],
+        "cert.pdf",
+        { type: "application/pdf" },
+      ),
+    });
+  }
+
+  it("lists every batch an order drew from, not one of them", async () => {
+    /*
+     * The case the whole model exists for. An order that crosses a batch
+     * boundary shipped units under two different documents in two different
+     * states, and answering "what covered this line" with either one alone
+     * would be presenting a guess as the answer.
+     */
+    await signInWithRole("ADMIN");
+    const customer = await createCustomer();
+    const part = await seedProduct({
+      sku: "MULTI-LOT",
+      name: "Cross-Batch Actuator",
+      stockQuantity: 4,
+      sellingPrice: "10.00",
+    });
+
+    const openingLot = await prisma.stockLot
+      .findFirstOrThrow({ where: { productId: part.id }, select: { id: true } })
+      .then((lot) => lot.id);
+    const deliveredLot = await secondLot(part.id, 10);
+
+    // Deliberately different documents in deliberately different states.
+    await attachTo(openingLot, {
+      certificateType: "FAA 8130-3",
+      certificateNumber: "LOT-A-8130",
+      issueDate: "2026-01-01",
+      expiryDate: "",
+    });
+    await attachTo(deliveredLot, {
+      certificateType: "EASA Form 1",
+      certificateNumber: "LOT-B-E1",
+      issueDate: "2020-01-01",
+      expiryDate: "2020-06-01",
+    });
+
+    // 9 units against 4 + 10: FIFO empties the older batch and dips into the
+    // newer one, so the line spans both.
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 9 },
+    ]);
+    await confirmOrder(order.id);
+
+    const result = await getOrderDetail(order.id);
+    if (!result.ok || !result.data) throw new Error("expected an order");
+
+    const line = result.data.lines[0]!;
+    expect(line.lotCertificates).toHaveLength(2);
+
+    const byLot = new Map(line.lotCertificates.map((lot) => [lot.lotId, lot]));
+    expect(byLot.size).toBe(2);
+
+    // Each batch reports the units *it* gave up, and they add to the line.
+    expect(byLot.get(openingLot)!.quantity).toBe(4);
+    expect(byLot.get(deliveredLot)!.quantity).toBe(5);
+    expect(
+      line.lotCertificates.reduce((total, lot) => total + lot.quantity, 0),
+    ).toBe(9);
+
+    // Distinguishable: different documents, different states, and only the
+    // delivered batch has a purchase behind it.
+    expect(byLot.get(openingLot)!.certificateType).toBe("FAA 8130-3");
+    expect(byLot.get(openingLot)!.certificateNumber).toBe("LOT-A-8130");
+    expect(byLot.get(openingLot)!.certificateStatus).toBe("VALID");
+    expect(byLot.get(openingLot)!.purchaseNumber).toBeNull();
+
+    expect(byLot.get(deliveredLot)!.certificateType).toBe("EASA Form 1");
+    expect(byLot.get(deliveredLot)!.certificateNumber).toBe("LOT-B-E1");
+    expect(byLot.get(deliveredLot)!.certificateStatus).toBe("EXPIRED");
+    expect(byLot.get(deliveredLot)!.purchaseNumber).not.toBeNull();
+
+    // Nothing was collapsed to a single representative document.
+    expect(
+      new Set(line.lotCertificates.map((lot) => lot.certificateNumber)),
+    ).toEqual(new Set(["LOT-A-8130", "LOT-B-E1"]));
+  });
+
+  it("stops reporting a batch once a cancellation nets its draws to zero", async () => {
+    /*
+     * Consumption quantities are signed, so a cancellation does not delete the
+     * draw — it writes the opposite of it. The line must read the sum, not the
+     * presence of rows, or a cancelled order would go on claiming it consumed
+     * units it gave back.
+     */
+    await signInWithRole("ADMIN");
+    const customer = await createCustomer();
+    const part = await seedProduct({
+      sku: "CANCEL-NETS-TO-ZERO",
+      stockQuantity: 20,
+      sellingPrice: "10.00",
+    });
+
+    const lot = await prisma.stockLot
+      .findFirstOrThrow({ where: { productId: part.id }, select: { id: true } })
+      .then((row) => row.id);
+
+    await attachTo(lot, {
+      certificateType: "Certificate of Conformity",
+      certificateNumber: "CANCELLED-COC",
+      issueDate: "2026-01-01",
+      expiryDate: "",
+    });
+
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 6 },
+    ]);
+    await confirmOrder(order.id);
+
+    // While it holds stock, the batch is reported with the units it gave up.
+    const confirmed = await getOrderDetail(order.id);
+    if (!confirmed.ok || !confirmed.data) throw new Error("expected an order");
+    expect(confirmed.data.lines[0]!.lotCertificates).toHaveLength(1);
+    expect(confirmed.data.lines[0]!.lotCertificates[0]!.quantity).toBe(6);
+
+    await cancelOrder(order.id);
+
+    const cancelled = await getOrderDetail(order.id);
+    if (!cancelled.ok || !cancelled.data) throw new Error("expected an order");
+    expect(cancelled.data.lines[0]!.lotCertificates).toHaveLength(0);
+
+    // Both rows survive in the ledger — the draw and its reversal. They net.
+    const consumptions = await prisma.stockLotConsumption.findMany({
+      where: { lotId: lot },
+      select: { quantity: true },
+    });
+    expect(consumptions).toHaveLength(2);
+    expect(consumptions.reduce((total, row) => total + row.quantity, 0)).toBe(0);
+
+    // The paperwork is untouched. It is simply not covering anything shipped.
+    expect(
+      await prisma.certificate.count({
+        where: { stockLotId: lot, supersededAt: null },
+      }),
+    ).toBe(1);
   });
 });
 
