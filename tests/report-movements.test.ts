@@ -186,6 +186,8 @@ describe("movement direction", () => {
       productId: a.id,
       quantity: "3",
       direction: "INCREASE",
+      costBasis: "UNKNOWN",
+      unknownCostReason: "No paperwork with them",
       reason: "Units found behind the rack",
     });
 

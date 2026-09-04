@@ -11,9 +11,22 @@
  *
  *   DRAFT      nothing
  *   PENDING    nothing
- *   CONFIRMED  deducts — this is the moment goods are committed
- *   COMPLETED  nothing; the stock already left on CONFIRMED
+ *   CONFIRMED  deducts what is on hand — the moment the sale is committed
+ *   COMPLETED  nothing; the stock left on CONFIRMED, or has yet to
  *   CANCELLED  restores, but only what was actually deducted
+ *
+ * "What is on hand" rather than "the order quantity" is the recent change and
+ * the one worth reading twice. The business sells parts it does not yet hold,
+ * so a shortfall is no longer a reason to refuse a sale: confirmation takes
+ * the units that exist, records the rest as outstanding on the line, and never
+ * drives inventory below zero. The outstanding units are cleared afterwards by
+ * an explicit fulfilment, which is not a status change at all — see
+ * `fulfilOrder` in src/server/orders.ts.
+ *
+ * That is why there is no sixth status. "Partially fulfilled" is not a state
+ * of the document, it is a fact about its lines, and putting it in this enum
+ * would mean the same order had two places to disagree with itself about how
+ * much had shipped.
  */
 
 export const ORDER_STATUSES = [
@@ -48,9 +61,11 @@ export function isOrderStatus(value: unknown): value is OrderStatus {
  *
  *   COMPLETED → CANCELLED. The goods have shipped. Putting the units back
  *   because a status changed would invent inventory that is physically
- *   somewhere else; a return is a real workflow with a receipt and an
- *   inspection, and this module does not implement one. It is refused with a
- *   message that says so rather than silently allowed.
+ *   somewhere else. A return is a real workflow with a receipt and an
+ *   inspection behind it, and this application does not model one — that is a
+ *   scope decision recorded in HANDOVER §8, not a gap awaiting work, so this
+ *   refusal is permanent rather than a placeholder. It is refused with a
+ *   message that says what to do instead.
  */
 const TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
   DRAFT: ["PENDING", "CONFIRMED", "CANCELLED"],
@@ -90,7 +105,7 @@ export function transitionRefusal(
   }
 
   if (from === "COMPLETED" && to === "CANCELLED") {
-    return "This order is already completed, so its goods have shipped. Cancelling it would put units back into stock that are no longer on the shelf — record a return instead, once that workflow exists.";
+    return "This order is already completed, so its goods have shipped. Cancelling it would put units back into stock that are no longer on the shelf. If stock has physically come back, record it as a stock adjustment so the batch and its cost are stated explicitly.";
   }
 
   if (from === "COMPLETED") {
@@ -100,8 +115,42 @@ export function transitionRefusal(
   return `An order cannot go from ${orderStatusLabel(from).toLowerCase()} to ${orderStatusLabel(to).toLowerCase()}.`;
 }
 
-/** Whether an order in this status is holding stock it has taken out. */
-export function holdsDeductedStock(status: OrderStatus): boolean {
+/**
+ * Whether an order in this status *may* be holding stock it took out.
+ *
+ * The hedge in the name is the point. An order is confirmed when the sale is
+ * committed, not when the warehouse could fill it: confirming an order for 5
+ * units against a shelf of 3 deducts 3 and leaves 2 outstanding, and confirming
+ * one against an empty shelf deducts nothing at all. So a CONFIRMED order may
+ * hold everything, some of it, or none of it, and this function cannot tell
+ * which — only the stock ledger can.
+ *
+ * It is therefore a cheap early exit and never a source of truth. `cancelOrder`
+ * uses it to skip the reversal work entirely for a draft, then reads the ledger
+ * to decide what actually comes back. Anything that needs to know how much
+ * stock an order is holding must read `OrderItem.fulfilledQuantity` or the
+ * STOCK_OUT rows, not this.
+ */
+export function mayHoldDeductedStock(status: OrderStatus): boolean {
+  return status === "CONFIRMED" || status === "COMPLETED";
+}
+
+/**
+ * Whether outstanding quantity on an order in this status can still be
+ * fulfilled from stock.
+ *
+ * COMPLETED is included deliberately, and it is the case that makes the model
+ * work. Completion is a commercial statement — the sale is done — and
+ * fulfilment is a physical one. If completing an order sealed its outstanding
+ * units, an operator who marked a sale complete before the missing parts
+ * arrived would have stranded them permanently: COMPLETED is terminal and
+ * `COMPLETED → CANCELLED` is refused, so there would be no route left to ship
+ * them and no route to undo it either.
+ *
+ * DRAFT and PENDING are excluded because they have committed nothing, and
+ * CANCELLED because the sale did not happen.
+ */
+export function canFulfilOutstanding(status: OrderStatus): boolean {
   return status === "CONFIRMED" || status === "COMPLETED";
 }
 

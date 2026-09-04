@@ -12,9 +12,11 @@ import {
 } from "@/lib/errors";
 import type { OrderListParams, OrderSortKey } from "@/lib/order-query";
 import {
+  canFulfilOutstanding,
   canTransition,
-  holdsDeductedStock,
   isEditable,
+  mayHoldDeductedStock,
+  orderStatusLabel,
   transitionRefusal,
   type OrderStatus,
 } from "@/lib/order-status";
@@ -22,6 +24,7 @@ import { prisma } from "@/lib/prisma";
 import {
   calculateTotals,
   centsToDecimalString,
+  fulfilmentSchema,
   orderSchema,
   toCents,
   toOrderFieldErrors,
@@ -43,10 +46,17 @@ import {
  * keep that function honest. Confirming an order is the moment stock actually
  * leaves the building, and it has to hold three properties at once:
  *
- *   **Atomic.** Every line is deducted or none is. An order for two products
- *   where the second is short must leave the first untouched — a partial
- *   deduction is inventory that is wrong in a way nobody will notice until a
- *   stock count months later.
+ *   **Atomic.** Whatever is deducted is deducted together, or not at all. A
+ *   failure part-way through a multi-line order must leave inventory exactly
+ *   as it found it — a half-applied deduction is stock that is wrong in a way
+ *   nobody notices until a count months later.
+ *
+ *   Note what this no longer says. It used to read "every line is deducted or
+ *   none is", because a short line failed the whole confirmation. It does not
+ *   any more: this business sells parts it does not yet hold, so a line takes
+ *   what is on the shelf and records the rest as outstanding. The transaction
+ *   is still all-or-nothing; what changed is that a shortfall stopped being a
+ *   failure.
  *
  *   **Serialised.** Two orders for the same product, submitted together, must
  *   not both read the same balance. The product rows are locked `FOR UPDATE`,
@@ -72,6 +82,14 @@ export interface OrderListItem {
   status: OrderStatus;
   itemCount: number;
   unitCount: number;
+  /**
+   * Units sold on this order that have not shipped.
+   *
+   * Zero for every order the shelf could fill, which is most of them. Non-zero
+   * says the sale is committed and something is still owed — a fact about the
+   * lines, not a status, which is why there is no sixth OrderStatus for it.
+   */
+  outstandingUnits: number;
   subtotal: string;
   discount: string;
   total: string;
@@ -113,6 +131,14 @@ export interface OrderDetailLine {
    */
   costTotal: string | null;
   costedQuantity: number;
+  /**
+   * How many of `quantity` have physically shipped.
+   *
+   * Less than `quantity` when the order was confirmed against a shelf that
+   * could not fill it. The difference is outstanding and is derived, never
+   * stored — see the note on `OrderItem.fulfilledQuantity` in the schema.
+   */
+  fulfilledQuantity: number;
   /** Stock on hand now, for context — not what was deducted. */
   currentStock: number;
   /**
@@ -307,7 +333,7 @@ export async function listOrders(
           customerId: true,
           customer: { select: { name: true } },
           createdByUser: { select: { name: true } },
-          items: { select: { quantity: true } },
+          items: { select: { quantity: true, fulfilledQuantity: true } },
         },
       }),
     ]);
@@ -323,6 +349,10 @@ export async function listOrders(
           status: row.status,
           itemCount: row.items.length,
           unitCount: row.items.reduce((sum, item) => sum + item.quantity, 0),
+          outstandingUnits: row.items.reduce(
+            (sum, item) => sum + (item.quantity - item.fulfilledQuantity),
+            0,
+          ),
           subtotal: row.subtotal.toString(),
           discount: row.discount.toString(),
           total: row.total.toString(),
@@ -725,6 +755,7 @@ export async function getOrderDetail(
           total: item.total.toString(),
           costTotal: item.costTotal?.toString() ?? null,
           costedQuantity: item.costedQuantity,
+          fulfilledQuantity: item.fulfilledQuantity,
           currentStock: item.product.stockQuantity,
           lotCertificates: consumedLots.get(item.product.id) ?? [],
         })),
@@ -962,6 +993,16 @@ export interface OrderTransitionOutcome {
    * blocks, because quantity was available and the sale is legitimate.
    */
   uncostedUnits?: number;
+  /**
+   * Units this order still owes the customer after the transition.
+   *
+   * Zero on an order the shelf could fill completely. Non-zero when stock ran
+   * short: the sale is committed, the available units have left, and this is
+   * what remains to be shipped once more arrives. Distinct from
+   * `uncostedUnits` in kind, not just in degree — those units moved and their
+   * price is unknown; these have not moved at all.
+   */
+  unfulfilledUnits?: number;
   /** True when the call found the work already done and changed nothing. */
   alreadyInState: boolean;
 }
@@ -1004,7 +1045,8 @@ function assertTransition(from: OrderStatus, to: OrderStatus): void {
 }
 
 /**
- * Confirms an order: the moment stock leaves.
+ * Confirms an order: the moment the sale is committed and whatever is on the
+ * shelf leaves.
  *
  * The whole operation is one database transaction, in this order:
  *
@@ -1016,16 +1058,39 @@ function assertTransition(from: OrderStatus, to: OrderStatus): void {
  *   4. Load the lines.
  *   5. Lock every product row, sorted by id — a consistent order, so two
  *      overlapping orders queue instead of deadlocking.
- *   6. Check *every* line against its locked balance before writing anything.
- *   7. Deduct, writing a STOCK_OUT for each line.
- *   8. Move the order to CONFIRMED.
+ *   6. For each line, take what the locked balance can actually give.
+ *   7. Deduct and cost that, writing a STOCK_OUT per line that moved.
+ *   8. Move the order to CONFIRMED, whatever remains outstanding.
  *
- * Step 6 is the one worth spelling out. Checking each line as it is written
- * would deduct the first product and then fail on the second, leaving inventory
- * half-moved — and although the rollback would undo it, the check-then-write
- * loop reads as if partial deduction were acceptable. Validating the whole
- * order against the locked balances first makes the guarantee visible rather
- * than incidental.
+ * **Step 6 no longer refuses.** It used to check every line against its
+ * balance and throw `InsufficientStockError` if any came up short, so an order
+ * for one more unit than existed could not be confirmed at all. That was the
+ * wrong model for this business, which routinely sells parts it does not yet
+ * hold: a shortfall is a procurement fact, not an invalid document. So each
+ * line now takes `min(quantity, stockQuantity)` and records the remainder as
+ * outstanding on `fulfilledQuantity`.
+ *
+ * What that costs, and why it is affordable: the old code's guarantee was
+ * "either the whole order deducts or none of it does". The new guarantee is
+ * narrower but still total — *whatever is deducted is deducted atomically*.
+ * One transaction still spans every line, so a failure anywhere rolls back
+ * everything, and no line is ever half-written. What has gone is only the
+ * refusal, not the atomicity.
+ *
+ * Three things this deliberately does not do:
+ *
+ *   It never writes a zero-quantity movement. A line that can take nothing
+ *   gets no StockTransaction, no lot and no consumption row — the ledger says
+ *   nothing moved because nothing did, and `stock_transactions_quantity_
+ *   positive` would reject the row anyway.
+ *
+ *   It never drives stock negative. `take` is bounded by the locked balance,
+ *   so `applyStockMovement`'s guard is never even approached. The outstanding
+ *   units exist only as the arithmetic difference on the line.
+ *
+ *   It never invents a cost for the outstanding units. They have not been
+ *   acquired against this sale, so there is nothing to know yet — see the note
+ *   on `OrderItem.fulfilledQuantity`.
  */
 export async function confirmOrder(
   orderId: string,
@@ -1057,33 +1122,47 @@ export async function confirmOrder(
       items.map((item) => item.productId),
     );
 
-    // Every line checked before any line is written.
-    for (const item of items) {
-      const product = locked.get(item.productId)!;
-
-      if (product.stockQuantity < item.quantity) {
-        throw new InsufficientStockError(
-          product.name,
-          item.quantity,
-          product.stockQuantity,
-        );
-      }
-    }
-
     const movements: OrderTransitionOutcome["movements"] = [];
     let uncostedUnits = 0;
+    let unfulfilledUnits = 0;
 
     for (const item of items) {
       const product = locked.get(item.productId)!;
+
+      /*
+       * What the shelf can actually give, read from the locked balance.
+       *
+       * Bounded below by zero as well as above: `stockQuantity` cannot be
+       * negative today and this does not rely on that staying true.
+       */
+      const take = Math.max(0, Math.min(item.quantity, product.stockQuantity));
+
+      unfulfilledUnits += item.quantity - take;
+
+      if (take === 0) {
+        /*
+         * Nothing on hand, so nothing happens — no ledger row, no lot, no
+         * consumption, and the line keeps its default `fulfilledQuantity` of
+         * zero. The sale is still committed; the units are simply owed.
+         *
+         * Writing a zero-quantity STOCK_OUT to mark the attempt would be the
+         * tempting alternative and is exactly wrong: the ledger records what
+         * moved, and nothing moved.
+         */
+        continue;
+      }
 
       const { transaction, previousStock, newStock } = await applyStockMovement(
         tx,
         {
           product,
           type: "STOCK_OUT",
-          delta: -item.quantity,
+          delta: -take,
           reference: { type: "ORDER", id: orderId },
-          note: `Order ${order.orderNumber} confirmed`,
+          note:
+            take === item.quantity
+              ? `Order ${order.orderNumber} confirmed`
+              : `Order ${order.orderNumber} confirmed — ${take} of ${item.quantity} units fulfilled`,
           // From the session, resolved through clerkId. Never from the client.
           userId: user.id,
         },
@@ -1098,10 +1177,14 @@ export async function confirmOrder(
        * back partially costed — 10 of 15 units, say — which is recorded as
        * exactly that rather than being averaged into a whole-line figure that
        * would read as complete.
+       *
+       * Only `take` units are drawn, so the lots demonstrably cover the
+       * movement and `allocateFifo`'s "lots do not cover this" assertion keeps
+       * its exact meaning as a detector of a broken invariant.
        */
       const allocation = await allocateFifo(tx, {
         productId: product.id,
-        quantity: item.quantity,
+        quantity: take,
         stockTransactionId: transaction.id,
       });
 
@@ -1115,34 +1198,57 @@ export async function confirmOrder(
               ? null
               : centsToDecimalString(allocation.costTotalCents),
           costedQuantity: allocation.costedQuantity,
+          // What actually left. Never `item.quantity` — that is what was sold.
+          fulfilledQuantity: take,
         },
       });
 
       movements.push({
         productId: product.id,
         productName: product.name,
-        quantity: item.quantity,
+        quantity: take,
         previousStock,
         newStock,
       });
     }
 
+    /*
+     * Confirmed either way, and `confirmedAt` set either way.
+     *
+     * This timestamp is load-bearing well beyond the order screen: the sales
+     * report dates realised revenue by `confirmed_at`, so leaving it null on an
+     * order that could not be filled would erase a real sale from every
+     * financial report. The sale happened; only the shipping is outstanding.
+     */
     const updated = await tx.order.update({
       where: { id: orderId },
       data: { status: "CONFIRMED", confirmedAt: new Date() },
       select: { id: true, orderNumber: true, status: true },
     });
 
-    return { ...updated, movements, uncostedUnits, alreadyInState: false };
+    return {
+      ...updated,
+      movements,
+      uncostedUnits,
+      unfulfilledUnits,
+      alreadyInState: false,
+    };
   });
 }
 
 /**
  * Marks a confirmed order complete. Moves no stock.
  *
- * The units left on confirmation. Deducting again here would take them twice —
- * the single most plausible inventory bug in a module like this, and the reason
- * completion is its own function that touches no product rows at all.
+ * Whatever left, left on confirmation. Deducting again here would take those
+ * units twice — the single most plausible inventory bug in a module like this,
+ * and the reason completion is its own function that touches no product rows
+ * at all.
+ *
+ * Completion is permitted with quantity still outstanding, and that is not an
+ * oversight. It is a commercial statement — this sale is done being negotiated
+ * — while fulfilment is a physical one, and the two genuinely come apart in a
+ * business that sells parts before it holds them. `fulfilOrder` therefore
+ * stays available on a COMPLETED order; see `canFulfilOutstanding`.
  */
 export async function completeOrder(
   orderId: string,
@@ -1160,6 +1266,226 @@ export async function completeOrder(
     });
 
     return { ...updated, movements: [], alreadyInState: false };
+  });
+}
+
+/**
+ * Ships units an order already owes, once the stock exists.
+ *
+ * The other half of the model confirmation opened up. Confirming an order the
+ * warehouse could not fill records what is owed; this is the act that pays it
+ * down, and it is the only route by which outstanding quantity ever falls.
+ *
+ * **Not a status transition.** Nothing here touches `status`, `confirmedAt` or
+ * `completedAt`. The order was already commercially settled; what changes is
+ * how much of it has physically gone out, which lives on the lines.
+ *
+ * **Explicit quantities, not "fulfil whatever you can".** The operator states
+ * what is going in the box, per line. Automatic allocation would look kinder
+ * and be worse: when a short delivery lands against three waiting orders, the
+ * question of which one gets it is a commercial decision — a customer is
+ * waiting on each — and answering it by whoever's page refreshed first would
+ * bury that decision in a race. The UI prefills what is available so the easy
+ * case stays one click.
+ *
+ * **Short requests are refused, not trimmed**, and the asymmetry with
+ * confirmation is deliberate. Confirming is a commitment to sell, so a
+ * shortfall is the whole point and gets recorded. Fulfilling is an assertion
+ * that units are physically being sent; if they are not there the assertion is
+ * wrong, and silently shipping fewer than the operator said would put a number
+ * in the ledger that nobody typed.
+ *
+ * Locking is the same discipline as everywhere else in this file: the order
+ * row first, then the product rows sorted by id, then the lots underneath
+ * them. No new lock order is introduced, so nothing here can deadlock against
+ * a concurrent confirmation or cancellation.
+ */
+export async function fulfilOrder(
+  orderId: string,
+  input: unknown,
+): Promise<OrderTransitionOutcome> {
+  // Ordinary warehouse work backed by a document, exactly like confirming an
+  // order or receiving a delivery. ADMIN stays reserved for movements with no
+  // document behind them.
+  const user = await requireUser();
+
+  const parsed = fulfilmentSchema.safeParse(input);
+
+  if (!parsed.success) {
+    throw new AppError("BAD_REQUEST", parsed.error.issues[0]!.message);
+  }
+
+  const requested = new Map(
+    parsed.data.lines.map((line) => [line.orderItemId, line.quantity] as const),
+  );
+
+  return prisma.$transaction(async (tx) => {
+    const order = await lockOrder(tx, orderId);
+
+    if (!canFulfilOutstanding(order.status)) {
+      throw new AppError(
+        "CONFLICT",
+        `Order ${order.orderNumber} is ${orderStatusLabel(order.status).toLowerCase()}, so there is nothing to fulfil against it. Only a confirmed or completed order can still be shipped.`,
+      );
+    }
+
+    const items = await tx.orderItem.findMany({
+      where: { id: { in: [...requested.keys()] }, orderId },
+      select: {
+        id: true,
+        productId: true,
+        quantity: true,
+        fulfilledQuantity: true,
+        costTotal: true,
+        costedQuantity: true,
+        product: { select: { name: true } },
+      },
+    });
+
+    if (items.length !== requested.size) {
+      throw new NotFoundError("Order line");
+    }
+
+    /*
+     * Every line checked against its outstanding quantity before anything is
+     * written. This one *is* still all-or-nothing: unlike a shortfall at
+     * confirmation, asking to ship more than is owed is a mistake in the
+     * request rather than a fact about the warehouse, and settling the rest of
+     * the form around it would hide the error.
+     */
+    for (const item of items) {
+      const want = requested.get(item.id)!;
+      const outstanding = item.quantity - item.fulfilledQuantity;
+
+      if (outstanding <= 0) {
+        throw new AppError(
+          "CONFLICT",
+          `${item.product.name} has already been fulfilled in full on this order.`,
+        );
+      }
+
+      if (want > outstanding) {
+        throw new AppError(
+          "BAD_REQUEST",
+          `${item.product.name} has only ${outstanding} ${outstanding === 1 ? "unit" : "units"} outstanding on this order, so ${want} cannot be fulfilled.`,
+        );
+      }
+    }
+
+    const locked = await lockProducts(
+      tx,
+      items.map((item) => item.productId),
+    );
+
+    // Stock checked for every line before any line moves, so a request that
+    // cannot be met in full does not half-ship and then fail.
+    for (const item of items) {
+      const product = locked.get(item.productId)!;
+      const want = requested.get(item.id)!;
+
+      if (product.stockQuantity < want) {
+        throw new InsufficientStockError(
+          product.name,
+          want,
+          product.stockQuantity,
+        );
+      }
+    }
+
+    const movements: OrderTransitionOutcome["movements"] = [];
+    let uncostedUnits = 0;
+
+    // Sorted, so a fulfilment spanning several lines writes them in a fixed
+    // sequence — the same reason `lockProducts` sorts.
+    for (const item of [...items].sort((a, b) => a.id.localeCompare(b.id))) {
+      const product = locked.get(item.productId)!;
+      const want = requested.get(item.id)!;
+
+      const { transaction, previousStock, newStock } = await applyStockMovement(
+        tx,
+        {
+          product,
+          type: "STOCK_OUT",
+          delta: -want,
+          reference: { type: "ORDER", id: orderId },
+          note: `Order ${order.orderNumber} fulfilled — ${want} of ${item.quantity - item.fulfilledQuantity} outstanding units`,
+          // From the session, resolved through clerkId. Never from the client.
+          userId: user.id,
+        },
+      );
+
+      /*
+       * Costed from the lots that exist *now*, which is the point of doing
+       * this later rather than guessing at confirmation. Units shipped from a
+       * delivery that arrived last week carry that delivery's real price, and
+       * if the oldest open lot happens to be uncosted the draw comes back
+       * uncosted — unknown stays unknown, and nothing is filled in from the
+       * catalogue.
+       */
+      const allocation = await allocateFifo(tx, {
+        productId: product.id,
+        quantity: want,
+        stockTransactionId: transaction.id,
+      });
+
+      uncostedUnits += allocation.uncostedQuantity;
+
+      /*
+       * Cost accumulates across fulfilment events. A line shipped in two
+       * batches at two prices carries the sum, which is exactly what
+       * `costTotal` has always meant — a total, never a rate, because the
+       * units behind it can come from several lots.
+       *
+       * The null handling is not defensive noise: `order_items_cost_pairing`
+       * requires `(cost_total IS NULL) = (costed_quantity = 0)`, so a draw
+       * that costs nothing must leave a null total rather than a zero.
+       */
+      const costedQuantity = item.costedQuantity + allocation.costedQuantity;
+      const costTotalCents =
+        toCents(Number(item.costTotal ?? 0)) + allocation.costTotalCents;
+
+      await tx.orderItem.update({
+        where: { id: item.id },
+        data: {
+          fulfilledQuantity: item.fulfilledQuantity + want,
+          costedQuantity,
+          costTotal:
+            costedQuantity === 0 ? null : centsToDecimalString(costTotalCents),
+        },
+      });
+
+      movements.push({
+        productId: product.id,
+        productName: product.name,
+        quantity: want,
+        previousStock,
+        newStock,
+      });
+    }
+
+    /*
+     * What the order still owes after this, read back rather than computed
+     * from the loop — the lines not named in this request are outstanding too,
+     * and the operator needs the whole picture, not the part they just acted
+     * on.
+     */
+    const remaining = await tx.orderItem.aggregate({
+      where: { orderId },
+      _sum: { quantity: true, fulfilledQuantity: true },
+    });
+
+    const unfulfilledUnits =
+      (remaining._sum.quantity ?? 0) - (remaining._sum.fulfilledQuantity ?? 0);
+
+    return {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      status: order.status,
+      movements,
+      uncostedUnits,
+      unfulfilledUnits,
+      alreadyInState: false,
+    };
   });
 }
 
@@ -1203,7 +1529,7 @@ export async function cancelOrder(
 
     // Only an order that actually deducted has anything to give back. A draft
     // being abandoned never touched inventory.
-    if (holdsDeductedStock(order.status)) {
+    if (mayHoldDeductedStock(order.status)) {
       const ledger = await tx.stockTransaction.findMany({
         where: { referenceType: "ORDER", referenceId: orderId },
         select: { id: true, productId: true, type: true, quantity: true },
@@ -1221,10 +1547,15 @@ export async function cancelOrder(
         );
       }
 
-      // The movements whose lot draws are being undone.
-      const outboundIds = ledger
-        .filter((row) => row.type === "STOCK_OUT")
-        .map((row) => row.id);
+      /*
+       * Every movement this order has written, not only the outbound ones.
+       *
+       * `returnToLots` nets the consumption rows across all of them, and a
+       * prior REVERSAL's rows hang off that reversal's own transaction id.
+       * Passing only the STOCK_OUTs would hide anything already given back and
+       * over-restore the lots — see the note on `returnToLots`.
+       */
+      const documentTransactionIds = ledger.map((row) => row.id);
 
       const productIds = [...outstanding.entries()]
         .filter(([, quantity]) => quantity > 0)
@@ -1256,7 +1587,7 @@ export async function cancelOrder(
          * again, whatever the most recent delivery was priced at.
          */
         await returnToLots(tx, {
-          sourceTransactionIds: outboundIds,
+          documentTransactionIds,
           reversalTransactionId: transaction.id,
           productId: product.id,
           /*
@@ -1279,14 +1610,25 @@ export async function cancelOrder(
       }
 
       /*
-       * The sale did not happen, so it has no cost of sale. Cleared rather than
-       * left in place: a cancelled order carrying COGS would be counted by any
-       * report that sums cost over line items, and the stock it describes is
-       * back on the shelf waiting to be sold to somebody else.
+       * The sale did not happen, so it has no cost of sale and nothing was
+       * fulfilled. Cleared rather than left in place: a cancelled order
+       * carrying COGS would be counted by any report that sums cost over line
+       * items, and the stock it describes is back on the shelf waiting to be
+       * sold to somebody else.
+       *
+       * `fulfilledQuantity` goes back to zero for the same reason and in the
+       * same statement — the units it counted have just been returned to their
+       * lots, so a line still claiming to have shipped them would contradict
+       * the ledger. Setting both to zero in one update also keeps
+       * `costedQuantity <= fulfilledQuantity` true at every instant, which a
+       * two-statement version would briefly break.
+       *
+       * Outstanding quantity needs no undoing. It was never anything but the
+       * difference between two numbers, and both are now zero.
        */
       await tx.orderItem.updateMany({
         where: { orderId },
-        data: { costTotal: null, costedQuantity: 0 },
+        data: { costTotal: null, costedQuantity: 0, fulfilledQuantity: 0 },
       });
     }
 

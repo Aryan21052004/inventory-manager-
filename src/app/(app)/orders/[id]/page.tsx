@@ -38,7 +38,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatCurrency, formatDateTime, formatNumber } from "@/lib/format";
-import { isEditable, type OrderStatus } from "@/lib/order-status";
+import {
+  canFulfilOutstanding,
+  isEditable,
+  type OrderStatus,
+} from "@/lib/order-status";
 import { coverageNote, marginOf, totalCoverage } from "@/lib/cost-coverage";
 import {
   getOrderDetail,
@@ -133,8 +137,10 @@ export default async function OrderDetailPage({
                 orderId={order.id}
                 status={order.status}
                 lines={order.lines.map((line) => ({
+                  orderItemId: line.id,
                   productName: line.productName,
                   quantity: line.quantity,
+                  fulfilledQuantity: line.fulfilledQuantity,
                   currentStock: line.currentStock,
                 }))}
               />
@@ -151,7 +157,15 @@ export default async function OrderDetailPage({
       <InventoryImpact order={order} />
 
       <div className="grid gap-6 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
+        {/*
+          `min-w-0` is load-bearing. A grid item defaults to `min-width: auto`,
+          so it refuses to shrink below its content — which means the products
+          table's `overflow-x-auto` wrapper is never actually constrained and
+          the whole page scrolls sideways on a narrow screen instead of the
+          table scrolling inside its card. Latent until the Fulfilled column
+          made the table one column wider than a phone could hold.
+        */}
+        <Card className="min-w-0 lg:col-span-2">
           <CardHeader>
             <CardTitle>Products</CardTitle>
             <CardDescription>
@@ -167,7 +181,8 @@ export default async function OrderDetailPage({
                   <TableHead className="hidden md:table-cell">
                     Certificate
                   </TableHead>
-                  <TableHead className="text-right">Quantity</TableHead>
+                  <TableHead className="text-right">Ordered</TableHead>
+                  <TableHead className="text-right">Fulfilled</TableHead>
                   <TableHead className="text-right">Unit price</TableHead>
                   <TableHead className="hidden text-right md:table-cell">
                     Cost
@@ -235,6 +250,33 @@ export default async function OrderDetailPage({
 
                     <TableCell className="tabular text-right font-medium">
                       {formatNumber(line.quantity)}
+                    </TableCell>
+                    {/*
+                      What has physically left, and what is still owed. Two
+                      facts about the same line rather than a status: an order
+                      confirmed against a shelf that could not fill it ships
+                      what exists and carries the difference until stock
+                      arrives.
+
+                      The shortfall is only called *outstanding* once the order
+                      has committed. On a draft nothing has been promised yet,
+                      and on a cancelled order nothing is owed any more — in
+                      both the subtraction still yields the full quantity, and
+                      printing that as an obligation would invent one.
+                      `canFulfilOutstanding` is exactly that question, and is
+                      the same predicate the server enforces.
+                    */}
+                    <TableCell className="tabular text-right">
+                      {formatNumber(line.fulfilledQuantity)}
+                      {line.fulfilledQuantity < line.quantity &&
+                      canFulfilOutstanding(order.status) ? (
+                        <span className="block text-xs text-muted-foreground">
+                          {formatNumber(
+                            line.quantity - line.fulfilledQuantity,
+                          )}{" "}
+                          outstanding
+                        </span>
+                      ) : null}
                     </TableCell>
                     <TableCell className="tabular text-right">
                       {formatCurrency(line.unitPrice)}
@@ -514,15 +556,21 @@ function LineCost({ line }: { line: OrderDetailLine }) {
     return <span className="text-muted-foreground">—</span>;
   }
 
-  const partial = line.costedQuantity < line.quantity;
+  /*
+   * Coverage is measured against what shipped, not against what was ordered.
+   * An outstanding unit has no acquisition cost because nothing has been
+   * acquired for it yet; calling it uncosted here would put a procurement
+   * backlog in a column about money.
+   */
+  const partial = line.costedQuantity < line.fulfilledQuantity;
 
   return (
     <span className="inline-flex flex-col items-end">
       <span>{formatCurrency(line.costTotal)}</span>
       {partial ? (
         <span className="text-xs text-muted-foreground">
-          {formatNumber(line.costedQuantity)} of {formatNumber(line.quantity)}{" "}
-          costed
+          {formatNumber(line.costedQuantity)} of{" "}
+          {formatNumber(line.fulfilledQuantity)} fulfilled costed
         </span>
       ) : null}
     </span>
@@ -553,6 +601,7 @@ function OrderMargin({
   const results = lines.map((line) =>
     marginOf({
       quantity: line.quantity,
+      fulfilledQuantity: line.fulfilledQuantity,
       unitPrice: Number(line.unitPrice),
       costTotal: line.costTotal === null ? null : Number(line.costTotal),
       costedQuantity: line.costedQuantity,
@@ -567,19 +616,28 @@ function OrderMargin({
   const margin = revenue - cost;
 
   /*
-   * Nothing costed, and the two reasons for that are not the same thing.
+   * Nothing costed, and there are now three reasons for that. They are not
+   * interchangeable, and saying the wrong one sends the reader somewhere
+   * useless.
    *
-   * An order that has not moved stock has no cost of sale yet — it will get one
-   * when it is confirmed. An order that *has* moved stock but drew entirely
-   * from batches nobody priced will never get one, and saying "not available
-   * until confirmed" about an order sitting in COMPLETED would be flatly
-   * untrue. Every order placed before lot costing existed is in exactly that
-   * second state, so it is the common case rather than an edge one.
+   * An order that has not been confirmed has no cost of sale yet — it will get
+   * one when it is. An order that *has* been confirmed but shipped nothing,
+   * because the shelf was empty, has no cost of sale either, and for a
+   * completely different reason: nothing has been acquired against it, so
+   * there is nothing to price. And an order that shipped units drawn entirely
+   * from batches nobody priced will never get one at all.
    *
-   * Neither is a margin of zero, which is the one answer this must never give.
+   * The middle case is the one this page used to get wrong. It reported "the
+   * stock this order consumed has no recorded acquisition cost" for an order
+   * that had consumed no stock whatsoever, which reads as a costing failure
+   * when it is a procurement queue.
+   *
+   * None of the three is a margin of zero, which is the one answer this must
+   * never give.
    */
   if (coverage.costedQuantity === 0) {
     const moved = status === "CONFIRMED" || status === "COMPLETED";
+    const outstanding = coverage.quantity - coverage.fulfilledQuantity;
 
     return (
       <div className="flex items-center justify-between gap-6 border-t border-border pt-3 text-xs text-muted-foreground">
@@ -587,9 +645,11 @@ function OrderMargin({
         <dd className="text-right">
           {lines.length === 0
             ? "—"
-            : moved
-              ? "Not available — the stock this order consumed has no recorded acquisition cost"
-              : "Not available until the order is confirmed"}
+            : !moved
+              ? "Not available until the order is confirmed"
+              : coverage.fulfilledQuantity === 0
+                ? `Not available — nothing has been fulfilled from stock yet, so this order has no cost of sale. ${formatNumber(outstanding)} ${outstanding === 1 ? "unit is" : "units are"} outstanding.`
+                : "Not available — the stock this order consumed has no recorded acquisition cost"}
         </dd>
       </div>
     );

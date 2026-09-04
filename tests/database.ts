@@ -147,6 +147,122 @@ export async function expectConsumptionsReconcile(): Promise<void> {
 }
 
 /**
+ * The order line's own chain, as an assertion.
+ *
+ *     0 <= costedQuantity <= fulfilledQuantity <= quantity
+ *
+ * Two claims in one. That a line never ships more than was ordered, and that
+ * it never costs more units than it shipped — the second being the one worth
+ * guarding, because "unfulfilled" and "uncosted" are different absences and
+ * the whole fulfilment model rests on keeping them apart. A unit that never
+ * left has no acquisition cost to know, and letting it into a coverage figure
+ * would report a fulfilment gap as a costing failure.
+ *
+ * The database enforces both through check constraints, so this is a second
+ * line of defence rather than the only one. It earns its place by failing at
+ * the assertion in the test that broke the rule, rather than as a constraint
+ * violation from whichever write happened to come next.
+ */
+export async function expectFulfilmentReconciles(): Promise<void> {
+  const rows = await prisma.$queryRaw<
+    {
+      order_number: string;
+      quantity: number;
+      fulfilled_quantity: number;
+      costed_quantity: number;
+    }[]
+  >`
+    SELECT
+      o.order_number,
+      oi.quantity,
+      oi.fulfilled_quantity,
+      oi.costed_quantity
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE NOT (
+      oi.costed_quantity >= 0
+      AND oi.costed_quantity <= oi.fulfilled_quantity
+      AND oi.fulfilled_quantity <= oi.quantity
+    )
+  `;
+
+  if (rows.length > 0) {
+    const detail = rows
+      .map(
+        (row) =>
+          `${row.order_number}: ordered ${row.quantity}, fulfilled ${row.fulfilled_quantity}, costed ${row.costed_quantity}`,
+      )
+      .join("; ");
+
+    throw new Error(
+      `Order lines break 0 <= costed <= fulfilled <= quantity — ${detail}`,
+    );
+  }
+}
+
+/**
+ * The other half: what a line claims to have shipped must be what the ledger
+ * says left.
+ *
+ * `fulfilledQuantity` is a denormalisation of the STOCK_OUT rows written
+ * against the order, netted against any REVERSAL. The ledger is the record of
+ * what actually moved, so if the two disagree the column is the one that is
+ * wrong — and a silent drift here would mis-state cost coverage on every
+ * report reading it.
+ *
+ * Only realised orders are checked. A cancelled order has had its fulfilment
+ * reset to zero and its movements reversed, which nets to zero on both sides;
+ * a draft has neither.
+ */
+export async function expectFulfilmentMatchesLedger(): Promise<void> {
+  const rows = await prisma.$queryRaw<
+    {
+      order_number: string;
+      fulfilled_quantity: number;
+      ledger: number;
+    }[]
+  >`
+    SELECT
+      o.order_number,
+      oi.fulfilled_quantity,
+      COALESCE((
+        SELECT SUM(
+          CASE WHEN st.type = 'STOCK_OUT' THEN st.quantity ELSE -st.quantity END
+        )::int
+        FROM stock_transactions st
+        WHERE st.reference_type = 'ORDER'
+          AND st.reference_id = o.id
+          AND st.product_id = oi.product_id
+      ), 0) AS ledger
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE o.status IN ('CONFIRMED', 'COMPLETED')
+      AND oi.fulfilled_quantity <> COALESCE((
+        SELECT SUM(
+          CASE WHEN st.type = 'STOCK_OUT' THEN st.quantity ELSE -st.quantity END
+        )::int
+        FROM stock_transactions st
+        WHERE st.reference_type = 'ORDER'
+          AND st.reference_id = o.id
+          AND st.product_id = oi.product_id
+      ), 0)
+  `;
+
+  if (rows.length > 0) {
+    const detail = rows
+      .map(
+        (row) =>
+          `${row.order_number}: fulfilled ${row.fulfilled_quantity}, ledger ${row.ledger}`,
+      )
+      .join("; ");
+
+    throw new Error(
+      `Fulfilled quantities do not match the stock ledger — ${detail}`,
+    );
+  }
+}
+
+/**
  * A product written straight to the table, bypassing the stock engine.
  *
  * Only for fixtures. The tests that care about *how* stock gets written call

@@ -23,6 +23,7 @@ import {
   adjustmentDelta,
   stockAdjustmentSchema,
   toAdjustmentFieldErrors,
+  type AdjustmentCostBasis,
   type AdjustmentDirection,
   type AdjustmentFieldErrors,
 } from "@/lib/validation/adjustment";
@@ -62,6 +63,15 @@ function StockAdjustmentDialog({
   const [errors, setErrors] = useState<AdjustmentFieldErrors>({});
   const [direction, setDirection] = useState<AdjustmentDirection>("INCREASE");
   const [quantity, setQuantity] = useState("");
+  /*
+   * Null until answered, and deliberately not pre-selected.
+   *
+   * A default here would put the old behaviour back: whichever option sat
+   * selected would be the one most adjustments recorded, and an unknown
+   * acquisition cost would go back to being a property of the form rather than
+   * a statement by the operator.
+   */
+  const [costBasis, setCostBasis] = useState<AdjustmentCostBasis | null>(null);
 
   const fieldId = useId();
   const id = (name: string) => `${fieldId}-${name}`;
@@ -82,6 +92,18 @@ function StockAdjustmentDialog({
     setErrors({});
     setDirection("INCREASE");
     setQuantity("");
+    setCostBasis(null);
+  }
+
+  /*
+   * Switching direction clears the costing answer rather than carrying it
+   * across. A decrease has no cost to state, so an answer given before the
+   * switch is about a movement that is no longer being recorded — and leaving
+   * it set would mean a later switch back to increase silently reusing it.
+   */
+  function chooseDirection(next: AdjustmentDirection) {
+    setDirection(next);
+    setCostBasis(null);
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -176,7 +198,7 @@ function StockAdjustmentDialog({
               <DirectionOption
                 value="INCREASE"
                 current={direction}
-                onSelect={setDirection}
+                onSelect={chooseDirection}
                 icon={Plus}
                 label="Increase"
                 tone="success"
@@ -184,7 +206,7 @@ function StockAdjustmentDialog({
               <DirectionOption
                 value="DECREASE"
                 current={direction}
-                onSelect={setDirection}
+                onSelect={chooseDirection}
                 icon={Minus}
                 label="Decrease"
                 tone="destructive"
@@ -247,6 +269,81 @@ function StockAdjustmentDialog({
               That would take stock below zero. Reduce the quantity — inventory
               cannot go negative, and the server will refuse this.
             </p>
+          ) : null}
+
+          {/* Only an increase creates a batch, so only an increase has an
+              acquisition cost to state. A decrease draws from the lots already
+              on the shelf and is costed from them. */}
+          {direction === "INCREASE" ? (
+            <Field
+              label="Acquisition cost"
+              htmlFor={id("costBasis")}
+              hint="These units become a new batch. What that batch cost is frozen here and used for every sale that later draws on it."
+              error={errors.costBasis}
+            >
+              <div
+                id={id("costBasis")}
+                role="radiogroup"
+                aria-label="Acquisition cost basis"
+                className="grid gap-2 sm:grid-cols-2"
+              >
+                <CostBasisOption
+                  value="KNOWN"
+                  current={costBasis}
+                  onSelect={setCostBasis}
+                  label="I know what these cost"
+                  detail="Enter the price per unit"
+                />
+                <CostBasisOption
+                  value="UNKNOWN"
+                  current={costBasis}
+                  onSelect={setCostBasis}
+                  label="Cost is unknown"
+                  detail="Records as uncosted, permanently"
+                />
+              </div>
+              {costBasis ? (
+                <input type="hidden" name="costBasis" value={costBasis} />
+              ) : null}
+            </Field>
+          ) : null}
+
+          {direction === "INCREASE" && costBasis === "KNOWN" ? (
+            <Field
+              label="Unit cost"
+              htmlFor={id("unitCost")}
+              hint="What one unit cost to acquire — not what it sells for."
+              error={errors.unitCost}
+            >
+              <Input
+                id={id("unitCost")}
+                name="unitCost"
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="0.00"
+                autoComplete="off"
+                aria-invalid={Boolean(errors.unitCost)}
+                className="tabular"
+              />
+            </Field>
+          ) : null}
+
+          {direction === "INCREASE" && costBasis === "UNKNOWN" ? (
+            <Field
+              label="Why is the cost unknown?"
+              htmlFor={id("unknownCostReason")}
+              hint="Required. These units will report as uncosted for as long as they last, and this is the only thing that will ever explain why."
+              error={errors.unknownCostReason}
+            >
+              <Textarea
+                id={id("unknownCostReason")}
+                name="unknownCostReason"
+                rows={2}
+                placeholder="Found during stock take with no paperwork — original delivery cannot be identified."
+                aria-invalid={Boolean(errors.unknownCostReason)}
+              />
+            </Field>
           ) : null}
 
           <Field
@@ -316,6 +413,51 @@ function DirectionOption({
     >
       <Icon className="size-4" aria-hidden />
       {label}
+    </button>
+  );
+}
+
+/**
+ * One of the two answers about acquisition cost.
+ *
+ * Neither is styled as the safe or expected choice, which is the point:
+ * "cost unknown" is a legitimate answer this business genuinely needs, not a
+ * failure state to be discouraged, and a known cost is not a burden to be
+ * dismissed. The subtitle on each says what it will actually do, because the
+ * consequence of the unknown option outlives the adjustment by as long as the
+ * units do.
+ */
+function CostBasisOption({
+  value,
+  current,
+  onSelect,
+  label,
+  detail,
+}: {
+  value: AdjustmentCostBasis;
+  current: AdjustmentCostBasis | null;
+  onSelect: (value: AdjustmentCostBasis) => void;
+  label: string;
+  detail: string;
+}) {
+  const selected = current === value;
+
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={() => onSelect(value)}
+      className={cn(
+        "flex flex-col items-start gap-0.5 rounded-md border px-3 py-2 text-left transition-colors",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        selected
+          ? "border-primary/40 bg-primary/10 text-foreground"
+          : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+      )}
+    >
+      <span className="text-sm font-medium">{label}</span>
+      <span className="text-xs text-muted-foreground">{detail}</span>
     </button>
   );
 }

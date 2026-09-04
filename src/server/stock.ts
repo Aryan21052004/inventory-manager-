@@ -538,10 +538,9 @@ export async function allocateFifo(
 /**
  * Puts units back where they came from.
  *
- * Reads the draws made against a set of movements — an order's STOCK_OUT rows,
- * a purchase's STOCK_IN — nets them (so an already-reversed portion is not
- * returned twice), and writes the negative consumption rows that restore the
- * balance.
+ * Reads every draw and every prior return recorded against a document's
+ * movements, nets them per lot, and writes the negative consumption rows that
+ * restore the balance.
  *
  * Units return to **their original lot at their original cost**, never into a
  * new lot at today's price. That is what keeps a cancellation from quietly
@@ -549,14 +548,37 @@ export async function allocateFifo(
  * units go back to the ₹8,000 batch, even if the most recent delivery was
  * ₹9,500.
  *
- * The netting mirrors what `cancelOrder` already does at the ledger level, for
- * the same reason: a partially reversed document must not be over-restored.
+ * **The netting spans the whole document, in both directions.** This used to
+ * take only the outbound movements, which meant a prior REVERSAL's negative
+ * consumption rows — written against the *reversal's* transaction id, not the
+ * STOCK_OUT's — were invisible to it. The draw then looked larger than it was
+ * and the lots were over-restored. Two shapes came out of that, and only one of
+ * them announced itself:
+ *
+ *   A lot this document was the sole consumer of exceeded its own
+ *   `quantityReceived`, and `stock_lots_quantity_remaining_within_received`
+ *   refused the write. Loud, and harmless.
+ *
+ *   A lot another document had since drawn from had room to absorb the excess,
+ *   so nothing was refused. `SUM(quantityRemaining)` quietly exceeded
+ *   `Product.stockQuantity` and I-1 was broken with no error raised.
+ *
+ * The second is the reason the netting reads the whole document rather than
+ * half of it, and the reason the shortfall below refuses to be negative.
  */
 export async function returnToLots(
   tx: Prisma.TransactionClient,
   params: {
-    /** The movements whose draws are being undone. */
-    sourceTransactionIds: readonly string[];
+    /**
+     * Every movement this document has written, inbound and outbound alike —
+     * not just the ones that took stock out.
+     *
+     * Passing only the outbound half is the bug described above. The caller
+     * reads the ledger for the document and passes all of it; the reversal
+     * being written *now* is not among them, because its consumption rows are
+     * what this function is about to create.
+     */
+    documentTransactionIds: readonly string[];
     /** The REVERSAL now putting the units back. */
     reversalTransactionId: string;
     /** The product being reversed. Required: the shortfall lot needs it. */
@@ -573,38 +595,60 @@ export async function returnToLots(
     userId: string | null;
   },
 ): Promise<{ returned: number; uncosted: number }> {
-  if (params.sourceTransactionIds.length === 0) {
+  if (params.documentTransactionIds.length === 0) {
     return { returned: 0, uncosted: 0 };
   }
 
   const rows = await tx.stockLotConsumption.findMany({
     where: {
-      stockTransactionId: { in: [...params.sourceTransactionIds] },
-      ...(params.productId ? { lot: { productId: params.productId } } : {}),
+      stockTransactionId: { in: [...params.documentTransactionIds] },
+      lot: { productId: params.productId },
     },
-    select: { lotId: true, quantity: true, unitCost: true },
+    select: { lotId: true, quantity: true },
   });
 
-  // Net per lot: draws minus anything already handed back.
+  /*
+   * Net per lot. The rows are signed — a draw is positive, a return negative —
+   * so a plain sum over the whole document is what is still outstanding
+   * against each batch. A lot netting to zero or below has already been given
+   * back in full and is skipped below.
+   */
   const outstanding = new Map<string, number>();
-  const rates = new Map<string, string | null>();
 
   for (const row of rows) {
     outstanding.set(
       row.lotId,
       (outstanding.get(row.lotId) ?? 0) + row.quantity,
     );
-    if (!rates.has(row.lotId)) {
-      rates.set(row.lotId, row.unitCost === null ? null : row.unitCost.toString());
-    }
   }
+
+  // Sorted, so a reversal touching several lots takes them in a fixed order.
+  const lotIds = [...outstanding.keys()]
+    .filter((lotId) => outstanding.get(lotId)! > 0)
+    .sort();
+
+  /*
+   * The rate comes from the lot, not from whichever consumption row happened
+   * to be read first.
+   *
+   * Every row against a lot carries the same cost today, so the two agree —
+   * but "the first row we saw" is a property of query order, and with returns
+   * in the set it could be a negative row. Reading the batch is reading the
+   * source, and it costs one query for the whole reversal.
+   */
+  const lots = await tx.stockLot.findMany({
+    where: { id: { in: lotIds } },
+    select: { id: true, unitCost: true },
+  });
+
+  const rates = new Map(
+    lots.map((lot) => [lot.id, lot.unitCost] as const),
+  );
 
   let returned = 0;
 
-  // Sorted, so a reversal touching several lots takes them in a fixed order.
-  for (const lotId of [...outstanding.keys()].sort()) {
+  for (const lotId of lotIds) {
     const quantity = outstanding.get(lotId)!;
-    if (quantity <= 0) continue;
 
     const rate = rates.get(lotId) ?? null;
     const unitCostCents = rate === null ? null : Math.round(Number(rate) * 100);
@@ -651,10 +695,29 @@ export async function returnToLots(
    */
   const shortfall = params.expectedQuantity - returned;
 
+  /*
+   * More returned than the reversal restored, which cannot happen if the
+   * netting above is right.
+   *
+   * This used to be clamped with `Math.max(0, shortfall)`, which is exactly
+   * how the over-restore described at the top of this function stayed silent:
+   * the lots had already been incremented by then, so swallowing the negative
+   * left `SUM(quantityRemaining)` above `Product.stockQuantity` with nothing
+   * to show for it. It is the same condition `allocateFifo` refuses in the
+   * other direction, and it gets the same treatment — the transaction rolls
+   * back and the invariant survives.
+   */
+  if (shortfall < 0) {
+    throw new AppError(
+      "INTERNAL",
+      "This reversal returned more units to stock lots than it restored to the ledger. The valuation layer is out of step with the stock ledger.",
+    );
+  }
+
   if (shortfall > 0) {
     const origin = await tx.stockTransaction.findFirst({
       where: {
-        id: { in: [...params.sourceTransactionIds] },
+        id: { in: [...params.documentTransactionIds] },
         productId: params.productId,
       },
       orderBy: { createdAt: "asc" },
@@ -678,7 +741,8 @@ export async function returnToLots(
     });
   }
 
-  return { returned, uncosted: Math.max(0, shortfall) };
+  // Non-negative by the guard above, so no clamp is needed to say so.
+  return { returned, uncosted: shortfall };
 }
 
 /**

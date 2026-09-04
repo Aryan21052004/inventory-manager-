@@ -23,6 +23,10 @@ import { DEFAULT_ORDER_PARAMS } from "@/lib/order-query";
 import { signOut } from "./clerk-mock";
 import {
   createSupplier,
+  expectConsumptionsReconcile,
+  expectFulfilmentMatchesLedger,
+  expectFulfilmentReconciles,
+  expectLotsReconcile,
   resetDatabase,
   seedProduct,
   signInWithRole,
@@ -83,6 +87,23 @@ async function movementsFor(orderId: string) {
   });
 }
 
+/** The lines of an order, in a stable order, for fulfilment assertions. */
+async function linesOf(orderId: string) {
+  return prisma.orderItem.findMany({
+    where: { orderId },
+    orderBy: { productId: "asc" },
+  });
+}
+
+/** How many units an order still owes, across every line. */
+async function outstandingOf(orderId: string): Promise<number> {
+  const lines = await linesOf(orderId);
+  return lines.reduce(
+    (sum, line) => sum + (line.quantity - line.fulfilledQuantity),
+    0,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Test 1, 3, 4 — deduction on confirmation
 // ---------------------------------------------------------------------------
@@ -135,7 +156,7 @@ describe("confirming an order deducts stock", () => {
     expect(updated.status).toBe("CONFIRMED");
   });
 
-  it("refuses an order for one more than the stock on hand", async () => {
+  it("confirms an order for one more than the stock on hand, owing the extra", async () => {
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const part = await product("A-3", 100);
@@ -144,12 +165,17 @@ describe("confirming an order deducts stock", () => {
       { productId: part.id, quantity: 101 },
     ]);
 
-    await expect(confirmOrder(order.id)).rejects.toMatchObject({
-      code: "INSUFFICIENT_STOCK",
-    });
+    // The sale is committed; the warehouse simply cannot finish it today.
+    await confirmOrder(order.id);
 
-    expect(await stockOf(part.id)).toBe(100);
-    expect(await movementsFor(order.id)).toHaveLength(0);
+    expect(await stockOf(part.id)).toBe(0);
+    expect(await outstandingOf(order.id)).toBe(1);
+
+    // One movement, for the 100 that actually left — not 101.
+    const ledger = await movementsFor(order.id);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]!.quantity).toBe(100);
+    expect(ledger[0]!.newStock).toBe(0);
   });
 
   it("records the confirmation timestamp", async () => {
@@ -171,10 +197,17 @@ describe("confirming an order deducts stock", () => {
 
 // ---------------------------------------------------------------------------
 // Test 2 — insufficient stock
+//
+// This block used to prove that a short order could not be confirmed at all.
+// It now proves the opposite, and the reason is a business rule rather than a
+// relaxation: this company sells parts it does not yet hold, so a shortfall is
+// a procurement fact, not an invalid document. What has *not* changed is the
+// part that matters — inventory never goes below zero, and no movement is
+// written for a unit that did not move.
 // ---------------------------------------------------------------------------
 
-describe("insufficient stock", () => {
-  it("fails confirmation and changes nothing", async () => {
+describe("confirming against insufficient stock", () => {
+  it("takes what is there and leaves the rest outstanding", async () => {
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const part = await product("B-1", 40);
@@ -183,40 +216,104 @@ describe("insufficient stock", () => {
       { productId: part.id, quantity: 60 },
     ]);
 
-    await expect(confirmOrder(order.id)).rejects.toMatchObject({
-      code: "INSUFFICIENT_STOCK",
-      status: 422,
-    });
+    const outcome = await confirmOrder(order.id);
 
-    expect(await stockOf(part.id)).toBe(40);
-    expect(await movementsFor(order.id)).toHaveLength(0);
+    expect(outcome.status).toBe("CONFIRMED");
+    expect(outcome.unfulfilledUnits).toBe(20);
 
-    // And the order is still where it was — a failed confirmation must not
-    // leave it looking confirmed.
+    // The shelf is emptied, never overdrawn.
+    expect(await stockOf(part.id)).toBe(0);
+
+    const [line] = await linesOf(order.id);
+    expect(line!.quantity).toBe(60);
+    expect(line!.fulfilledQuantity).toBe(40);
+
+    // One movement, sized to what actually left.
+    const ledger = await movementsFor(order.id);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]!.quantity).toBe(40);
+    expect(ledger[0]!.previousStock).toBe(40);
+    expect(ledger[0]!.newStock).toBe(0);
+
     const row = await prisma.order.findUniqueOrThrow({
       where: { id: order.id },
     });
-    expect(row.status).toBe("DRAFT");
-    expect(row.confirmedAt).toBeNull();
+    expect(row.status).toBe("CONFIRMED");
+    // Load-bearing: the sales report dates realised revenue by this column, so
+    // a sale that could not be filled must still carry it.
+    expect(row.confirmedAt).not.toBeNull();
+
+    await expectLotsReconcile();
+    await expectConsumptionsReconcile();
+    await expectFulfilmentReconciles();
+    await expectFulfilmentMatchesLedger();
   });
 
-  it("names the product, what was asked for, and what is available", async () => {
+  it("confirms an order against an empty shelf without moving anything", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("B-2", 0);
+
+    const order = await draftOrder(customer.id, [
+      { productId: part.id, quantity: 1 },
+    ]);
+
+    const outcome = await confirmOrder(order.id);
+
+    expect(outcome.status).toBe("CONFIRMED");
+    expect(outcome.movements).toHaveLength(0);
+    expect(outcome.unfulfilledUnits).toBe(1);
+
+    expect(await stockOf(part.id)).toBe(0);
+    expect(await outstandingOf(order.id)).toBe(1);
+
+    /*
+     * The point of the whole design: nothing moved, so the ledger and the
+     * valuation layer say nothing moved. No zero-quantity transaction, no
+     * phantom lot, no consumption row costed at a guess.
+     */
+    expect(await movementsFor(order.id)).toHaveLength(0);
+    expect(await prisma.stockTransaction.count()).toBe(0);
+    expect(await prisma.stockLotConsumption.count()).toBe(0);
+
+    const [line] = await linesOf(order.id);
+    expect(line!.fulfilledQuantity).toBe(0);
+    expect(line!.costedQuantity).toBe(0);
+    expect(line!.costTotal).toBeNull();
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+    });
+    expect(row.confirmedAt).not.toBeNull();
+
+    await expectLotsReconcile();
+    await expectConsumptionsReconcile();
+    await expectFulfilmentReconciles();
+    await expectFulfilmentMatchesLedger();
+  });
+
+  it("costs only the units that actually left", async () => {
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const part = await seedProduct({
-      sku: "B-2",
+      sku: "B-3",
       name: "Hydraulic Actuator",
       stockQuantity: 40,
+      lotUnitCost: "100.00",
     });
 
     const order = await draftOrder(customer.id, [
       { productId: part.id, quantity: 60 },
     ]);
 
-    await expect(confirmOrder(order.id)).rejects.toMatchObject({
-      message: "Not enough stock for Hydraulic Actuator: 60 requested, 40 available.",
-      details: { productName: "Hydraulic Actuator", requested: 60, available: 40 },
-    });
+    await confirmOrder(order.id);
+
+    const [line] = await linesOf(order.id);
+    // 40 shipped and costed at ₹100; the 20 outstanding are not "uncosted",
+    // they are unacquired, and carry no cost figure of any kind.
+    expect(line!.fulfilledQuantity).toBe(40);
+    expect(line!.costedQuantity).toBe(40);
+    expect(Number(line!.costTotal)).toBe(4000);
   });
 });
 
@@ -243,7 +340,7 @@ describe("orders with several products", () => {
     expect(await movementsFor(order.id)).toHaveLength(2);
   });
 
-  it("deducts nothing when one line is short", async () => {
+  it("fulfils each line independently when one is short", async () => {
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const a = await product("M-C", 200);
@@ -254,21 +351,35 @@ describe("orders with several products", () => {
       { productId: b.id, quantity: 80 },
     ]);
 
-    await expect(confirmOrder(order.id)).rejects.toMatchObject({
-      code: "INSUFFICIENT_STOCK",
-    });
+    const outcome = await confirmOrder(order.id);
 
-    // The whole point: A had enough and is still untouched.
-    expect(await stockOf(a.id)).toBe(200);
-    expect(await stockOf(b.id)).toBe(50);
-    expect(await movementsFor(order.id)).toHaveLength(0);
-    expect(await prisma.stockTransaction.count()).toBe(0);
+    /*
+     * The line that could be filled is filled. A short line no longer holds
+     * the rest of the order hostage — but it also does not borrow from
+     * anywhere, so B stops at the 50 it had.
+     */
+    expect(await stockOf(a.id)).toBe(50);
+    expect(await stockOf(b.id)).toBe(0);
+    expect(outcome.unfulfilledUnits).toBe(30);
+
+    const lines = await linesOf(order.id);
+    const lineA = lines.find((line) => line.productId === a.id)!;
+    const lineB = lines.find((line) => line.productId === b.id)!;
+    expect(lineA.fulfilledQuantity).toBe(150);
+    expect(lineB.fulfilledQuantity).toBe(50);
+
+    expect(await movementsFor(order.id)).toHaveLength(2);
+
+    await expectLotsReconcile();
+    await expectFulfilmentReconciles();
+    await expectFulfilmentMatchesLedger();
   });
 
-  it("deducts nothing when the short line is checked first", async () => {
+  it("fulfils the long line when the short one is locked first", async () => {
     // Ordering matters to the implementation — products are locked sorted by
-    // id, and the check runs over the whole order before any write. This is the
-    // mirror of the case above, with the short product first.
+    // id, and each line is settled against its own locked balance. This is the
+    // mirror of the case above, with the short product first, and it proves a
+    // shortfall early in the loop does not abort the lines after it.
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const a = await product("M-E", 5);
@@ -279,12 +390,40 @@ describe("orders with several products", () => {
       { productId: b.id, quantity: 10 },
     ]);
 
-    await expect(confirmOrder(order.id)).rejects.toMatchObject({
-      code: "INSUFFICIENT_STOCK",
-    });
+    await confirmOrder(order.id);
 
-    expect(await stockOf(a.id)).toBe(5);
-    expect(await stockOf(b.id)).toBe(500);
+    expect(await stockOf(a.id)).toBe(0);
+    expect(await stockOf(b.id)).toBe(490);
+    expect(await outstandingOf(order.id)).toBe(5);
+
+    await expectLotsReconcile();
+    await expectFulfilmentMatchesLedger();
+  });
+
+  it("writes no movement for a line with nothing on hand, and fulfils the other", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const a = await product("M-G", 100);
+    const b = await product("M-H", 0);
+
+    const order = await draftOrder(customer.id, [
+      { productId: a.id, quantity: 10 },
+      { productId: b.id, quantity: 10 },
+    ]);
+
+    await confirmOrder(order.id);
+
+    expect(await stockOf(a.id)).toBe(90);
+    expect(await stockOf(b.id)).toBe(0);
+
+    // Exactly one movement: the empty line produced none at all.
+    const ledger = await movementsFor(order.id);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]!.productId).toBe(a.id);
+
+    await expectLotsReconcile();
+    await expectFulfilmentReconciles();
+    await expectFulfilmentMatchesLedger();
   });
 });
 
@@ -555,30 +694,63 @@ describe("concurrency", () => {
       { productId: part.id, quantity: 50 },
     ]);
 
-    // Both at once. Without the row lock these both read 100 and both write,
-    // leaving −20 on the shelf.
+    /*
+     * Both at once. Without the row lock these both read 100 and both write,
+     * leaving −20 on the shelf.
+     *
+     * The assertion changed shape when confirmation stopped refusing a
+     * shortfall: previously one order won and the other was rejected, and now
+     * both succeed — the first takes what it asked for, the second takes
+     * whatever the first left and owes the difference. The guarantee the lock
+     * provides is unchanged and is what this still proves: the two are
+     * serialised, so together they cannot remove more than existed.
+     */
     const results = await Promise.allSettled([
       confirmOrder(a.id),
       confirmOrder(b.id),
     ]);
 
-    const fulfilled = results.filter((r) => r.status === "fulfilled");
-    const rejected = results.filter((r) => r.status === "rejected");
-
-    expect(fulfilled).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
-    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
-      code: "INSUFFICIENT_STOCK",
-    });
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(2);
 
     const remaining = await stockOf(part.id);
-    // 100 − 70 or 100 − 50, depending on which won. Never negative, and never
-    // both.
-    expect([30, 50]).toContain(remaining);
+    expect(remaining).toBe(0);
 
-    const ledger = await prisma.stockTransaction.findMany();
-    expect(ledger).toHaveLength(1);
+    const deducted = (await linesOf(a.id))[0]!.fulfilledQuantity +
+      (await linesOf(b.id))[0]!.fulfilledQuantity;
+    const outstanding =
+      (await outstandingOf(a.id)) + (await outstandingOf(b.id));
+
+    // 100 units existed, 120 were sold: all 100 left, 20 are owed.
+    expect(deducted).toBe(100);
+    expect(outstanding).toBe(20);
+
+    // Whichever went first got its full quantity.
+    const fulfilments = [
+      (await linesOf(a.id))[0]!.fulfilledQuantity,
+      (await linesOf(b.id))[0]!.fulfilledQuantity,
+    ].sort((x, y) => x - y);
+    expect([
+      [30, 70],
+      [50, 50],
+    ]).toContainEqual(fulfilments);
+
+    await expectLotsReconcile();
+    await expectFulfilmentReconciles();
+    await expectFulfilmentMatchesLedger();
+
+    /*
+     * Two movements now, not one, and their balances chain: the second reads
+     * the balance the first wrote. That chaining is the observable proof the
+     * lock held — interleaved reads would produce two rows both starting from
+     * 100.
+     */
+    const ledger = await prisma.stockTransaction.findMany({
+      orderBy: { createdAt: "asc" },
+    });
+    expect(ledger).toHaveLength(2);
     expect(ledger[0]!.previousStock).toBe(100);
+    expect(ledger[1]!.previousStock).toBe(ledger[0]!.newStock);
+    expect(ledger[1]!.newStock).toBe(0);
   });
 
   it("keeps the ledger contiguous when several orders overlap", async () => {
@@ -1618,7 +1790,7 @@ describe("editing never touches inventory", () => {
     expect(await prisma.stockTransaction.count()).toBe(0);
   });
 
-  it("lets a draft ask for more than exists, and refuses it at confirmation", async () => {
+  it("lets a draft ask for more than exists, and confirms it as an obligation", async () => {
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const part = await product("N-3", 5);
@@ -1638,11 +1810,19 @@ describe("editing never touches inventory", () => {
     expect(await stockOf(part.id)).toBe(5);
     expect(await prisma.stockTransaction.count()).toBe(0);
 
-    // The refusal comes at confirmation, where stock is actually checked.
-    await expect(confirmOrder(order.id)).rejects.toMatchObject({
-      code: "INSUFFICIENT_STOCK",
-    });
-    expect(await stockOf(part.id)).toBe(5);
+    /*
+     * Confirmation is where stock is consulted, and it now settles rather than
+     * refuses: the 5 on the shelf leave, and 495 units are owed. The draft
+     * planning for stock that has not arrived was always legitimate; what has
+     * changed is that committing to it is legitimate too.
+     */
+    await confirmOrder(order.id);
+
+    expect(await stockOf(part.id)).toBe(0);
+    expect(await outstandingOf(order.id)).toBe(495);
+
+    await expectFulfilmentReconciles();
+    await expectFulfilmentMatchesLedger();
   });
 });
 

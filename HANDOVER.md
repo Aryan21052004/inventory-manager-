@@ -8,8 +8,9 @@ Written for whoever picks this up next — a new developer, or a new session. It
 covers what exists, the rules the code is built around, and the things that will
 waste your afternoon if nobody tells you.
 
-**Last updated:** 2 September 2026, after moving airworthiness paperwork from
-the product to the batch it arrived on (§17), on top of the stock movement
+**Last updated:** 2 September 2026, after separating commercial order
+completion from physical fulfilment (§18), on top of moving airworthiness
+paperwork from the product to the batch it arrived on (§17), the stock movement
 summary (§13), the removal of threshold-based stock classification (§16), the
 dead-code audit and cleanup pass (§15) and the Dashboard rebuild (§12).
 
@@ -93,6 +94,22 @@ invariant `SUM(stockLot.quantityRemaining) = Product.stockQuantity` holds for
 every product, is asserted after every stock-moving test
 (`expectLotsReconcile`), and is what keeps this a second *view* of inventory
 rather than a second *copy* of it.
+
+**Selling is not shipping.** An order may be confirmed — and completed — while
+the warehouse cannot fill it. Confirmation deducts what is on the shelf and
+records the rest on `OrderItem.fulfilledQuantity`; the shortfall is an
+obligation, not negative stock and not a phantom batch. It is cleared later by
+an explicit fulfilment. Three quantities therefore have to be kept apart, and
+collapsing any pair of them produces a number that is wrong while looking
+authoritative:
+
+```
+costedQuantity                        shipped, cost known
+fulfilledQuantity - costedQuantity    shipped, cost unknown
+quantity - fulfilledQuantity          never shipped, no cost exists
+```
+
+See §18.
 
 **Unknown cost is recorded as unknown.** Stock that predates lot costing, or was
 counted in by hand, carries `unitCost = NULL`. Nothing fills that in from
@@ -364,11 +381,30 @@ quantity into an alert or a classification. The inventory reports that remain in
 scope are **stock valuation** (built), **stock movement summary**, **inventory
 ageing by lot** and **supplier provenance**.
 
+**Returns are out of scope, not unbuilt.** There is no sales-return workflow and
+none is planned. This is a scope decision taken at the owner's direction
+(4 September 2026), not a gap waiting on effort, and it should not be revived as
+"deferred work" in a future plan.
+
+The reason the codebase already carried is unchanged and remains the right one:
+`COMPLETED → CANCELLED` on an order is deliberately refused because the goods
+have shipped, and putting units back because a status changed would invent
+inventory that is physically somewhere else. What a return would additionally
+have required — a document with a receipt and an inspection, a decision about
+whether a returned part re-enters sellable stock or needs quarantine, and a
+returned-quantity concept distinct from fulfilled — is not modelled and is not
+to be added.
+
+Nothing is to be built toward it: no return model, no return status, no
+quarantine logic, no returned quantity on a line, no return UI, no migration and
+no seed data. The one piece of machinery that would have served a return —
+`returnToLots`, which puts units back into their originating batch at that
+batch's cost — exists solely for **cancellation**, which is a different event:
+the sale did not happen, rather than happened and was undone. See §19.
+
 **Other gaps.** No user management UI. No Clerk webhook, so a name or email
 changed in Clerk leaves a stale local mirror and a deletion is invisible
-(`src/server/auth.ts` explains the trade-off). No partial receipts on purchases,
-no returns workflow — `COMPLETED → CANCELLED` on an order is deliberately
-refused because the goods have shipped.
+(`src/server/auth.ts` explains the trade-off). No partial receipts on purchases.
 
 ---
 
@@ -1163,3 +1199,320 @@ pointed only at products; the lot foreign key is `RESTRICT`, so leaving them to
 the cascade makes the lot delete fail on any product carrying paperwork. The
 ordering is certificates → consumptions → lots → transactions → product, and a
 test pins it.
+
+---
+
+## 18. Selling what is not on the shelf
+
+The business sells parts it does not yet hold. Until this change the system
+refused that outright: `confirmOrder` checked every line against its balance and
+threw `INSUFFICIENT_STOCK` if any came up short, so an order for one more unit
+than existed could not be confirmed at all.
+
+That was the wrong model, and the fix is not the one people reach for first.
+
+### What was rejected, and why
+
+**Negative stock.** One guard to remove, in theory. In practice five —
+`applyStockMovement`, the pre-check, and three database CHECK constraints — plus
+the FIFO scan (`WHERE quantity_remaining > 0` makes a deficit invisible, so it
+is never drawn down or repaid), both reconciliation assertions, and the
+valuation report's `stock_quantity > 0` filter, which would silently drop the
+whole product. And after all that the sale stays permanently uncosted: when the
+unit finally arrives at ₹9,500 that money lands in inventory value instead of
+cost of sales. Both sides wrong at once, with no error raised.
+
+**A phantom or negative lot.** Worse, because it fails quietly. It either
+invents a unit that valuation then reports as on hand, or violates
+`quantity_received > 0`. It also sits in the FIFO queue and contaminates the
+*next* order. And it collides with the one distinction the costing layer exists
+to protect: `LotCostSource.UNKNOWN` means "these units are real and we cannot
+price them", not "these units are not real".
+
+### What was built instead
+
+`OrderItem.fulfilledQuantity` — how many of a line have physically left, as
+distinct from how many were sold and from how many have a known cost.
+Outstanding quantity is `quantity - fulfilledQuantity` and is **never stored**:
+two columns that must agree are two columns that will not.
+
+```
+Order 5, shelf holds 3
+  confirmOrder   take = min(5, 3) = 3
+                 one STOCK_OUT for 3, FIFO-costed
+                 fulfilledQuantity = 3, confirmedAt set
+                 2 outstanding: no movement, no lot, no consumption, no cost
+                 stockQuantity 0, never below
+
+Purchase of 2 received   ordinary receipt, ordinary lot, real price
+
+  fulfilOrder    operator states 2
+                 one STOCK_OUT for 2, FIFO draws the new lot
+                 fulfilledQuantity = 5, costTotal += the real cost
+```
+
+Every negative-stock protection is intact. Nothing in `src/server/stock.ts`
+changed — not the engine, not FIFO, not lot creation, not `returnToLots`.
+
+### The rules that are easy to get wrong
+
+**`confirmedAt` is set even when nothing shipped.** The sales report dates
+realised revenue by `orders.confirmed_at`. An order confirmed against an empty
+shelf that left it null would vanish from every financial report. The sale
+happened; only the shipping is outstanding.
+
+**Never write a zero-quantity movement.** A line that can take nothing produces
+no `StockTransaction`, no lot and no consumption row. The ledger records what
+moved, and nothing moved — `stock_transactions_quantity_positive` would reject
+the row anyway.
+
+**Confirmation truncates; fulfilment refuses.** Confirming is a commitment to
+sell, so a shortfall is the point and gets recorded. Fulfilling is an assertion
+that units are physically going out, so asking to ship 2 when 1 is there is a
+mistake in the request and is rejected rather than quietly reduced.
+
+**An unfulfilled unit is not an uncosted unit.** Coverage is measured against
+`fulfilledQuantity`, never `quantity` — in `cost-coverage.ts`, on the order
+detail page, and in the dashboard's costing section. Counting outstanding units
+as uncosted reports a procurement backlog as a costing failure. `marginOf` takes
+`fulfilledQuantity` as a *required* argument for exactly this reason: a default
+would silently preserve the old arithmetic wherever an author had not thought
+about it.
+
+**Fulfilment stays available on a COMPLETED order.** Completion is commercial,
+fulfilment is physical. If completing sealed the outstanding quantity there
+would be no route left to ship it — COMPLETED is terminal and
+`COMPLETED → CANCELLED` is refused — and no route to undo the completion either.
+
+**No automatic allocation.** Receiving a delivery fulfils nothing. When a short
+delivery lands against three waiting orders, which customer gets it is a
+commercial decision, and settling it by whoever's page refreshed first would
+bury that decision in a race.
+
+**No new OrderStatus.** "Partially fulfilled" is a fact about an order's lines,
+not a state of the document. A sixth status would give the same order two places
+to disagree with itself about how much had shipped.
+
+### Cancellation needed no logic change
+
+`cancelOrder` was already ledger-driven: it nets the STOCK_OUT and REVERSAL rows
+and restores only what actually left. An order that shipped nothing writes no
+reversal and creates no uncosted shortfall lot; one that shipped 3 of 5 returns
+exactly 3, to the batches they came from at the prices those batches cost. The
+only addition is bookkeeping — `fulfilledQuantity` is reset to 0 alongside
+`costTotal` and `costedQuantity`, in the same `updateMany`, so
+`costedQuantity <= fulfilledQuantity` never briefly breaks.
+
+`holdsDeductedStock` was renamed `mayHoldDeductedStock`. The hedge is the point:
+a CONFIRMED order may now be holding everything, some of it, or nothing, and
+only the ledger can say which.
+
+### Concurrency
+
+No second model. Order row `FOR UPDATE`, then product rows sorted by id, then
+the lots underneath them — the same sequence `confirmOrder` and `cancelOrder`
+already used, so nothing new can deadlock. The order lock serialises two
+fulfilments of one order; the product lock serialises a fulfilment against a
+concurrent confirmation.
+
+**One existing guarantee genuinely inverted.** Two orders for 70 and 50 against
+100 units used to end with one confirmed and one refused. Both now succeed: the
+first takes 70, the second takes the remaining 30 and owes 20. The lock
+guarantee is unchanged and is what the rewritten tests assert — the two ledger
+rows chain, and together they remove exactly the 100 that existed. The same
+inversion applies to `tests/stock-lots.test.ts`'s "cannot draw the same lot
+units twice", which now asserts the stronger form directly: the lot hands out
+exactly 10, never 12.
+
+### Migration
+
+One migration, `20260902120000_order_item_fulfilment`, additive only. Not one
+existing constraint was dropped or relaxed.
+
+The backfill reads the **ledger**, not the order status, and three pre-flight
+guards abort the whole migration rather than let it invent data: every realised
+line must match its net STOCK_OUT, no DRAFT or PENDING order may have moved
+stock, and every CANCELLED order must net to zero. A terminal guard then checks
+the result against the status. All four passed on dev with zero mismatches.
+
+Two new CHECK constraints enforce
+`0 <= costed_quantity <= fulfilled_quantity <= quantity`. The older
+`order_items_costed_quantity_within_quantity` is now strictly weaker and is
+deliberately left in place — historical migrations are not edited.
+
+**No index.** Nothing filters or sorts on the column, and an outstanding-orders
+screen would need an expression index on the difference rather than one on the
+column itself. Added when such a screen exists and has been measured.
+
+### Where it surfaces
+
+Order builder (a short line is informational, not an error, and Save-and-confirm
+is no longer disabled), order detail (Ordered / Fulfilled / Outstanding columns,
+a Fulfil action, and cost read against fulfilled units), the orders table (an
+outstanding indicator beside the status, shown only on CONFIRMED and COMPLETED —
+a draft owes nothing and a cancelled order owes nothing), and the dashboard's
+costing section.
+
+Vocabulary is **Ordered / Fulfilled / Outstanding**. Not "low stock", "out of
+stock", "short" or "reorder" — §16 removed threshold language at the owner's
+direction and this did not bring it back. "Outstanding" describes an obligation
+on an order, never a state of a product.
+
+### What is still not modelled
+
+**No link from a purchase to the order waiting on it.** `StockReferenceType` has
+no ORDER↔PURCHASE pair, so "which delivery will clear this backlog" is a question
+the data cannot answer. That is the natural next workstream, and it is additive.
+
+**No outstanding-orders screen.** Outstanding quantity is visible on an order and
+in the orders list, but there is no "what do we owe" view across the book.
+
+**A business question left open.** If goods physically reach the customer while
+this system says nothing shipped, then units left the building from a source it
+does not track — a consignment shelf, a direct-ship supplier. The deficit model
+records that faithfully as an obligation, but the more accurate long-run model
+may be an inbound movement recording the untracked acquisition followed by an
+ordinary fulfilment. Which is right determines whether outstanding quantities are
+expected to clear in days or to sit open indefinitely.
+
+---
+
+## 19. The costing hardening pass, and the scope line drawn under it
+
+A review of the FIFO and lot-costing layer against the business rule that
+**there is no fixed product cost** (4 September 2026). The review's conclusion
+was that the architecture is sound and should be kept: cost belongs to the
+batch, unknown cost stays unknown, and an order may be confirmed against an
+empty shelf and costed later at the price actually paid. §10 and §18 remain the
+account of how that works, and none of it changed.
+
+What the review turned up was six findings around the model rather than in it.
+Where each of them stands:
+
+| Finding | Status |
+| --- | --- |
+| Upward adjustments created `UNKNOWN`-cost lots | **Implemented** — below |
+| Reversal netting in `returnToLots` | **Implemented** — below |
+| No sales-return workflow | **Out of scope** — §8 |
+| Order-level discount absent from margin | **Resolved** — the discount feature was removed, §20 |
+| Seed exercises one price per product | Remaining work |
+| `Product.standardCost` still present | Remaining work |
+| No landed-cost model | Business decision only |
+
+The two out-of-scope rows are decisions, not backlog. They are not to be
+reopened as deferred items, and nothing is to be built toward either.
+
+### What was fixed
+
+**Reversal netting (`returnToLots`).** The function decides how many units a
+reversal puts back into each batch, and it did that by netting the consumption
+rows written against the document's movements — but it was handed only the
+*outbound* half of those movements. Negative rows written by a prior REVERSAL
+hang off that reversal's own transaction id, so they were invisible to it, the
+draw looked larger than it was, and the lots were over-restored.
+
+Two shapes came out of that, and only one announced itself. Where the document
+was a lot's sole consumer, the over-restore pushed `quantityRemaining` past
+`quantityReceived` and the check constraint refused the write — loud, and
+harmless. Where another document had since drawn from the same lot, the lot had
+room to absorb the excess: nothing was refused, and `SUM(quantityRemaining)`
+quietly stopped equalling `Product.stockQuantity`. **I-1 broken with no error
+raised** is the failure this fix exists to remove.
+
+Three changes, all in `src/server/stock.ts` and the one caller in
+`src/server/orders.ts`:
+
+* `cancelOrder` passes **every** ledger row for the order, not just the
+  `STOCK_OUT`s. The parameter was renamed `sourceTransactionIds` →
+  `documentTransactionIds` so that half of them cannot be passed by accident.
+* The unit cost is read from `StockLot` rather than from whichever consumption
+  row was encountered first. The values agree today, but "the first row we saw"
+  is a property of query order.
+* `Math.max(0, shortfall)` is gone. A negative shortfall means the lots were
+  given back more than the ledger restored, and it now raises the same way
+  `allocateFifo` raises when lots do not cover a movement. It used to be
+  swallowed *after* the lots had already been incremented, which is precisely
+  how the silent shape stayed silent.
+
+**Read this next part before touching the tests.** With returns out of scope
+(below), there is no longer any path that writes a second REVERSAL against one
+order — `cancelOrder` is the only writer and it runs once, on a status that
+becomes terminal. **The defect therefore has no reachable trigger.** The fix is
+kept because the netting is now correct by construction rather than correct by
+accident, and because the shortfall guard converts a class of silent corruption
+into a loud failure. `tests/stock-lot-reversal.test.ts` constructs the
+second-reversal state by hand for that reason, and for no other; its
+`simulateSecondReversal` helper is a test fixture, not a sketch of a feature.
+
+**Acquisition cost on an upward adjustment.** An adjustment that adds stock
+creates a batch, and a batch has an acquisition cost or honestly does not. This
+was neither asked nor recorded: every increase produced an `UNKNOWN` lot, so a
+cost the operator knew perfectly well was discarded by the shape of the form,
+`LotCostSource.ADJUSTMENT` was an enum value nothing could produce, and uncosted
+units accumulated in the FIFO queue — draining first, so they suppressed cost
+coverage on the *next* sales rather than the last.
+
+The fix is a **required answer, not a required number**. An increase must state
+either a cost (→ `ADJUSTMENT` lot at that price) or that the cost is unknown
+together with an explanation of why (→ `UNKNOWN` lot, no price). Neither is
+pre-selected, and the form cannot be submitted without a choice.
+
+Requiring a cost outright was considered and rejected. Units found in a corner
+with no paperwork genuinely have no acquisition cost, and a mandatory field
+there would guarantee an invented one — the single thing this costing model
+exists to prevent. What changed is not what the system can record; it is that an
+unknown cost became something the operator **said** rather than something the
+form **assumed**. Both explanations are written to the ledger note, because why
+the stock changed and why nobody can price it are different facts with different
+consequences — the second explains every uncosted sale that batch will produce.
+
+Nothing is defaulted from `Product.standardCost` here or anywhere else, and
+existing `UNKNOWN` adjustment lots were left alone. Back-filling them would be
+the fabrication this fixes.
+
+### Returns: out of scope
+
+Closed at the owner's direction (4 September 2026), and closed rather than
+deferred. §8 carries the full statement and the reason. In short: the goods have
+shipped, `COMPLETED → CANCELLED` is refused for that reason, and a real return
+is a document with a receipt and an inspection that this system does not model
+and is not to be given.
+
+Three questions were raised as blocking a return design and are now moot rather
+than open: whether a returned part re-enters sellable stock or needs quarantine,
+whether a return is a credit or a replacement, and whether it reduces the
+order's revenue here or is settled commercially elsewhere. They are recorded
+only so that nobody re-derives them and mistakes them for a backlog.
+
+**`returnToLots` is not a returns feature.** It serves cancellation, which is a
+different event: the sale did not happen, rather than happened and was undone.
+The name is about the *lots* units go back to, not about a customer return.
+
+### What remains
+
+Two findings from the same review are still live work, and one is a question
+rather than work. None has been started:
+
+* **The seed uses `standardCost` as every purchase line's unit cost**, so the
+  demo dataset has exactly one price per part — the world this costing model
+  exists to reject. The *test* fixtures already exercise multiple prices, mixed
+  FIFO draws and uncosted lots; the gap is `prisma/seed.ts` alone.
+* **`Product.standardCost` is still present.** It feeds no money figure — only a
+  purchase-line prefill and a catalogue column — but it is still there. §10's
+  rules about it are unchanged and still binding.
+* **No landed-cost model.** `StockLot.unitCost` is a 1:1 copy of the invoice
+  line, so if freight, duty or certification are material then it is invoice
+  cost rather than acquisition cost, and valuation is understated by that
+  component. Whether that is true is a business question, not a code question.
+
+### Where it surfaces
+
+* `src/lib/validation/adjustment.ts` — the cost-basis choice, its conditional
+  requirements, and the two helpers (`adjustmentNote`,
+  `adjustmentUnitCostCents`) that keep `adjustStock` thin.
+* `src/app/(app)/products/stock-adjustment-dialog.tsx` — the unselected-by-
+  default choice, shown only for an increase and cleared when direction changes.
+* `src/server/stock.ts` — `returnToLots`.
+* `tests/stock-adjustment-cost.test.ts`, `tests/stock-lot-reversal.test.ts`.
+
+No schema change, no migration, and no seed change was needed for any of it.

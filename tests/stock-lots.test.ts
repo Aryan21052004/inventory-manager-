@@ -252,6 +252,7 @@ describe("confirming an order costs it FIFO", () => {
     const line = await lineOf(order.id);
     const margin = marginOf({
       quantity: line.quantity,
+      fulfilledQuantity: line.fulfilledQuantity,
       unitPrice: Number(line.unitPrice),
       costTotal: Number(line.costTotal),
       costedQuantity: line.costedQuantity,
@@ -365,6 +366,7 @@ describe("stock with no known cost", () => {
     const line = await lineOf(order.id);
     const margin = marginOf({
       quantity: line.quantity,
+      fulfilledQuantity: line.fulfilledQuantity,
       unitPrice: Number(line.unitPrice),
       costTotal: Number(line.costTotal),
       costedQuantity: line.costedQuantity,
@@ -863,6 +865,8 @@ describe("manual stock movements", () => {
       productId: a.id,
       quantity: "12",
       direction: "INCREASE",
+      costBasis: "UNKNOWN",
+      unknownCostReason: "No paperwork came with them",
       reason: "Found in the stockroom",
     });
 
@@ -1003,10 +1007,11 @@ describe("concurrent confirmations", () => {
   it("cannot draw the same lot units twice", async () => {
     /*
      * Two orders for six units against a single batch of ten, sent together.
-     * One wins outright; the other must either take the remaining four — it
-     * cannot, its line is for six — or be refused. What must never happen is
-     * both succeeding and the lot going negative, which the product row lock
-     * is what prevents: lots are only ever reached through it.
+     * Both succeed now — one takes its six, the other takes the four that are
+     * left and owes two — because a shortfall no longer refuses a sale. What
+     * must never happen is unchanged and is what this proves: the lot must not
+     * hand out twelve units it never had, and the product row lock is what
+     * prevents that, since lots are only ever reached through it.
      */
     await signInWithRole("STAFF");
     const supplier = await createSupplier();
@@ -1031,12 +1036,29 @@ describe("concurrent confirmations", () => {
       confirmOrder(second.id),
     ]);
 
-    const fulfilled = results.filter((r) => r.status === "fulfilled");
-    expect(fulfilled).toHaveLength(1);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(2);
 
-    expect(await stockOf(a.id)).toBe(4);
+    // Ten units existed and ten were drawn — never eleven, never twelve.
+    expect(await stockOf(a.id)).toBe(0);
+
     const lots = await lotsOf(a.id);
-    expect(lots[0]!.quantityRemaining).toBe(4);
+    expect(lots[0]!.quantityRemaining).toBe(0);
+
+    const drawn = await prisma.stockLotConsumption.aggregate({
+      where: { lotId: lots[0]!.id },
+      _sum: { quantity: true },
+    });
+    expect(drawn._sum.quantity).toBe(10);
+
+    // Twelve sold, ten shipped: two are owed.
+    const lines = await prisma.orderItem.findMany({
+      where: { orderId: { in: [first.id, second.id] } },
+    });
+    const outstanding = lines.reduce(
+      (sum, line) => sum + (line.quantity - line.fulfilledQuantity),
+      0,
+    );
+    expect(outstanding).toBe(2);
 
     await expectLotsReconcile();
     await expectConsumptionsReconcile();
@@ -1089,6 +1111,8 @@ describe("the valuation layer stays an index over the ledger", () => {
       productId: b.id,
       quantity: "2",
       direction: "INCREASE",
+      costBasis: "UNKNOWN",
+      unknownCostReason: "Miscount — original batch cannot be identified",
       reason: "Recount",
     });
 

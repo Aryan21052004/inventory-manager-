@@ -177,8 +177,22 @@ export interface RecentPurchase {
 export interface CostingSnapshot {
   /** Units sold on realised orders. */
   unitsSold: number;
-  /** How many of those have a recorded acquisition cost. */
+  /**
+   * Units of those that have physically shipped.
+   *
+   * The denominator every coverage figure below is read against, and
+   * deliberately not `unitsSold`. An order confirmed against a shelf that
+   * could not fill it leaves units sold but unfulfilled, and those have no
+   * acquisition cost for the plainest of reasons: nothing has been acquired
+   * against them yet. Counting them as uncosted would report a procurement
+   * backlog as a costing failure — two different problems with two different
+   * remedies, and this section exists to keep exactly that kind of pair apart.
+   */
+  fulfilledUnits: number;
+  /** How many of the *fulfilled* units have a recorded acquisition cost. */
   costedUnits: number;
+  /** Units sold that have not shipped, so carry no cost of sale yet. */
+  outstandingUnits: number;
   /** Cost of the costed units. Null when none are costed. */
   knownCogs: string | null;
   /**
@@ -662,6 +676,7 @@ export async function loadProcurement(): Promise<Result<ProcurementSnapshot>> {
 
 interface CostingRow {
   units_sold: number;
+  fulfilled_units: number;
   costed_units: number;
   known_cogs: string;
   costed_revenue: string;
@@ -690,6 +705,7 @@ export async function loadCosting(): Promise<Result<CostingSnapshot>> {
     const rows = await prisma.$queryRaw<CostingRow[]>`
       SELECT
         COALESCE(SUM(oi.quantity), 0)::int                   AS units_sold,
+        COALESCE(SUM(oi.fulfilled_quantity), 0)::int         AS fulfilled_units,
         COALESCE(SUM(oi.costed_quantity), 0)::int            AS costed_units,
         COALESCE(SUM(oi.cost_total), 0)::text                AS known_cogs,
         COALESCE(SUM(oi.unit_price * oi.costed_quantity), 0)::text
@@ -707,6 +723,7 @@ export async function loadCosting(): Promise<Result<CostingSnapshot>> {
 
     const totals = rows[0] ?? {
       units_sold: 0,
+      fulfilled_units: 0,
       costed_units: 0,
       known_cogs: "0",
       costed_revenue: "0",
@@ -731,7 +748,12 @@ export async function loadCosting(): Promise<Result<CostingSnapshot>> {
       ok: true,
       data: {
         unitsSold: totals.units_sold,
+        fulfilledUnits: totals.fulfilled_units,
         costedUnits: totals.costed_units,
+        outstandingUnits: Math.max(
+          0,
+          totals.units_sold - totals.fulfilled_units,
+        ),
         knownCogs: costed ? totals.known_cogs : null,
         costedSalesAtListPrice: costed ? totals.costed_revenue : null,
         margin: costed ? margin.toFixed(2) : null,

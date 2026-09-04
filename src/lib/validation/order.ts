@@ -146,6 +146,55 @@ export function calculateTotals(
   };
 }
 
+/**
+ * What an operator says they are physically shipping against an order.
+ *
+ * Deliberately *not* the same shape as an order line. An order line is a
+ * commercial intention and its quantity is what was sold; this is a statement
+ * about the warehouse — "I am putting these units in a box today" — and the
+ * two can legitimately differ for as long as stock is short.
+ *
+ * The line is addressed by `orderItemId` rather than by product. An order
+ * holds at most one line per product, so either would resolve, but the line id
+ * is what the operator's screen is actually showing them, and resolving by
+ * product would silently retarget if the order were edited between the page
+ * rendering and the form being submitted.
+ *
+ * No upper bound is expressed here beyond sanity. What may actually be
+ * fulfilled depends on the line's outstanding quantity and on stock on hand,
+ * neither of which this schema can see — both are checked on the server under
+ * the row locks, which is the only place the answer is stable.
+ */
+export const fulfilmentLineSchema = z.object({
+  orderItemId: z.string().trim().min(1, "Order line is required"),
+  quantity: lineQuantity,
+});
+
+export const fulfilmentSchema = z.object({
+  lines: z
+    .array(fulfilmentLineSchema)
+    .min(1, "Choose at least one line to fulfil")
+    .max(200, "An order can hold at most 200 lines")
+    .superRefine((lines, ctx) => {
+      const seen = new Set<string>();
+
+      for (const line of lines) {
+        if (seen.has(line.orderItemId)) {
+          ctx.addIssue({
+            code: "custom",
+            message:
+              "The same order line appears twice. Put the whole quantity on one entry.",
+          });
+          return;
+        }
+        seen.add(line.orderItemId);
+      }
+    }),
+});
+
+export type FulfilmentLineInput = z.infer<typeof fulfilmentLineSchema>;
+export type FulfilmentInput = z.infer<typeof fulfilmentSchema>;
+
 /** A decimal string in cents, without going through a float. */
 export function toCents(value: number): number {
   return Math.round(value * 100);

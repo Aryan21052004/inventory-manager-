@@ -10,6 +10,7 @@ import {
   completeOrder,
   confirmOrder,
   createOrder,
+  fulfilOrder,
   searchOrderProducts,
   setOrderStatus,
   updateOrder,
@@ -120,7 +121,8 @@ export async function createOrderAction(
     return {
       ok: true,
       orderId,
-      message: `Order ${orderNumber} confirmed. ${describeMovements(outcome.movements)}`,
+      message:
+        `Order ${orderNumber} confirmed. ${describeOutcome(outcome, "deducted")}`.trimEnd(),
     };
   } catch (error) {
     const failure = toSafeError(error, "createOrderAction:confirm");
@@ -162,7 +164,8 @@ export async function confirmOrderAction(
     return {
       ok: true,
       status: outcome.status,
-      message: `Order ${outcome.orderNumber} confirmed. ${describeMovements(outcome.movements)}`,
+      message:
+        `Order ${outcome.orderNumber} confirmed. ${describeOutcome(outcome, "deducted")}`.trimEnd(),
     };
   } catch (error) {
     return { ok: false, message: toSafeError(error, "confirmOrderAction").message };
@@ -216,6 +219,42 @@ export async function cancelOrderAction(
   }
 }
 
+/** One line's worth of "we are shipping this many today". */
+export interface FulfilmentSubmission {
+  orderItemId: string;
+  quantity: number;
+}
+
+/**
+ * Ships outstanding units against an order.
+ *
+ * Moves stock, so it revalidates the product and movement pages alongside the
+ * order — the same set a confirmation invalidates, for the same reason.
+ *
+ * Note there is no "fulfil everything" variant here. The quantities come from
+ * the operator's form, which the UI prefills with what is available; letting an
+ * action decide for itself how much to ship would put an allocation policy in
+ * a place nobody would think to look for one.
+ */
+export async function fulfilOrderAction(
+  orderId: string,
+  lines: FulfilmentSubmission[],
+): Promise<TransitionActionResult> {
+  try {
+    const outcome = await fulfilOrder(orderId, { lines });
+    revalidateOrder(orderId, true);
+
+    return {
+      ok: true,
+      status: outcome.status,
+      message:
+        `Order ${outcome.orderNumber}: ${describeOutcome(outcome, "fulfilled")}`.trimEnd(),
+    };
+  } catch (error) {
+    return { ok: false, message: toSafeError(error, "fulfilOrderAction").message };
+  }
+}
+
 export async function setOrderStatusAction(
   orderId: string,
   status: OrderStatus,
@@ -253,7 +292,7 @@ export async function searchOrderProductsAction(
 /** "150 units of Widget deducted (200 → 50)." */
 function describeMovements(
   movements: { productName: string; quantity: number; previousStock: number; newStock: number }[],
-  verb: "deducted" | "restored" = "deducted",
+  verb: "deducted" | "restored" | "fulfilled" = "deducted",
 ): string {
   if (movements.length === 0) return "";
 
@@ -264,4 +303,44 @@ function describeMovements(
 
   const units = movements.reduce((sum, move) => sum + move.quantity, 0);
   return `${units} units across ${movements.length} products ${verb}.`;
+}
+
+/**
+ * What a confirmation or fulfilment actually did, as one sentence.
+ *
+ * Both halves are conditional, and that is the point. An order confirmed
+ * against an empty shelf moves nothing at all, so `describeMovements` returns
+ * an empty string and the old `${verb}. ${movements}` template left a stray
+ * full stop and a trailing space. And an order that could not be filled has
+ * something to say that a movement list cannot express — what is still owed —
+ * which is the number the operator most needs to see at that moment.
+ */
+function describeOutcome(
+  outcome: {
+    movements: {
+      productName: string;
+      quantity: number;
+      previousStock: number;
+      newStock: number;
+    }[];
+    unfulfilledUnits?: number;
+  },
+  verb: "deducted" | "fulfilled",
+): string {
+  const parts: string[] = [];
+
+  const moved = describeMovements(outcome.movements, verb);
+  if (moved) parts.push(moved);
+
+  const outstanding = outcome.unfulfilledUnits ?? 0;
+
+  if (outstanding > 0) {
+    parts.push(
+      outcome.movements.length === 0
+        ? `Nothing was in stock, so all ${outstanding} ${outstanding === 1 ? "unit remains" : "units remain"} outstanding.`
+        : `${outstanding} ${outstanding === 1 ? "unit remains" : "units remain"} outstanding.`,
+    );
+  }
+
+  return parts.join(" ");
 }

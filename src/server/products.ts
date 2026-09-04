@@ -8,6 +8,8 @@ import { prisma } from "@/lib/prisma";
 import type { ProductListParams, ProductSortKey } from "@/lib/product-query";
 import {
   adjustmentDelta,
+  adjustmentNote,
+  adjustmentUnitCostCents,
   stockAdjustmentSchema,
   type StockAdjustmentInput,
 } from "@/lib/validation/adjustment";
@@ -1040,13 +1042,25 @@ export async function adjustStock(
 
   const adjustment = parsed.data;
 
-  const { transaction, previousStock, newStock } = await recordStockMovement({
-    productId: adjustment.productId,
-    type: "ADJUSTMENT",
-    quantity: adjustmentDelta(adjustment),
-    reference: { type: "MANUAL" },
-    note: adjustment.reason,
-  });
+  /*
+   * An increase creates a batch, so it has to say what that batch cost.
+   *
+   * The value is whatever the operator stated and nothing else: a declared
+   * cost becomes an ADJUSTMENT lot at that price, a declared unknown becomes
+   * an UNKNOWN lot at no price, and a decrease supplies nothing because it
+   * draws from lots that already carry their own. Nothing is defaulted from
+   * `Product.standardCost` or from anywhere else — see `adjustmentUnitCostCents`.
+   */
+  const { transaction, previousStock, newStock } = await recordStockMovement(
+    {
+      productId: adjustment.productId,
+      type: "ADJUSTMENT",
+      quantity: adjustmentDelta(adjustment),
+      reference: { type: "MANUAL" },
+      note: adjustmentNote(adjustment),
+    },
+    adjustmentUnitCostCents(adjustment),
+  );
 
   const product = await prisma.product.findUnique({
     where: { id: adjustment.productId },

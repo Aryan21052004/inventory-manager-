@@ -44,6 +44,21 @@ function adjustmentForm(
   };
 }
 
+/**
+ * An increase that declares its acquisition cost unknown.
+ *
+ * The tests below are about ledger mechanics — balances, contiguity, locking —
+ * and have no opinion about money. Declaring the cost unknown is what they
+ * used to do implicitly, back when an increase could not state a cost at all,
+ * so spreading this keeps their behaviour identical while satisfying the
+ * requirement that the answer be given rather than assumed.
+ */
+const increaseOfUnknownCost = {
+  direction: "INCREASE",
+  costBasis: "UNKNOWN",
+  unknownCostReason: "Mechanics fixture — no acquisition cost is in play here",
+};
+
 describe("authorisation", () => {
   it("lets an ADMIN adjust stock", async () => {
     await signInWithRole("ADMIN");
@@ -138,7 +153,7 @@ describe("the transaction it writes", () => {
     const product = await seedProduct({ sku: "ADJ-011", stockQuantity: 10 });
 
     await adjustStock(
-      adjustmentForm(product.id, { quantity: "5", direction: "INCREASE" }),
+      adjustmentForm(product.id, { quantity: "5", ...increaseOfUnknownCost }),
     );
 
     const movement = await prisma.stockTransaction.findFirstOrThrow({
@@ -158,7 +173,7 @@ describe("the transaction it writes", () => {
 
     await adjustStock(adjustmentForm(product.id, { quantity: "10" }));
     await adjustStock(
-      adjustmentForm(product.id, { quantity: "30", direction: "INCREASE" }),
+      adjustmentForm(product.id, { quantity: "30", ...increaseOfUnknownCost }),
     );
 
     const movements = await prisma.stockTransaction.findMany({
@@ -405,7 +420,7 @@ describe("concurrency", () => {
     await Promise.all([
       ...Array.from({ length: 3 }, () =>
         adjustStock(
-          adjustmentForm(product.id, { quantity: "7", direction: "INCREASE" }),
+          adjustmentForm(product.id, { quantity: "7", ...increaseOfUnknownCost }),
         ),
       ),
       ...Array.from({ length: 3 }, () =>

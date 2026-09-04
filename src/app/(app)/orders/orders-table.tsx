@@ -28,6 +28,7 @@ import {
   type OrderListParams,
   type OrderSortKey,
 } from "@/lib/order-query";
+import { canFulfilOutstanding } from "@/lib/order-status";
 import { listOrders } from "@/server/orders";
 import { cn } from "@/lib/utils";
 
@@ -139,7 +140,31 @@ async function OrdersTable({ params }: { params: OrderListParams }) {
               </TableCell>
 
               <TableCell>
-                <OrderStatusBadge status={order.status} />
+                <div className="flex flex-col items-start gap-1">
+                  <OrderStatusBadge status={order.status} />
+                  {/*
+                    Outstanding units sit beside the status rather than in it.
+                    The order genuinely is confirmed or completed — the sale
+                    happened — and what is still owed is a fact about its lines,
+                    so it reads as a second line of detail instead of a sixth
+                    status. Not sortable: it is a sum over order_items, and
+                    ordering by it would mean aggregating the whole order book
+                    on every load.
+
+                    Only shown once the order has committed. A draft owes
+                    nothing — it has not been confirmed — and a cancelled order
+                    owes nothing either, so on both the subtraction produces a
+                    number that is arithmetically correct and means nothing.
+                    `canFulfilOutstanding` is exactly that question, and is the
+                    same predicate the server enforces.
+                  */}
+                  {order.outstandingUnits > 0 &&
+                  canFulfilOutstanding(order.status) ? (
+                    <span className="text-xs text-muted-foreground">
+                      {formatNumber(order.outstandingUnits)} outstanding
+                    </span>
+                  ) : null}
+                </div>
               </TableCell>
 
               <TableCell className="hidden max-w-[10rem] truncate lg:table-cell">

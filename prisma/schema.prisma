@@ -432,7 +432,48 @@ model OrderItem {
   /// obliged to carry it.
   ///
   /// Zero exactly when `costTotal` is null.
+  ///
+  /// Counted against `fulfilledQuantity`, never against `quantity`: a unit that
+  /// has not shipped has no acquisition cost to know, so including it here
+  /// would report a fulfilment gap as a costing gap. See the note below.
   costedQuantity Int @default(0) @map("costed_quantity")
+
+  /// How many of `quantity` have physically left the building.
+  ///
+  /// The stock counterpart of `costedQuantity`. That field answers how much of
+  /// this line the *money* describes; this one answers how much of it the
+  /// *stock* describes — and the two questions came apart the moment an order
+  /// was allowed to be confirmed against a shelf that could not fill it.
+  ///
+  /// The business sells parts it does not yet hold. Confirmation therefore
+  /// deducts what is on hand and records the rest as an obligation: an order
+  /// for 5 against 3 units confirms with `fulfilledQuantity = 3`, the ledger
+  /// carries one STOCK_OUT for those 3, and the remaining 2 have **no**
+  /// StockTransaction, no lot, no consumption row and no cost. They are not
+  /// negative inventory and not a phantom batch; they are simply two units
+  /// nobody has shipped yet. `Product.stockQuantity` never goes below zero and
+  /// the valuation layer never learns they exist.
+  ///
+  /// The remainder is cleared later by an explicit operator action once stock
+  /// arrives — see `fulfilOrder` in src/server/orders.ts. Nothing allocates a
+  /// delivery to an order automatically, because choosing which of three
+  /// waiting orders gets a short delivery is a decision this system has no
+  /// grounds to make.
+  ///
+  /// Three quantities, and keeping them apart is the whole point:
+  ///
+  ///     costedQuantity                        shipped, cost known
+  ///     fulfilledQuantity - costedQuantity    shipped, cost unknown
+  ///     quantity - fulfilledQuantity          never shipped, no cost exists
+  ///
+  /// `0 <= costedQuantity <= fulfilledQuantity <= quantity` is enforced by
+  /// check constraints in the migration, which Prisma's schema language cannot
+  /// express.
+  ///
+  /// The outstanding quantity is deliberately **not** a column. It is
+  /// `quantity - fulfilledQuantity`, and two stored numbers that must agree are
+  /// two numbers that will eventually disagree.
+  fulfilledQuantity Int @default(0) @map("fulfilled_quantity")
 
   orderId String @map("order_id")
   order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
