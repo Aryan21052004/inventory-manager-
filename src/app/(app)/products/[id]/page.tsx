@@ -140,7 +140,6 @@ export default async function ProductDetailPage({
                   sku: product.sku,
                   description: product.description,
                   category: product.category,
-                  standardCost: product.standardCost,
                   sellingPrice: product.sellingPrice,
                   stockQuantity: product.stockQuantity,
                   status: product.status,
@@ -246,15 +245,6 @@ export default async function ProductDetailPage({
                 </span>
               ) : (
                 <span className="text-sm text-muted-foreground">Unassigned</span>
-              )}
-            </DetailRow>
-            <DetailRow label="Standard cost (reference)">
-              {product.standardCost === null ? (
-                <span className="text-sm text-muted-foreground">Not set</span>
-              ) : (
-                <span className="tabular text-sm font-medium text-muted-foreground">
-                  {formatCurrency(product.standardCost)}
-                </span>
               )}
             </DetailRow>
             <DetailRow label="Average cost on hand">

@@ -52,12 +52,11 @@ beforeEach(async () => {
  * by the fixture, not bought — so anything these tests assert about cost comes
  * from purchases they actually receive.
  */
-async function product(sku: string, stockQuantity: number, cost = "10.00") {
+async function product(sku: string, stockQuantity: number) {
   return seedProduct({
     sku,
     name: `Part ${sku}`,
     stockQuantity,
-    standardCost: cost,
   });
 }
 
@@ -805,11 +804,12 @@ describe("totals", () => {
     expect(Number(row.total)).toBe(sum);
   });
 
-  it("uses the unit cost the supplier invoiced, not the catalogue cost", async () => {
+  it("uses the unit cost the supplier invoiced, and nothing else", async () => {
     await signInWithRole("STAFF");
     const supplier = await createSupplier();
-    // The catalogue says 10.00; this delivery came in at 12.50.
-    const part = await product("V-3", 0, "10.00");
+    // There is no catalogue cost to fall back to any more. What the line says
+    // the supplier charged is the only figure in play.
+    const part = await product("V-3", 0);
 
     const purchase = await createPurchase({
       supplierId: supplier.id,
@@ -1156,7 +1156,7 @@ describe("supplier history", () => {
   it("counts purchases and sums what was actually received", async () => {
     await signInWithRole("STAFF");
     const supplier = await createSupplier("Aviation Spares Ltd");
-    const part = await product("SUP-1", 0, "10.00");
+    const part = await product("SUP-1", 0);
 
     const received = await createPurchase({
       supplierId: supplier.id,

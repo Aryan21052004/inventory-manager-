@@ -161,7 +161,6 @@ const PRODUCTS = [
     description:
       "Tenkeyless mechanical keyboard, hot-swappable switches, USB-C detachable cable.",
     category: "Peripherals",
-    standardCostCents: 4250,
     sellingPriceCents: 8999,
     status: "ACTIVE",
     supplier: "kestrel",
@@ -172,7 +171,6 @@ const PRODUCTS = [
     name: "Contour Ergonomic Wireless Mouse",
     description: "Vertical grip, six programmable buttons, 2.4GHz and Bluetooth.",
     category: "Peripherals",
-    standardCostCents: 1875,
     sellingPriceCents: 4450,
     status: "ACTIVE",
     supplier: "kestrel",
@@ -183,7 +181,6 @@ const PRODUCTS = [
     name: 'Lumen 27" 4K IPS Monitor',
     description: "3840x2160 IPS panel, 99% sRGB, height-adjustable stand.",
     category: "Displays",
-    standardCostCents: 18900,
     sellingPriceCents: 32900,
     status: "ACTIVE",
     supplier: "kestrel",
@@ -195,7 +192,6 @@ const PRODUCTS = [
     description:
       "Dual 4K output, 100W power delivery, gigabit ethernet. Supply paused pending a firmware revision.",
     category: "Accessories",
-    standardCostCents: 6400,
     sellingPriceCents: 12995,
     // Temporarily off sale while the firmware revision lands.
     status: "INACTIVE",
@@ -207,7 +203,6 @@ const PRODUCTS = [
     name: "HDMI 2.1 Cable, 2m Braided",
     description: "48Gbps, 8K60/4K120, braided jacket with moulded strain relief.",
     category: "Cables",
-    standardCostCents: 420,
     sellingPriceCents: 1299,
     status: "ACTIVE",
     supplier: "northwind",
@@ -218,7 +213,6 @@ const PRODUCTS = [
     name: "Aldridge Ergonomic Task Chair, Black",
     description: "Mesh back, four-way adjustable arms, synchronised tilt.",
     category: "Furniture",
-    standardCostCents: 14800,
     sellingPriceCents: 29900,
     status: "ACTIVE",
     supplier: "aldridge",
@@ -229,7 +223,6 @@ const PRODUCTS = [
     name: "Standing Desk 140cm, Oak",
     description: "Electric height adjustment 62-128cm, dual motor, oak veneer top.",
     category: "Furniture",
-    standardCostCents: 26250,
     sellingPriceCents: 54900,
     status: "ACTIVE",
     supplier: "aldridge",
@@ -240,7 +233,6 @@ const PRODUCTS = [
     name: "A4 Copy Paper 80gsm, 500 Sheets",
     description: "FSC-certified white copier paper, one ream.",
     category: "Stationery",
-    standardCostCents: 310,
     sellingPriceCents: 749,
     status: "ACTIVE",
     supplier: "meridian",
@@ -251,7 +243,6 @@ const PRODUCTS = [
     name: "Shipping Carton, Medium 300x200x150mm",
     description: "Double-wall corrugated carton, sold singly.",
     category: "Packaging",
-    standardCostCents: 62,
     sellingPriceCents: 185,
     status: "ACTIVE",
     supplier: "harbour",
@@ -263,7 +254,6 @@ const PRODUCTS = [
     description:
       "Direct thermal, permanent adhesive. Superseded by the 500/roll line.",
     category: "Packaging",
-    standardCostCents: 890,
     sellingPriceCents: 1950,
     // Run-out stock: still sellable history, superseded by the 500/roll line.
     status: "DISCONTINUED",
@@ -313,7 +303,20 @@ const CUSTOMERS = [
 
 type CustomerKey = (typeof CUSTOMERS)[number]["key"];
 
-/** Purchase orders. Only RECEIVED ones put stock on the shelf. */
+/**
+ * Purchase orders. Only RECEIVED ones put stock on the shelf.
+ *
+ * The unit cost lives on the line, not on the product, and that is the whole
+ * point of this fixture. There is no catalogue cost to copy from: what a part
+ * cost is a fact about one delivery from one supplier on one date.
+ *
+ * `kb-87` is here three times at three prices — 42.50, then 46.00, then 39.80 —
+ * so a development database always contains the case the costing layer exists
+ * for: one product, three lots, three acquisition costs, and a FIFO sale that
+ * has to be costed against the units it actually consumed rather than against
+ * an average nobody paid. A seed where every product had exactly one price
+ * could not tell a working implementation from a broken one.
+ */
 const PURCHASES = [
   {
     number: "PO-2026-0001",
@@ -321,9 +324,9 @@ const PURCHASES = [
     status: "RECEIVED",
     daysAgo: 62,
     lines: [
-      { product: "kb-87", quantity: 60 },
-      { product: "mouse-erg", quantity: 80 },
-      { product: "mon-27", quantity: 20 },
+      { product: "kb-87", quantity: 60, unitCostCents: 4250 },
+      { product: "mouse-erg", quantity: 80, unitCostCents: 1875 },
+      { product: "mon-27", quantity: 20, unitCostCents: 18900 },
     ],
   },
   {
@@ -332,45 +335,63 @@ const PURCHASES = [
     status: "RECEIVED",
     daysAgo: 48,
     lines: [
-      { product: "dock-usbc", quantity: 30 },
-      { product: "cable-hdmi", quantity: 200 },
+      { product: "dock-usbc", quantity: 30, unitCostCents: 6400 },
+      { product: "cable-hdmi", quantity: 200, unitCostCents: 420 },
     ],
   },
   {
+    // The same keyboard, dearer. Switch shortages moved the price between
+    // deliveries, which is the ordinary case rather than the exception.
     number: "PO-2026-0003",
+    supplier: "kestrel",
+    status: "RECEIVED",
+    daysAgo: 41,
+    lines: [{ product: "kb-87", quantity: 40, unitCostCents: 4600 }],
+  },
+  {
+    number: "PO-2026-0004",
     supplier: "harbour",
     status: "RECEIVED",
     daysAgo: 34,
     lines: [
-      { product: "box-ship", quantity: 500 },
-      { product: "label-therm", quantity: 40 },
-    ],
-  },
-  {
-    number: "PO-2026-0004",
-    supplier: "aldridge",
-    status: "RECEIVED",
-    daysAgo: 27,
-    lines: [
-      { product: "chair-erg", quantity: 12 },
-      { product: "desk-std", quantity: 6 },
+      { product: "box-ship", quantity: 500, unitCostCents: 62 },
+      { product: "label-therm", quantity: 40, unitCostCents: 890 },
     ],
   },
   {
     number: "PO-2026-0005",
+    supplier: "aldridge",
+    status: "RECEIVED",
+    daysAgo: 27,
+    lines: [
+      { product: "chair-erg", quantity: 12, unitCostCents: 14800 },
+      { product: "desk-std", quantity: 6, unitCostCents: 26250 },
+    ],
+  },
+  {
+    number: "PO-2026-0006",
     supplier: "meridian",
     status: "RECEIVED",
     daysAgo: 19,
-    lines: [{ product: "paper-a4", quantity: 400 }],
+    lines: [{ product: "paper-a4", quantity: 400, unitCostCents: 310 }],
+  },
+  {
+    // And cheaper again, on a volume agreement. Three prices for one part.
+    number: "PO-2026-0007",
+    supplier: "kestrel",
+    status: "RECEIVED",
+    daysAgo: 12,
+    lines: [{ product: "kb-87", quantity: 25, unitCostCents: 3980 }],
   },
   {
     // Placed but not delivered: stock must NOT move for this one. It exists so
-    // the purchasing screens have an open order to render.
-    number: "PO-2026-0006",
+    // the purchasing screens have an open order to render, and its price is
+    // deliberately not the last one paid — nothing is committed until it lands.
+    number: "PO-2026-0008",
     supplier: "meridian",
     status: "PENDING",
     daysAgo: 3,
-    lines: [{ product: "paper-a4", quantity: 200 }],
+    lines: [{ product: "paper-a4", quantity: 200, unitCostCents: 325 }],
   },
 ] as const;
 
@@ -698,12 +719,15 @@ async function main(): Promise<void> {
   // Created at zero stock on purpose. Everything they hold arrives below, as
   // received purchase orders, so the ledger explains every unit.
   const productIds = new Map<ProductKey, string>();
-  const productCost = new Map<ProductKey, number>();
   const productPrice = new Map<ProductKey, number>();
 
+  /*
+   * No cost is written here, because the catalogue has no cost column. What a
+   * part cost is a fact about a delivery, and it is set on the purchase line
+   * below — which is what lets the same product arrive at three prices.
+   */
   for (const {
     key,
-    standardCostCents,
     sellingPriceCents,
     status,
     supplier,
@@ -712,7 +736,6 @@ async function main(): Promise<void> {
     const row = await prisma.product.create({
       data: {
         ...product,
-        standardCost: money(standardCostCents),
         sellingPrice: money(sellingPriceCents),
         status: status as ProductStatus,
         stockQuantity: 0,
@@ -721,7 +744,6 @@ async function main(): Promise<void> {
     });
 
     productIds.set(key, row.id);
-    productCost.set(key, standardCostCents);
     productPrice.set(key, sellingPriceCents);
   }
   console.log(`  ${productIds.size} products`);
@@ -812,14 +834,10 @@ async function main(): Promise<void> {
   for (const purchase of PURCHASES) {
     const placedAt = daysAgo(purchase.daysAgo, 9);
 
-    const lines = purchase.lines.map((line) => {
-      const unitCost = productCost.get(line.product)!;
-      return {
-        ...line,
-        unitCostCents: unitCost,
-        totalCents: unitCost * line.quantity,
-      };
-    });
+    const lines = purchase.lines.map((line) => ({
+      ...line,
+      totalCents: line.unitCostCents * line.quantity,
+    }));
 
     const totalCents = lines.reduce((sum, line) => sum + line.totalCents, 0);
 

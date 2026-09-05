@@ -284,17 +284,30 @@ export async function recordOpeningStock(
     /**
      * What the opening stock actually cost, in cents, if anybody knows.
      *
-     * Optional and genuinely so. This is stock that arrived before the system
-     * was watching, and the honest answer is often that nobody can say what it
-     * cost. Leaving it out creates an UNKNOWN lot, which reports as uncosted
-     * for as long as those units survive.
+     * Null is a real answer, not a missing one. Stock that arrived before this
+     * system was watching often cannot be priced, and a null here creates an
+     * UNKNOWN lot that reports as uncosted for as long as those units survive.
      *
-     * It is emphatically *not* defaulted from `Product.standardCost`. That
-     * field is a planning figure someone typed; using it here would turn a
-     * guess into a recorded acquisition cost, and once written the two are
-     * indistinguishable.
+     * What changed is upstream: the caller now has to have *asked*. Passing
+     * null used to be what happened when a form field was left blank, so
+     * "unknown" was a default nobody chose; `createProductSchema` now requires
+     * the operator to declare KNOWN or UNKNOWN, and an UNKNOWN declaration to
+     * carry a reason that arrives in `note`.
+     *
+     * It is emphatically not defaulted from anything on the catalogue row —
+     * which no longer holds a cost at all. A guess written here would be
+     * indistinguishable from a real acquisition cost afterwards.
      */
     unitCostCents?: number | null;
+    /**
+     * The ledger's explanation for the movement.
+     *
+     * Composed by `openingStockNote`, and carrying the operator's reason when
+     * they declared the cost unknown — that reason is the only thing that will
+     * ever explain the uncosted sales this batch goes on to produce, and the
+     * note is the only durable place it can live.
+     */
+    note: string;
   },
 ): Promise<void> {
   if (params.quantity <= 0) return;
@@ -308,7 +321,7 @@ export async function recordOpeningStock(
       newStock: params.quantity,
       referenceType: "MANUAL",
       referenceId: null,
-      note: "Opening stock recorded when the product was created",
+      note: params.note,
       createdBy: params.userId,
     },
   });

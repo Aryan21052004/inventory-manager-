@@ -272,9 +272,10 @@ describe("what the report counts", () => {
       name: "Opening Widget",
       sku: "OPEN-001",
       category: "Airframe",
-      standardCost: "5.00",
       sellingPrice: "12.50",
       stockQuantity: "42",
+      openingStockCostBasis: "KNOWN",
+      openingStockUnitCost: "5.00",
       status: "ACTIVE",
     });
 

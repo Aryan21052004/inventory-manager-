@@ -29,22 +29,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatNumber } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import {
   createProductSchema,
   updateProductSchema,
   toFieldErrors,
   NO_SUPPLIER,
+  type OpeningStockCostBasis,
   type ProductFieldErrors,
 } from "@/lib/validation/product";
 
 /**
  * The create and edit form, as one component.
  *
- * The two differ in exactly one field — an opening stock box that only a new
- * product has — so keeping them apart would mean maintaining two copies of nine
- * inputs to avoid one conditional.
+ * The two differ only in the opening stock block, which a new product has and
+ * an existing one cannot, so keeping them apart would mean maintaining two
+ * copies of eight shared inputs to avoid one conditional.
  *
- * That missing field is the point of this form, not an omission. Editing a
+ * That missing block is the point of this form, not an omission. Editing a
  * product cannot change its stock: a quantity that moves without a ledger row
  * explaining it is precisely the state the application exists to prevent, and a
  * number in an edit form is the easiest possible way to create one. The edit
@@ -63,8 +65,6 @@ export interface ProductFormValues {
   sku: string;
   description: string | null;
   category: string;
-  /** Planning reference only, and null when nobody has set one. */
-  standardCost: string | null;
   sellingPrice: string | null;
   stockQuantity: number;
   status: string;
@@ -101,6 +101,20 @@ function ProductFormDialog({
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<ProductFieldErrors>({});
+
+  /*
+   * The opening quantity is controlled, which the other inputs are not.
+   *
+   * It has to be: whether the cost question appears at all depends on it. A
+   * product created holding nothing has no batch, so asking what that batch
+   * cost would be a question with no subject — and asking it anyway is how a
+   * form trains people to dismiss it.
+   */
+  const [openingQuantity, setOpeningQuantity] = useState("0");
+  const [openingCostBasis, setOpeningCostBasis] =
+    useState<OpeningStockCostBasis | null>(null);
+
+  const opensWithStock = Number(openingQuantity) > 0;
 
   // Ids are generated rather than hardcoded: two of these dialogs can be
   // mounted at once — one per table row — and duplicate ids would point every
@@ -184,7 +198,13 @@ function ProductFormDialog({
       onOpenChange={(next) => {
         if (submitting) return;
         onOpenChange(next);
-        if (!next) setErrors({});
+        if (!next) {
+          setErrors({});
+          // Reopening must not inherit the last attempt's cost answer — an
+          // unnoticed carry-over is a declared cost basis nobody declared.
+          setOpeningQuantity("0");
+          setOpeningCostBasis(null);
+        }
       }}
     >
       <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
@@ -269,99 +289,142 @@ function ProductFormDialog({
             />
           </Field>
 
-          <div className="grid gap-4 sm:grid-cols-2">
+          {/*
+            There is no cost field here, and that is deliberate. The catalogue
+            carries a reference *price* and no cost at all: the same part is
+            bought at several prices, so a single cost on this row could only be
+            stale, absent, or wrong while reading exactly like a real one. What
+            a batch cost is recorded per receipt, below for opening stock and on
+            the purchase line for everything after.
+          */}
+          <Field
+            label="Reference price"
+            htmlFor={id("sellingPrice")}
+            hint="Optional. Prefills a new order line — the price actually quoted is set on the order."
+            error={errors.sellingPrice}
+          >
+            <Input
+              id={id("sellingPrice")}
+              name="sellingPrice"
+              type="number"
+              step="0.01"
+              min="0"
+              defaultValue={product?.sellingPrice ?? ""}
+              aria-invalid={Boolean(errors.sellingPrice)}
+              className="tabular"
+            />
+          </Field>
+
+          {editing ? (
+            <ReadOnlyStock quantity={product.stockQuantity} />
+          ) : (
             <Field
-              label="Standard cost (reference)"
-              htmlFor={id("standardCost")}
-              hint="A planning figure — prefills purchase lines. Not used to value stock. Leave blank if unknown."
-              error={errors.standardCost}
+              label="Initial stock"
+              htmlFor={id("stockQuantity")}
+              hint="Recorded as the first stock movement."
+              error={errors.stockQuantity}
             >
               <Input
-                id={id("standardCost")}
-                name="standardCost"
+                id={id("stockQuantity")}
+                name="stockQuantity"
                 type="number"
-                step="0.01"
                 min="0"
-                placeholder="Optional"
-                defaultValue={product?.standardCost ?? ""}
-                aria-invalid={Boolean(errors.standardCost)}
+                step="1"
+                value={openingQuantity}
+                onChange={(event) => setOpeningQuantity(event.target.value)}
+                aria-invalid={Boolean(errors.stockQuantity)}
                 className="tabular"
               />
             </Field>
+          )}
 
-            <Field
-              label="Reference price"
-              htmlFor={id("sellingPrice")}
-              hint="Optional. Prefills a new order line — the price actually quoted is set on the order."
-              error={errors.sellingPrice}
-            >
-              <Input
-                id={id("sellingPrice")}
-                name="sellingPrice"
-                type="number"
-                step="0.01"
-                min="0"
-                defaultValue={product?.sellingPrice ?? ""}
-                aria-invalid={Boolean(errors.sellingPrice)}
-                className="tabular"
-              />
-            </Field>
-          </div>
+          {/*
+            Only when creating, and only once there are units to cost.
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            {editing ? (
-              <ReadOnlyStock quantity={product.stockQuantity} />
-            ) : (
+            This block used to be a single optional "opening stock unit cost"
+            box, and leaving it blank silently produced an UNKNOWN lot. That is
+            where this system's uncosted opening units came from — not from
+            anyone deciding the cost was unrecoverable, but from a form that
+            never asked. Now the question is asked, with no default, and both
+            answers are real: a cost, or a reason there isn't one.
+          */}
+          {!editing && opensWithStock ? (
+            <>
               <Field
-                label="Initial stock"
-                htmlFor={id("stockQuantity")}
-                hint="Recorded as the first stock movement."
-                error={errors.stockQuantity}
+                label="Acquisition cost"
+                htmlFor={id("openingStockCostBasis")}
+                hint="These units become the product's first batch. What that batch cost is frozen here and used for every sale that later draws on it."
+                error={errors.openingStockCostBasis}
               >
-                <Input
-                  id={id("stockQuantity")}
-                  name="stockQuantity"
-                  type="number"
-                  min="0"
-                  step="1"
-                  defaultValue="0"
-                  aria-invalid={Boolean(errors.stockQuantity)}
-                  className="tabular"
-                />
+                <div
+                  id={id("openingStockCostBasis")}
+                  role="radiogroup"
+                  aria-label="Opening stock cost basis"
+                  className="grid gap-2 sm:grid-cols-2"
+                >
+                  <CostBasisOption
+                    value="KNOWN"
+                    current={openingCostBasis}
+                    onSelect={setOpeningCostBasis}
+                    label="I know what these cost"
+                    detail="Enter the price per unit"
+                  />
+                  <CostBasisOption
+                    value="UNKNOWN"
+                    current={openingCostBasis}
+                    onSelect={setOpeningCostBasis}
+                    label="Cost is unknown"
+                    detail="Records as uncosted, permanently"
+                  />
+                </div>
+                {openingCostBasis ? (
+                  <input
+                    type="hidden"
+                    name="openingStockCostBasis"
+                    value={openingCostBasis}
+                  />
+                ) : null}
               </Field>
-            )}
 
-            {/*
-              Only when creating, and deliberately separate from the standard
-              cost above. This is what the opening units actually cost; that is
-              what we expect to pay next time. Left blank the opening stock is
-              recorded as uncosted, which is the honest state for inventory
-              whose paperwork nobody can find — the alternative, quietly reusing
-              the planning figure, would turn an estimate into a recorded
-              acquisition cost that no later reader could tell apart from a real
-              one.
-            */}
-            {editing ? null : (
-              <Field
-                label="Opening stock unit cost"
-                htmlFor={id("openingStockUnitCost")}
-                hint="What the initial stock actually cost per unit. Leave blank if unknown — it will be recorded as uncosted rather than guessed."
-                error={errors.openingStockUnitCost}
-              >
-                <Input
-                  id={id("openingStockUnitCost")}
-                  name="openingStockUnitCost"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="Optional"
-                  defaultValue=""
-                  aria-invalid={Boolean(errors.openingStockUnitCost)}
-                  className="tabular"
-                />
-              </Field>
-            )}
-          </div>
+              {openingCostBasis === "KNOWN" ? (
+                <Field
+                  label="Opening stock unit cost"
+                  htmlFor={id("openingStockUnitCost")}
+                  hint="What one unit actually cost to acquire — not what it sells for."
+                  error={errors.openingStockUnitCost}
+                >
+                  <Input
+                    id={id("openingStockUnitCost")}
+                    name="openingStockUnitCost"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="0.00"
+                    autoComplete="off"
+                    aria-invalid={Boolean(errors.openingStockUnitCost)}
+                    className="tabular"
+                  />
+                </Field>
+              ) : null}
+
+              {openingCostBasis === "UNKNOWN" ? (
+                <Field
+                  label="Why is the cost unknown?"
+                  htmlFor={id("openingStockUnknownReason")}
+                  hint="Required. These units will report as uncosted for as long as they last, and this is the only thing that will ever explain why."
+                  error={errors.openingStockUnknownReason}
+                >
+                  <Textarea
+                    id={id("openingStockUnknownReason")}
+                    name="openingStockUnknownReason"
+                    rows={2}
+                    placeholder="Stock predates this system — the original purchase paperwork cannot be found."
+                    aria-invalid={Boolean(errors.openingStockUnknownReason)}
+                  />
+                </Field>
+              ) : null}
+            </>
+          ) : null}
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field
@@ -451,6 +514,51 @@ function ReadOnlyStock({ quantity }: { quantity: number }) {
         Changed through a stock adjustment, so the ledger records who and why.
       </p>
     </div>
+  );
+}
+
+/**
+ * One of the two answers about what the opening stock cost.
+ *
+ * The same control the stock adjustment dialog uses, and the same reasoning:
+ * neither option is styled as the safe or expected one. "Cost is unknown" is a
+ * legitimate answer this business genuinely needs for stock that predates its
+ * paperwork, not a failure state to be discouraged into a made-up number. The
+ * subtitle on each says what it will actually do, because the consequence of
+ * the unknown option outlives the form by as long as the units do.
+ */
+function CostBasisOption({
+  value,
+  current,
+  onSelect,
+  label,
+  detail,
+}: {
+  value: OpeningStockCostBasis;
+  current: OpeningStockCostBasis | null;
+  onSelect: (value: OpeningStockCostBasis) => void;
+  label: string;
+  detail: string;
+}) {
+  const selected = current === value;
+
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={() => onSelect(value)}
+      className={cn(
+        "flex flex-col items-start gap-0.5 rounded-md border px-3 py-2 text-left transition-colors",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        selected
+          ? "border-primary/40 bg-primary/10 text-foreground"
+          : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+      )}
+    >
+      <span className="text-sm font-medium">{label}</span>
+      <span className="text-xs text-muted-foreground">{detail}</span>
+    </button>
   );
 }
 

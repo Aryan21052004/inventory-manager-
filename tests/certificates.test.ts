@@ -143,6 +143,8 @@ describe("a product without a certificate", () => {
       category: "Actuators",
       sellingPrice: "1850.00",
       stockQuantity: "3",
+      openingStockCostBasis: "KNOWN",
+      openingStockUnitCost: "1200.00",
       status: "ACTIVE",
     });
 
@@ -283,6 +285,8 @@ describe("attaching a certificate", () => {
       category: "Airframe",
       sellingPrice: "480.00",
       stockQuantity: "2",
+      openingStockCostBasis: "KNOWN",
+      openingStockUnitCost: "300.00",
       status: "ACTIVE",
     });
 
@@ -729,6 +733,8 @@ describe("deleting a product with certificates", () => {
       category: "Airframe",
       sellingPrice: "20.00",
       stockQuantity: "1",
+      openingStockCostBasis: "KNOWN",
+      openingStockUnitCost: "12.00",
       status: "ACTIVE",
     });
 
@@ -967,6 +973,8 @@ describe("certificates belong to lots", () => {
       category: "Airframe",
       sellingPrice: "20.00",
       stockQuantity: "3",
+      openingStockCostBasis: "KNOWN",
+      openingStockUnitCost: "12.00",
       status: "ACTIVE",
     });
 

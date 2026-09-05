@@ -1,0 +1,53 @@
+-- Removing the catalogue cost column, for good.
+--
+-- `products.cost_price` became `products.standard_cost` and was demoted to a
+-- planning reference. This drops it. There is no replacement column, and that
+-- is the decision rather than an omission.
+--
+-- ---------------------------------------------------------------------------
+-- Why it goes rather than gets fixed
+-- ---------------------------------------------------------------------------
+--
+-- The business buys the same part at ₹8,000, then ₹9,500, then ₹11,000. A
+-- single column on the catalogue row cannot describe a shelf of mixed
+-- deliveries, so it was only ever going to be stale, absent, or wrong — and it
+-- was all three silently, which is what made it worth removing rather than
+-- documenting. A plausible number sitting where a real cost belongs reads
+-- exactly like a real cost to everybody downstream.
+--
+-- Actual acquisition cost has lived on `stock_lots.unit_cost` since the lots
+-- migration, one row per receipt, frozen at arrival and carried onto
+-- `stock_lot_consumptions` when a sale draws on it. Nothing in this drop moves
+-- money: no report, no valuation, no COGS and no margin figure read the column
+-- being removed, which is what made it safe to take out in one step.
+--
+-- ---------------------------------------------------------------------------
+-- No backfill, and no data rescue
+-- ---------------------------------------------------------------------------
+--
+-- Deliberately none. The twelve products carrying a value here hold planning
+-- figures somebody typed, not prices anybody paid, and writing them into
+-- `stock_lots.unit_cost` would convert an estimate into a recorded acquisition
+-- cost that no later reader could tell from a real one. That is the single
+-- confusion the whole costing layer exists to prevent, so the values are
+-- exported to a backup outside this repository and then discarded here.
+--
+-- This is irreversible. Reverting means re-adding a nullable column; the
+-- values that were in it are not coming back from the database.
+--
+-- ---------------------------------------------------------------------------
+-- Why the constraint is dropped explicitly
+-- ---------------------------------------------------------------------------
+--
+-- Postgres would drop a CHECK that depends only on the column being removed,
+-- so the first statement is not strictly required. It is here because the
+-- constraint was added by hand in an earlier migration and Prisma does not
+-- know about it: a reader diffing the schema would see the column go and have
+-- no reason to believe the constraint went with it. Naming it costs one line
+-- and leaves nothing to infer.
+
+-- DropConstraint
+ALTER TABLE "products" DROP CONSTRAINT "products_standard_cost_non_negative";
+
+-- AlterTable
+ALTER TABLE "products" DROP COLUMN "standard_cost";

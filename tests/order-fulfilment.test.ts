@@ -306,7 +306,7 @@ describe("fulfilling outstanding quantity", () => {
 
     /*
      * Fulfilled in full, costed for none of it. Nothing was substituted from
-     * `standardCost` or the selling price to make the line look complete — an
+     * the catalogue or the selling price to make the line look complete — an
      * unknown cost that survives to the screen is worth more than a plausible
      * number nobody can source.
      */

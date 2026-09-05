@@ -16,6 +16,8 @@ import {
 import {
   createProductSchema,
   firstIssueMessage,
+  openingStockNote,
+  openingStockUnitCostCents,
   toFieldErrors,
   updateProductSchema,
   type ProductFieldErrors,
@@ -60,8 +62,7 @@ export interface ProductListItem {
   /** Carried so the edit dialog can prefill without a second round trip. */
   description: string | null;
   category: string;
-  /** Planning reference only — never what the stock cost. Null when unset. */
-  standardCost: string | null;
+  /** A reference price only — never what any order sold for. Null when unset. */
   sellingPrice: string | null;
   stockQuantity: number;
   status: ProductStatus;
@@ -171,8 +172,7 @@ export interface ProductDetail {
   sku: string;
   description: string | null;
   category: string;
-  /** Planning reference only — never what the stock cost. Null when unset. */
-  standardCost: string | null;
+  /** A reference price only — never what any order sold for. Null when unset. */
   sellingPrice: string | null;
   stockQuantity: number;
   status: ProductStatus;
@@ -228,7 +228,6 @@ const SORT_COLUMNS: Record<Exclude<ProductSortKey, "supplier">, string> = {
   name: "name",
   sku: "sku",
   category: "category",
-  standardCost: "standardCost",
   sellingPrice: "sellingPrice",
   stockQuantity: "stockQuantity",
   createdAt: "createdAt",
@@ -298,7 +297,6 @@ export async function listProducts(
           sku: true,
           description: true,
           category: true,
-          standardCost: true,
           sellingPrice: true,
           stockQuantity: true,
           status: true,
@@ -318,7 +316,6 @@ export async function listProducts(
           sku: row.sku,
           description: row.description,
           category: row.category,
-          standardCost: row.standardCost?.toString() ?? null,
           sellingPrice: row.sellingPrice?.toString() ?? null,
           stockQuantity: row.stockQuantity,
           status: row.status,
@@ -531,7 +528,7 @@ export async function getProductDetail(
      * Value what is known and count what is not. Deliberately two figures: a
      * single "stock value" covering only some of the units would understate
      * the shelf while looking authoritative, and valuing the unknown units at
-     * zero or at `standardCost` would misstate it invisibly.
+     * zero or at some catalogue figure would misstate it invisibly.
      */
     let stockValueCents = 0;
     let costedUnits = 0;
@@ -581,7 +578,6 @@ export async function getProductDetail(
         sku: product.sku,
         description: product.description,
         category: product.category,
-        standardCost: product.standardCost?.toString() ?? null,
         sellingPrice: product.sellingPrice?.toString() ?? null,
         stockQuantity: product.stockQuantity,
         status: product.status,
@@ -785,7 +781,6 @@ export async function createProduct(
           name: data.name,
           description: data.description,
           category: data.category,
-          standardCost: data.standardCost?.toFixed(2) ?? null,
           sellingPrice: data.sellingPrice?.toFixed(2) ?? null,
           // Zero, then moved by the ledger — never written straight from input.
           stockQuantity: 0,
@@ -800,15 +795,14 @@ export async function createProduct(
         quantity: data.stockQuantity,
         userId: user.id,
         /*
-         * Only what the operator actually entered. Blank stays blank and the
-         * opening lot is UNKNOWN — `standardCost` is a planning figure and is
-         * never substituted in here, because a guess written into an
-         * acquisition cost is indistinguishable from a real one afterwards.
+         * Only what the operator declared, and they had to declare something:
+         * the schema refuses an opening quantity that does not say whether its
+         * cost is known. An UNKNOWN declaration produces a null here and takes
+         * its reason into the ledger note, so the resulting uncosted lot is a
+         * decision somebody made rather than a field somebody skipped.
          */
-        unitCostCents:
-          data.openingStockUnitCost === null
-            ? null
-            : Math.round(data.openingStockUnitCost * 100),
+        unitCostCents: openingStockUnitCostCents(data),
+        note: openingStockNote(data),
       });
 
       return product;
@@ -896,7 +890,6 @@ export async function updateProduct(
           name: data.name,
           description: data.description,
           category: data.category,
-          standardCost: data.standardCost?.toFixed(2) ?? null,
           sellingPrice: data.sellingPrice?.toFixed(2) ?? null,
           status: data.status,
           supplierId: data.supplierId,
@@ -1049,7 +1042,7 @@ export async function adjustStock(
    * cost becomes an ADJUSTMENT lot at that price, a declared unknown becomes
    * an UNKNOWN lot at no price, and a decrease supplies nothing because it
    * draws from lots that already carry their own. Nothing is defaulted from
-   * `Product.standardCost` or from anywhere else — see `adjustmentUnitCostCents`.
+   * the catalogue row or from anywhere else — see `adjustmentUnitCostCents`.
    */
   const { transaction, previousStock, newStock } = await recordStockMovement(
     {

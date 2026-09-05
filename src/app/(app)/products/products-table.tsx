@@ -103,14 +103,6 @@ async function ProductsTable({
             <SortableHead params={params} column="supplier" className="hidden xl:table-cell">
               Supplier
             </SortableHead>
-            <SortableHead
-              params={params}
-              column="standardCost"
-              className="hidden text-right sm:table-cell"
-              align="right"
-            >
-              Std cost
-            </SortableHead>
             <SortableHead params={params} column="sellingPrice" className="text-right" align="right">
               Reference
             </SortableHead>
@@ -156,14 +148,6 @@ async function ProductsTable({
                 )}
               </TableCell>
 
-              <TableCell className="tabular hidden text-right text-muted-foreground sm:table-cell">
-                {product.standardCost === null ? (
-                  <span className="text-muted-foreground">—</span>
-                ) : (
-                  formatCurrency(product.standardCost)
-                )}
-              </TableCell>
-
               <TableCell className="tabular text-right font-medium">
                 {product.sellingPrice === null ? (
                   <span className="text-muted-foreground">—</span>
@@ -187,7 +171,6 @@ async function ProductsTable({
                     sku: product.sku,
                     description: product.description,
                     category: product.category,
-                    standardCost: product.standardCost,
                     sellingPrice: product.sellingPrice,
                     stockQuantity: product.stockQuantity,
                     status: product.status,

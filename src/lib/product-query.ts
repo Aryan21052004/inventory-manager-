@@ -14,11 +14,21 @@ import { readOne, type RawSearchParams } from "@/lib/date-range";
  * serialises with it — so it must stay free of any server-only import.
  */
 
+/*
+ * Cost is deliberately not among these.
+ *
+ * `standardCost` was a sortable column until the catalogue stopped carrying a
+ * cost at all. Browsing a product list by cost only makes sense when a product
+ * *has* one, and the same part bought at ₹8,000, ₹9,500 and ₹11,000 does not —
+ * whatever such a column ranked by would be one arbitrary batch, or an average
+ * of batches nobody bought at. It is not replaced by last-paid or average cost
+ * for that reason. Actual inventory value is a question the valuation report
+ * answers properly, per lot, disclosing its own coverage.
+ */
 const PRODUCT_SORT_KEYS = [
   "name",
   "sku",
   "category",
-  "standardCost",
   "sellingPrice",
   "stockQuantity",
   "supplier",

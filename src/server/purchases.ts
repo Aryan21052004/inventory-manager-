@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { Prisma } from "@/generated/prisma/client";
+import { Prisma } from "@/generated/prisma/client";
 import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
 import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/errors";
 import type { PurchaseListParams, PurchaseSortKey } from "@/lib/purchase-query";
@@ -183,11 +183,21 @@ export interface PurchaseProductOption {
   name: string;
   sku: string;
   /**
-   * The planning reference, used only to prefill a new line's unit cost. What
-   * the operator types on the line is what gets recorded and what the lot ends
-   * up costing; this is a starting point, not an authority.
+   * What this part actually cost the last time it was received, and when.
+   *
+   * A historical fact, read at query time from the most recent PURCHASE lot —
+   * not a product attribute, not stored back on the catalogue row, and not an
+   * average. It replaces the `standardCost` prefill, which was a figure
+   * somebody typed once and which the same part being bought at three
+   * different prices made meaningless.
+   *
+   * Both are null together, and null means this part has never been received
+   * on a purchase. The line then starts blank: a prefill nobody can source is
+   * worse than no prefill, because the operator would have no way to tell it
+   * from a real one. What they type is what the lot ends up costing.
    */
-  standardCost: string | null;
+  lastPaidUnitCost: string | null;
+  lastPaidAt: Date | null;
   stockQuantity: number;
   isActive: boolean;
 }
@@ -366,6 +376,53 @@ export async function loadPurchaseStats(): Promise<Result<PurchaseStats>> {
  */
 
 /**
+ * What each of these products cost the last time it was actually received.
+ *
+ * The replacement for the catalogue's `standardCost` prefill, and deliberately
+ * a *read* rather than a column. Nothing is written back to the product: the
+ * moment such a figure is stored it becomes a second answer to "what does this
+ * cost", one that drifts from the lots the instant the next delivery lands at
+ * a different price. Reading it here means it cannot be stale, because it is
+ * derived from the lots every time it is asked for.
+ *
+ * PURCHASE lots only. OPENING and ADJUSTMENT costs are operator assertions
+ * about stock that arrived without a supplier invoice behind it; "last paid"
+ * is a claim about what a supplier charged, and only a purchase can evidence
+ * that. UNKNOWN lots carry no cost to report at all.
+ *
+ * `DISTINCT ON` picks one row per product — the newest receipt, with `id`
+ * breaking ties so two lots received in the same millisecond still resolve to
+ * a deterministic one. The ordering matches the `(product_id, received_at, id)`
+ * index the FIFO scan already maintains.
+ */
+async function lastPaidByProduct(
+  productIds: readonly string[],
+): Promise<Map<string, { unitCost: string; receivedAt: Date }>> {
+  if (productIds.length === 0) return new Map();
+
+  const rows = await prisma.$queryRaw<
+    { product_id: string; unit_cost: string; received_at: Date }[]
+  >`
+    SELECT DISTINCT ON (l.product_id)
+      l.product_id,
+      l.unit_cost::text AS unit_cost,
+      l.received_at
+    FROM stock_lots l
+    WHERE l.product_id IN (${Prisma.join([...productIds])})
+      AND l.cost_source = 'PURCHASE'
+      AND l.unit_cost IS NOT NULL
+    ORDER BY l.product_id, l.received_at DESC, l.id DESC
+  `;
+
+  return new Map(
+    rows.map((row) => [
+      row.product_id,
+      { unitCost: row.unit_cost, receivedAt: row.received_at },
+    ]),
+  );
+}
+
+/**
  * Products that can be added to a purchase.
  *
  * Only ACTIVE ones. A retired product must not be bought again — offering it in
@@ -398,16 +455,19 @@ export async function searchPurchaseProducts(
         id: true,
         name: true,
         sku: true,
-        standardCost: true,
         stockQuantity: true,
       },
     });
+
+    // One extra query for the whole page of results, not one per row.
+    const lastPaid = await lastPaidByProduct(rows.map((row) => row.id));
 
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
       sku: row.sku,
-      standardCost: row.standardCost?.toString() ?? null,
+      lastPaidUnitCost: lastPaid.get(row.id)?.unitCost ?? null,
+      lastPaidAt: lastPaid.get(row.id)?.receivedAt ?? null,
       stockQuantity: row.stockQuantity,
       isActive: true,
     }));
@@ -1365,17 +1425,19 @@ export async function loadPurchaseProducts(
         id: true,
         name: true,
         sku: true,
-        standardCost: true,
         stockQuantity: true,
         status: true,
       },
     });
 
+    const lastPaid = await lastPaidByProduct(rows.map((row) => row.id));
+
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
       sku: row.sku,
-      standardCost: row.standardCost?.toString() ?? null,
+      lastPaidUnitCost: lastPaid.get(row.id)?.unitCost ?? null,
+      lastPaidAt: lastPaid.get(row.id)?.receivedAt ?? null,
       stockQuantity: row.stockQuantity,
       isActive: row.status === "ACTIVE",
     }));

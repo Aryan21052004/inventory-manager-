@@ -40,7 +40,6 @@ export async function createProduct(
       sku: `TEST-${Math.random().toString(36).slice(2, 10)}`,
       name: "Test Widget",
       category: "Testing",
-      standardCost: "5.00",
       sellingPrice: "12.50",
       stockQuantity,
     },
@@ -274,7 +273,6 @@ export async function seedProduct(overrides: {
   sku: string;
   name?: string;
   category?: string;
-  standardCost?: string | null;
   /**
    * The catalogue's reference price. Pass `null` for a part that is only ever
    * quoted per order — the state the business actually has for some items.
@@ -297,8 +295,6 @@ export async function seedProduct(overrides: {
       name: overrides.name ?? `Product ${overrides.sku}`,
       sku: overrides.sku,
       category: overrides.category ?? "General",
-      standardCost:
-        overrides.standardCost === undefined ? "5.00" : overrides.standardCost,
       sellingPrice:
         overrides.sellingPrice === undefined ? "12.50" : overrides.sellingPrice,
       stockQuantity,

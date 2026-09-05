@@ -158,21 +158,39 @@ describe("receiving a purchase records what it cost", () => {
     expect(await lotsOf(a.id)).toHaveLength(2);
   });
 
-  it("leaves the product's standard cost alone", async () => {
-    // Receiving does not write back to the catalogue. The planning figure is
-    // whatever someone typed; it is not a running record of what was paid.
+  it("writes nothing back to the catalogue row", async () => {
+    /*
+     * Receiving records a cost on the batch and nowhere else.
+     *
+     * There is no catalogue cost left to overwrite, and this guards against one
+     * being reintroduced by the back door — a `lastPurchaseCost` or an
+     * `averageCost` quietly maintained on the product would be the same column
+     * again under a better name, drifting from the lots on the next delivery.
+     * The reference price is the only money on this row, and receiving stock is
+     * not an opinion about what it sells for.
+     */
     await signInWithRole("STAFF");
     const supplier = await createSupplier();
     const a = await seedProduct({
       sku: "A-1",
       stockQuantity: 0,
-      standardCost: "8000.00",
+      sellingPrice: "12000.00",
     });
 
     await receive(supplier.id, a.id, 10, "9500.00");
 
     const after = await prisma.product.findUniqueOrThrow({ where: { id: a.id } });
-    expect(after.standardCost?.toString()).toBe("8000");
+
+    // The quantity moved, because that is what receiving is for.
+    expect(after.stockQuantity).toBe(10);
+    // Nothing about money did.
+    expect(after.sellingPrice?.toString()).toBe("12000");
+    // And there is no cost column for a receipt to write to, by construction.
+    expect(Object.keys(after)).not.toContain("standardCost");
+
+    // The ₹9,500 went to the batch instead.
+    const lots = await lotsOf(a.id);
+    expect(lots[0]!.unitCost?.toString()).toBe("9500");
   });
 });
 
@@ -395,10 +413,11 @@ describe("stock with no known cost", () => {
     await signInWithRole("STAFF");
     const buyer = await customer();
 
+    // A reference price is set and the stock is uncosted. The price must not
+    // stand in for a cost nobody knows.
     const a = await seedProduct({
       sku: "A-1",
       stockQuantity: 10,
-      standardCost: "9999.00",
       sellingPrice: "12000.00",
       lotUnitCost: null,
     });
@@ -425,7 +444,9 @@ describe("stock with no known cost", () => {
     await seedProduct({
       sku: "V-2",
       stockQuantity: 5,
-      standardCost: "9999.00",
+      // Priced for sale, but nobody knows what it cost. Valuation must count
+      // these units as uncosted rather than reaching for the price.
+      sellingPrice: "9999.00",
       lotUnitCost: null,
     });
 
@@ -645,7 +666,6 @@ describe("cancelling an order confirmed before cost tracking existed", () => {
     const a = await seedProduct({
       sku: "A-1",
       stockQuantity: 0,
-      standardCost: "9999.00",
       sellingPrice: "12000.00",
     });
 
@@ -892,39 +912,47 @@ describe("opening stock", () => {
       name: "Bracket",
       sku: "OP-1",
       category: "Airframe",
-      standardCost: "8000.00",
       sellingPrice: "12000.00",
       stockQuantity: "50",
+      openingStockCostBasis: "KNOWN",
       openingStockUnitCost: "7500.00",
       status: "ACTIVE",
     });
 
     const lots = await lotsOf(created.id);
     expect(lots).toHaveLength(1);
-    // What was paid, not the ₹8,000 planning figure sitting next to it.
+    // What was paid, not the ₹12,000 it is priced at.
     expect(lots[0]!.unitCost?.toString()).toBe("7500");
     expect(lots[0]!.costSource).toBe("OPENING");
     expect(lots[0]!.quantityRemaining).toBe(50);
     await expectLotsReconcile();
   });
 
-  it("records it as unknown when left blank, never as the standard cost", async () => {
+  it("records it as unknown only when the operator says so, with a reason", async () => {
     await signInWithRole("ADMIN");
 
     const created = await createCatalogueProduct({
       name: "Bracket",
       sku: "OP-2",
       category: "Airframe",
-      standardCost: "8000.00",
       sellingPrice: "12000.00",
       stockQuantity: "50",
-      openingStockUnitCost: "",
+      openingStockCostBasis: "UNKNOWN",
+      openingStockUnknownReason: "Predates this system; no purchase paperwork.",
       status: "ACTIVE",
     });
 
     const lots = await lotsOf(created.id);
     expect(lots[0]!.unitCost).toBeNull();
     expect(lots[0]!.costSource).toBe("UNKNOWN");
+
+    // The reason travels into the ledger, which is the only place it can
+    // outlive the form and explain the uncosted sales this batch will produce.
+    const movement = await prisma.stockTransaction.findFirstOrThrow({
+      where: { productId: created.id, type: "STOCK_IN" },
+    });
+    expect(movement.note).toContain("Predates this system");
+
     await expectLotsReconcile();
   });
 });
@@ -960,7 +988,7 @@ describe("historical cost of sale", () => {
     expect(after.costedQuantity).toBe(10);
   });
 
-  it("does not move when the standard cost is edited", async () => {
+  it("does not move when the catalogue's reference price is edited", async () => {
     await signInWithRole("ADMIN");
     const supplier = await createSupplier();
     const buyer = await customer();
@@ -975,9 +1003,11 @@ describe("historical cost of sale", () => {
 
     await prisma.product.update({
       where: { id: a.id },
-      data: { standardCost: "1.00" },
+      data: { sellingPrice: "1.00" },
     });
 
+    // COGS is a fact about the units consumed, frozen on the consumption rows.
+    // Nothing on the catalogue row can restate it.
     const line = await lineOf(order.id);
     expect(Number(line.costTotal)).toBe(80_000);
   });

@@ -290,24 +290,30 @@ model Product {
   /// the UI, not something that owns behaviour or rows of its own.
   category String
 
-  /// A planning figure, and nothing more.
+  /// There is deliberately no product-level cost column here.
   ///
-  /// This is **not** what the inventory cost. It is a reference number an
-  /// operator types to prefill a purchase line and to browse the catalogue by,
-  /// and it may be stale, absent, or simply wrong without anything downstream
-  /// being affected. The same part is bought at different prices from different
-  /// suppliers at different times; no single column on the catalogue row can
-  /// describe what a shelf full of mixed deliveries actually cost.
+  /// One stood in this position — `costPrice`, then `standardCost` — and it was
+  /// removed rather than repaired. Every version of it was a single number
+  /// claiming to describe what a shelf of mixed deliveries cost, and the
+  /// business it describes buys the same part at ₹8,000, then ₹9,500, then
+  /// ₹11,000. No column on the catalogue row can hold that, so the column could
+  /// only ever be one of three things: stale, absent, or wrong. Being all three
+  /// silently is what made it dangerous — a plausible figure sitting where a
+  /// real cost belongs is indistinguishable from a real cost to every reader
+  /// that follows.
   ///
-  /// It must never be used for inventory valuation, COGS, realised margin,
-  /// order profitability, or stock movement costing. Actual acquisition cost
-  /// lives on StockLot, frozen at the moment the goods were received. If you
-  /// are reaching for this field to compute money that has to be right, you
-  /// want `StockLot.unitCost` instead.
+  /// Actual acquisition cost lives on `StockLot.unitCost`, one row per receipt,
+  /// frozen at the moment the goods arrived, and is carried onto
+  /// `StockLotConsumption` when a sale draws on it. That is the only cost this
+  /// system recognises, and it is what valuation, COGS and margin all read.
   ///
-  /// Nullable, because inventing a number to satisfy a NOT NULL is exactly the
-  /// fabrication this redesign exists to stop.
-  standardCost Decimal? @map("standard_cost") @db.Decimal(12, 2)
+  /// Do not reintroduce this field under another name. `lastPurchaseCost` and
+  /// `averageCost` are the same mistake with better manners: both would be a
+  /// derived number cached on a row that has no business deciding it, and both
+  /// would drift the moment the next delivery lands. Where a purchase line
+  /// wants a helpful starting figure, it is read at query time from the most
+  /// recent PURCHASE lot and labelled as what it is — what was last paid, and
+  /// when. See `lastPaidByProduct` in src/server/purchases.ts.
 
   /// A reference price, and nothing more.
   ///
@@ -322,9 +328,9 @@ model Product {
   /// already exists; if you are reaching for it to compute historical revenue,
   /// margin, or customer value, you want the order line instead.
   ///
-  /// Nullable, for the same reason `standardCost` is: a part that is only ever
-  /// quoted has no list price, and requiring one would manufacture a number
-  /// nobody stands behind.
+  /// Nullable, and for a reason the removed cost column shares: a part that is
+  /// only ever quoted has no list price, and requiring one would manufacture a
+  /// number nobody stands behind.
   sellingPrice Decimal? @map("selling_price") @db.Decimal(12, 2)
 
   /// Stock on hand. Never write this directly — go through the stock engine so
@@ -680,10 +686,11 @@ model StockLot {
   /// What one unit in this batch cost, frozen at receipt and never recomputed.
   ///
   /// Null means the cost is genuinely unknown — not zero, not "to be decided",
-  /// and emphatically not something to fill in from `Product.standardCost`.
-  /// Stock that predates this system has no provable acquisition cost, and a
-  /// null that survives all the way to the screen ("5 units of unknown cost")
-  /// is worth more than a plausible number nobody can source.
+  /// and emphatically not something to fill in from the catalogue row — which
+  /// is now incapable of offering one, and deliberately so. Stock that predates
+  /// this system has no provable acquisition cost, and a null that survives all
+  /// the way to the screen ("5 units of unknown cost") is worth more than a
+  /// plausible number nobody can source.
   unitCost   Decimal?      @map("unit_cost") @db.Decimal(12, 2)
   costSource LotCostSource @map("cost_source")
 

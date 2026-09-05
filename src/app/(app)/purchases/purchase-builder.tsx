@@ -47,7 +47,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
 
 /**
  * The purchase builder.
@@ -57,10 +57,10 @@ import { formatCurrency, formatNumber } from "@/lib/format";
  * component does not send them, and they would not be believed if it did.
  *
  * The unit cost *is* sent, and that is the one meaningful difference from the
- * order builder. A selling price is our number and is copied from the
- * catalogue; a purchase cost is the supplier's number, and it can differ from
- * the catalogue cost on any given delivery. The catalogue cost is offered as
- * the starting value and can be overwritten.
+ * order builder. A selling price is our number; a purchase cost is the
+ * supplier's, and it can differ on any given delivery. So there is no
+ * catalogue cost to copy — what the part cost last time it was received is
+ * offered as a dated starting value, and it is expected to be overwritten.
  *
  * The same component raises a new purchase and edits an existing one. They
  * differ only in where the lines start and which action receives them.
@@ -76,8 +76,14 @@ export interface ProductOption {
   id: string;
   name: string;
   sku: string;
-  /** The catalogue cost — a default for the line, not a constraint on it. */
-  standardCost: string | null;
+  /**
+   * What was actually paid the last time this part was received, and when.
+   * A historical reference that seeds the line — not a product cost, and not a
+   * constraint on what the operator types. Null together when this part has
+   * never been received on a purchase.
+   */
+  lastPaidUnitCost: string | null;
+  lastPaidAt: Date | null;
   stockQuantity: number;
   isActive: boolean;
 }
@@ -159,13 +165,14 @@ function PurchaseBuilder({
     setLines((current) => [
       ...current,
       /*
-       * Seeded from the planning figure when there is one, and left blank when
-       * there is not. Blank rather than "0.00" on purpose: a zero that nobody
-       * meant is a lot recorded as free stock, and the whole point of this
-       * screen is that what gets typed here becomes the acquisition cost of the
-       * batch. The operator has to enter what the supplier actually charged.
+       * Seeded from what was last actually paid, and left blank when this part
+       * has never been received. Blank rather than "0.00" on purpose: a zero
+       * nobody meant is a lot recorded as free stock, and what gets typed here
+       * becomes the acquisition cost of the batch. The operator has to enter
+       * what the supplier actually charged this time — the prefill is a
+       * reminder of the last invoice, not a quote for this one.
        */
-      { product, quantity: 1, unitCost: product.standardCost ?? "" },
+      { product, quantity: 1, unitCost: product.lastPaidUnitCost ?? "" },
     ]);
   }
 
@@ -334,7 +341,7 @@ function PurchaseBuilder({
                       <TableHead>Product</TableHead>
                       <TableHead className="hidden sm:table-cell">SKU</TableHead>
                       <TableHead className="text-right">Current stock</TableHead>
-                      <TableHead className="text-right">Cost price</TableHead>
+                      <TableHead className="text-right">Last paid</TableHead>
                       <TableHead className="w-12">
                         <span className="sr-only">Add</span>
                       </TableHead>
@@ -355,10 +362,29 @@ function PurchaseBuilder({
                           <TableCell className="tabular text-right">
                             {formatNumber(option.stockQuantity)}
                           </TableCell>
-                          <TableCell className="tabular text-right font-medium">
-                            {option.standardCost === null
-                              ? "No standard cost"
-                              : formatCurrency(option.standardCost)}
+                          {/*
+                            What was paid last time, dated. The date is the
+                            point: it says this is one past invoice rather than
+                            a standing price, so an operator can see at a glance
+                            whether it is recent enough to mean anything.
+                          */}
+                          <TableCell className="tabular text-right">
+                            {option.lastPaidUnitCost === null ? (
+                              <span className="text-muted-foreground">
+                                Never purchased
+                              </span>
+                            ) : (
+                              <>
+                                <span className="font-medium">
+                                  {formatCurrency(option.lastPaidUnitCost)}
+                                </span>
+                                {option.lastPaidAt ? (
+                                  <span className="block text-xs font-normal text-muted-foreground">
+                                    on {formatDate(option.lastPaidAt)}
+                                  </span>
+                                ) : null}
+                              </>
+                            )}
                           </TableCell>
                           <TableCell className="text-right">
                             <Button

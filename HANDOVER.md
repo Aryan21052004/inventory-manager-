@@ -1419,14 +1419,19 @@ Where each of them stands:
 | --- | --- |
 | Upward adjustments created `UNKNOWN`-cost lots | **Implemented** — below |
 | Reversal netting in `returnToLots` | **Implemented** — below |
-| No sales-return workflow | **Out of scope** — §8 |
+| No sales-return workflow | **Reopened** — a real workflow, design pending, §22 |
 | Order-level discount absent from margin | **Resolved** — the discount feature was removed, §20 |
-| Seed exercises one price per product | Remaining work |
-| `Product.standardCost` still present | Remaining work |
-| No landed-cost model | Business decision only |
+| Seed exercises one price per product | **Resolved** — §22 |
+| `Product.standardCost` still present | **Resolved** — removed, §22 |
+| No landed-cost model | **Deferred business decision** — §22 |
 
-The two out-of-scope rows are decisions, not backlog. They are not to be
-reopened as deferred items, and nothing is to be built toward either.
+One of those rows has since been reopened deliberately. Sales returns were
+closed here as an external credit-note process; the business decided on
+5 September 2026 that returned parts physically come back and must be tracked
+as inventory, so the row now carries a design obligation rather than a
+refusal. See §22, which also records what the eventual model has to look like
+and why none of it was built in the same pass. Nothing else in this table is
+backlog.
 
 ### What was fixed
 
@@ -1809,3 +1814,175 @@ No code path may read `Product.sellingPrice` to compute historical revenue,
 margin, or customer value. It prefills and it indicates; it never settles what
 something sold for. If a figure has to be right, it comes from
 `OrderItem.unitPrice`.
+
+---
+
+## 22. Removing the product cost, and the decisions taken around it
+
+The last column claiming a product has one cost is gone (5 September 2026).
+`Product.costPrice` became `Product.standardCost` became nothing at all.
+
+This section is the record of a business review, not only of a code change. Most
+of what was decided was decided **not** to be built, and those decisions are
+written down here because an undocumented deferral comes back as a surprise.
+
+### Why the column went rather than got fixed
+
+The business buys the same part at ₹8,000, then ₹9,500, then ₹11,000. A single
+figure on the catalogue row cannot describe a shelf of mixed deliveries, so
+whichever price it held was wrong about the other two — while reading, to every
+consumer downstream, exactly like a real cost. Being plausibly wrong is what
+made it worth removing rather than documenting.
+
+Nothing was valued from it. §10 is still the account of how costing works, and
+none of it changed: cost belongs to the batch, unknown cost stays unknown, and
+`StockLotConsumption` freezes what a sale actually drew. The removal moved no
+money, which is what made it safe to do in one step — see the verification
+below.
+
+**FIFO was not redesigned, and specific-lot selection was not added.** The
+existing model already gives the property the business cares about: the actual
+lot and its actual acquisition price stay traceable through
+`StockLotConsumption`. An explicit lot-selection feature can be added later if
+the warehouse workflow turns out to need one; it is not needed for costing to be
+correct.
+
+### What replaced the two things the column was used for
+
+**The purchase-line prefill.** Kept, because it was genuinely useful, but it is
+now a *read* rather than a stored figure: `lastPaidByProduct` in
+src/server/purchases.ts takes the most recent `PURCHASE` lot per product and the
+line renders **"Last paid ₹X on \[date]"**. The date is load-bearing — it says
+this is one past invoice rather than a standing price. A part never received
+shows nothing and the box starts blank, because a prefill nobody can source is
+worse than an empty one.
+
+It is computed at query time and stored nowhere. That is the whole point: a
+`lastPurchaseCost` or `averageCost` column would be the removed mistake under a
+better name, drifting from the lots on the next delivery. **Do not add one.**
+
+Only `PURCHASE` lots count. `OPENING` and `ADJUSTMENT` costs are operator
+assertions about units that arrived without a supplier invoice behind them —
+real costs for valuation, and wrong answers to "what did we last pay".
+
+**Catalogue browsing by cost.** Removed outright, and deliberately not replaced
+by last-paid or average cost. Ranking a catalogue by cost only means something
+when a product has one; ordering it on an arbitrary batch, or on an average
+nobody paid, would be a worse answer wearing the same column heading. Actual
+inventory value is the valuation report's question, which answers it per lot and
+discloses its own coverage.
+
+### The opening-stock hole, closed
+
+`standardCost` was never the only way an uncosted lot appeared. Creating a
+product with an opening balance offered one optional cost box, and leaving it
+blank produced an `UNKNOWN` lot silently. So the uncosted opening units in this
+system did not come from anyone deciding a cost was unrecoverable — they came
+from a form that never asked.
+
+Opening stock now mirrors the adjustment cost basis already shipped (§19):
+
+```text
+Opening stock
+├── KNOWN   → operator enters the actual opening unit cost
+└── UNKNOWN → operator enters a reason, written into the ledger note
+```
+
+No default, both answers real, and **no invented cost**. UNKNOWN remains fully
+available, because stock predating the paperwork genuinely has no provable cost
+and demanding a number would guarantee a fabricated one. What changed is that
+unknown became something an operator *said* rather than something a form
+*assumed*. A product opening at zero stock is asked nothing — no units, no
+batch, nothing to cost.
+
+### Deferred, and why
+
+**Landed costs — deferred, not rejected.** Freight, duty, inspection and
+certification are not allocated into inventory cost, and nothing is to be built
+toward them until the business confirms three things: that these costs exist
+separately, that they are material, and that they need to be inside inventory
+valuation rather than treated as period expense. The schema currently holds no
+evidence any of them are tracked separately, which is why the question is open
+rather than answered.
+
+**Sales returns — a real inventory workflow, design pending.** §19 closed this
+as an external credit-note process; that is reversed. Physical aviation parts
+come back, and they are inventory when they do. It was deliberately **not**
+built in this pass, because a return is not an order cancellation and giving it
+the cancellation's shape would be the expensive mistake. A cancellation undoes a
+movement that should not have happened; a return is a *new physical event* for
+units that genuinely left and have genuinely come back, possibly damaged,
+possibly uncertified, possibly months later.
+
+The eventual model is already decided in outline, and these are constraints on
+the design rather than suggestions:
+
+- a **new `RETURN` lot**, with `sourceType = ORDER` and `sourceId` the original
+  order — never a write back into the lot the units originally left;
+- cost **inherited from the actual `StockLotConsumption` rows** that shipped the
+  returned units, so a return cannot invent a cost any more than a receipt can;
+- returned inventory **separately identifiable**, and certificate coverage
+  **separately decided** — a certificate that covered the original shipment is
+  not automatically valid for what came back;
+- **quarantine first.** Returned parts do not silently rejoin saleable stock:
+
+```text
+Customer return → Quarantine / returned lot → Inspection → Released to saleable
+```
+
+- **`receivedAt` is the return date, not the original receipt date.** This one is
+  worth stating plainly because it is the decision most likely to be quietly
+  reversed by someone "restoring" the original dating. A returned unit enters
+  inventory as a new physical event and is therefore the *newest* lot for FIFO,
+  not a resurrection of an old one. If the business ever wants an exception, it
+  has to be an explicit rule with its own reasoning — not a default inherited
+  from how cancellation happens to work.
+
+### Migration
+
+Irreversible, and one table:
+
+```sql
+ALTER TABLE "products" DROP CONSTRAINT "products_standard_cost_non_negative";
+ALTER TABLE "products" DROP COLUMN "standard_cost";
+```
+
+The constraint is dropped explicitly although Postgres would drop it with the
+column, because it was added by hand in an earlier migration and Prisma does not
+know it exists — a reader diffing the schema would have no reason to believe it
+went too.
+
+**No backfill, deliberately.** Twelve products carried a value here. They were
+planning figures somebody typed, not prices anybody paid, and writing them into
+`stock_lots.unit_cost` would have converted an estimate into a recorded
+acquisition cost indistinguishable from a real one — the exact confusion the
+costing layer exists to prevent. They were exported to a backup **outside this
+repository** and then discarded. The export is not committed and is not a
+fallback: it is a paper record of what was thrown away.
+
+### Verification
+
+The dev database was measured before and after. **Every field was identical** —
+valuation ₹18,104.96, 634 costed units, 375 uncosted, realised revenue
+₹23,283.93, received spend ₹26,449.50, all 29 historical `OrderItem.unitPrice`
+values unchanged, and I-1, I-3, the fulfilment invariant, negative-stock checks
+and cost reconciliation all clean on both sides. The code change moved no money,
+which is the claim this section rests on.
+
+### The fixture now shows the business it describes
+
+The seed's purchase lines carry their own unit cost, because a cost is a fact
+about a delivery. `KB-MECH-87` is bought three times at three prices — 42.50,
+then 46.00, then 39.80 — so a development database always contains the case the
+costing layer exists for: one product, three lots, three acquisition costs, and
+a FIFO sale costed against the units it actually consumed. A fixture where every
+product had exactly one price could not tell a working implementation from a
+broken one.
+
+### What must not come back
+
+No column, field, or cached figure on `Product` that claims to be what the stock
+cost — under any name, including `standardCost`, `lastPurchaseCost` and
+`averageCost`. tests/product-cost-removal.test.ts asserts their absence from the
+table, the row, the API and the sort whitelist, precisely because a removed
+concept returns as a convenience rather than as a decision.

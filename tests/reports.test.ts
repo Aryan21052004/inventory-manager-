@@ -32,8 +32,8 @@ import {
  * forwarded and the caveats do not travel with the spreadsheet. So most of what
  * is asserted here is about refusing to state things:
  *
- *   stock with no recorded cost is never valued at zero and never at
- *   `standardCost`;
+ *   stock with no recorded cost is never valued at zero, and never at a figure
+ *   read off the catalogue — which no longer carries one;
  *
  *   drafts and cancellations are never counted as revenue or spend;
  *
@@ -132,7 +132,6 @@ describe("stock valuation", () => {
     await seedProduct({
       sku: "V-1",
       stockQuantity: 10,
-      standardCost: "999.00",
       lotUnitCost: null,
     });
 

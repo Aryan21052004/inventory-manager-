@@ -130,17 +130,19 @@ const productFields = {
     .trim()
     .min(1, "Category is required")
     .max(64, "Category must be 64 characters or fewer"),
-  /**
-   * A planning figure. Optional, and never treated as what the stock cost.
+  /*
+   * No product cost field, and there must not be one again.
    *
-   * It used to be required, which meant every product form had to produce a
-   * cost whether anyone knew one or not — manufacturing the fake data this
-   * redesign exists to remove. Actual acquisition cost is recorded per receipt
-   * on StockLot; see the note on `Product.standardCost` in the schema.
+   * `standardCost` stood here — a planning figure that prefilled purchase lines
+   * and sorted the catalogue — and the column behind it is gone. The business
+   * buys the same part at several prices, so a catalogue-level cost could only
+   * ever be stale, absent, or wrong, and it read exactly like a real cost to
+   * everything downstream. Acquisition cost is recorded per receipt on
+   * StockLot; a purchase line's helpful starting figure is read at query time
+   * from the most recent PURCHASE lot and labelled as what was last paid.
    */
-  standardCost: optionalPrice("Standard cost"),
   /**
-   * A reference price, and optional for the same reason `standardCost` is.
+   * A reference price, and nothing more.
    *
    * The business quotes per customer, so a part may have no list price at all —
    * requiring one would manufacture a number nobody stands behind. What the
@@ -153,29 +155,170 @@ const productFields = {
 };
 
 /**
+ * Whether the operator can say what the opening stock cost.
+ *
+ * The same two answers a stock adjustment asks for, and for the same reason:
+ * opening stock creates a batch, and a batch has an acquisition cost or
+ * honestly does not.
+ *
+ * This used to be inferred from whether the cost field happened to be filled
+ * in — blank meant UNKNOWN, silently — so a product created without one
+ * produced an uncosted lot nobody had consciously chosen. That is where the
+ * uncosted opening units in this system came from: not from operators
+ * declaring a cost unrecoverable, but from a form that never asked.
+ *
+ * There is no default here, and that is the whole mechanism. UNKNOWN stays
+ * fully available, because stock that predates the paperwork genuinely has no
+ * provable cost and demanding a number would guarantee an invented one. What
+ * changes is that unknown becomes something the operator *said*.
+ */
+export const OPENING_STOCK_COST_BASES = ["KNOWN", "UNKNOWN"] as const;
+
+export type OpeningStockCostBasis = (typeof OPENING_STOCK_COST_BASES)[number];
+
+/** The longest an unknown-cost explanation may be, on its own. */
+const UNKNOWN_COST_REASON_MAX = 200;
+
+/** What the ledger says about an opening movement before any explanation. */
+const OPENING_STOCK_NOTE = "Opening stock recorded when the product was created";
+
+/**
  * Creating a product is the one time a stock quantity may be set directly, and
  * even then it is not written directly: the opening balance is recorded as a
  * STOCK_IN transaction so the ledger explains it like every other movement.
+ *
+ * The costing fields sit on the object as optional and are required
+ * conditionally below. A product created holding nothing has no batch and so
+ * nothing to cost; asking every catalogue entry that opens at zero about
+ * acquisition cost would be a question with no subject.
  */
-export const createProductSchema = z.object({
-  ...productFields,
-  stockQuantity: quantity("Initial stock"),
-  /**
-   * What the opening stock actually cost per unit, if it is known.
-   *
-   * Deliberately a separate field from `standardCost`, and deliberately not
-   * defaulted from it. They answer different questions: standard cost is what
-   * we expect to pay next time, this is what we paid for the units being
-   * entered right now. Filling this in from the planning figure would turn an
-   * estimate into a recorded acquisition cost, and once written the two are
-   * indistinguishable.
-   *
-   * Left blank, the opening stock becomes an UNKNOWN lot and reports as
-   * uncosted for as long as those units last. That is the honest answer for
-   * inventory whose paperwork nobody can find.
-   */
-  openingStockUnitCost: optionalPrice("Opening stock unit cost"),
-});
+export const createProductSchema = z
+  .object({
+    ...productFields,
+    stockQuantity: quantity("Initial stock"),
+    openingStockCostBasis: z.enum(OPENING_STOCK_COST_BASES).optional(),
+    /**
+     * What the opening stock actually cost per unit.
+     *
+     * There is no catalogue figure left to default this from, and there was
+     * never a defensible one: what we expect to pay next time and what we paid
+     * for the units being entered right now are different facts, and writing
+     * the first into the second turns an estimate into a recorded acquisition
+     * cost no later reader can tell apart from a real one.
+     */
+    openingStockUnitCost: optionalPrice("Opening stock unit cost"),
+    openingStockUnknownReason: z
+      .string()
+      .trim()
+      .optional()
+      .transform((value) => (value === undefined || value === "" ? null : value)),
+  })
+  .superRefine((input, ctx) => {
+    // No units, no batch, nothing to cost.
+    if (input.stockQuantity <= 0) return;
+
+    if (!input.openingStockCostBasis) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["openingStockCostBasis"],
+        message:
+          "Say whether the acquisition cost of the opening stock is known. Leaving it unanswered is what used to record a cost as unknown by accident.",
+      });
+      return;
+    }
+
+    if (input.openingStockCostBasis === "KNOWN") {
+      if (input.openingStockUnitCost === null) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["openingStockUnitCost"],
+          message:
+            "Enter what one unit cost, or say the cost is unknown — never a placeholder.",
+        });
+      }
+      return;
+    }
+
+    /*
+     * Unknown, and it has to be justified.
+     *
+     * The same asymmetry the adjustment form rests on. A known cost is
+     * evidenced by the number itself; an unknown one leaves a permanent hole in
+     * the valuation of every sale that later draws on this batch, and the only
+     * thing that will ever explain that hole is what the operator writes here.
+     */
+    const explanation = input.openingStockUnknownReason ?? "";
+
+    if (explanation.length < 3) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["openingStockUnknownReason"],
+        message:
+          "Say why the cost is unknown — these units will report as uncosted for as long as they last.",
+      });
+      return;
+    }
+
+    if (explanation.length > UNKNOWN_COST_REASON_MAX) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["openingStockUnknownReason"],
+        message: `That explanation must be ${UNKNOWN_COST_REASON_MAX} characters or fewer.`,
+      });
+    }
+  });
+
+/**
+ * What the ledger records as the reason for the opening movement.
+ *
+ * An opening balance whose cost is unknown carries both halves: that these
+ * units are the product's opening stock, and why nobody can price them. The
+ * second explains every uncosted sale that batch will produce, and this note is
+ * the only durable place it can live.
+ *
+ * Bounded by construction rather than by a check: a 50-character prefix and an
+ * explanation capped at 200 cannot approach the 500 the ledger allows.
+ */
+export function openingStockNote(input: {
+  stockQuantity: number;
+  openingStockCostBasis?: OpeningStockCostBasis | undefined;
+  openingStockUnknownReason?: string | null | undefined;
+}): string {
+  const declaresUnknown =
+    input.stockQuantity > 0 && input.openingStockCostBasis === "UNKNOWN";
+
+  const explanation = declaresUnknown
+    ? (input.openingStockUnknownReason ?? null)
+    : null;
+
+  return explanation === null
+    ? OPENING_STOCK_NOTE
+    : `${OPENING_STOCK_NOTE} (Acquisition cost unknown: ${explanation})`;
+}
+
+/**
+ * What the opening units cost, in cents, or null when nobody knows.
+ *
+ * There is no branch here that reaches for a catalogue figure, and there is no
+ * longer a catalogue figure to reach for. A guessed acquisition cost is
+ * indistinguishable from a real one the moment it is written.
+ */
+export function openingStockUnitCostCents(input: {
+  stockQuantity: number;
+  openingStockCostBasis?: OpeningStockCostBasis | undefined;
+  openingStockUnitCost?: number | null | undefined;
+}): number | null {
+  if (input.stockQuantity <= 0) return null;
+  if (input.openingStockCostBasis !== "KNOWN") return null;
+  if (
+    input.openingStockUnitCost === null ||
+    input.openingStockUnitCost === undefined
+  ) {
+    return null;
+  }
+
+  return Math.round(input.openingStockUnitCost * 100);
+}
 
 /** Editing deliberately cannot touch stock. See the note at the top. */
 export const updateProductSchema = z.object(productFields);

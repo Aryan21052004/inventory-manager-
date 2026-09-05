@@ -313,7 +313,6 @@ describe("inventory value", () => {
     await seedProduct({
       sku: "V-2",
       stockQuantity: 5,
-      standardCost: "9999.00",
       lotUnitCost: null,
     });
 
@@ -330,7 +329,6 @@ describe("inventory value", () => {
     await seedProduct({
       sku: "V-1",
       stockQuantity: 10,
-      standardCost: "500.00",
       lotUnitCost: null,
     });
 

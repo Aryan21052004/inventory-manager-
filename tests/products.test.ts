@@ -51,9 +51,12 @@ function productForm(overrides: Record<string, string> = {}) {
     sku: "KEY-001",
     description: "Tenkeyless, brown switches",
     category: "Peripherals",
-    standardCost: "45.00",
     sellingPrice: "89.99",
     stockQuantity: "25",
+    // Opening stock now has to declare its cost basis. The form defaults to a
+    // known one so the tests that are about something else stay about it.
+    openingStockCostBasis: "KNOWN",
+    openingStockUnitCost: "40.00",
     status: "ACTIVE",
     ...overrides,
   };
@@ -82,7 +85,6 @@ describe("creating a product", () => {
     expect(product.category).toBe("Peripherals");
     expect(product.description).toBe("Tenkeyless, brown switches");
     // Money round-trips through Decimal, not through a float.
-    expect(product.standardCost?.toString()).toBe("45");
     expect(product.sellingPrice?.toString()).toBe("89.99");
     expect(product.status).toBe("ACTIVE");
   });
@@ -214,7 +216,6 @@ describe("SKU uniqueness", () => {
         name: "Mine",
         sku: "TAKEN-001",
         category: "General",
-        standardCost: "1.00",
         sellingPrice: "2.00",
         status: "ACTIVE",
       }),
@@ -243,15 +244,15 @@ describe("input validation", () => {
     });
   });
 
-  it("rejects a negative standard cost", async () => {
+  it("rejects a negative opening stock cost", async () => {
     await signInWithRole("ADMIN");
 
     await expect(
-      createProduct(productForm({ standardCost: "-1.00" })),
+      createProduct(productForm({ openingStockUnitCost: "-1.00" })),
     ).rejects.toMatchObject({
       code: "BAD_REQUEST",
-      message: "Standard cost cannot be negative",
-      details: { field: "standardCost" },
+      message: "Opening stock unit cost cannot be negative",
+      details: { field: "openingStockUnitCost" },
     });
 
     expect(await prisma.product.count()).toBe(0);
@@ -317,21 +318,22 @@ describe("input validation", () => {
     expect(product.sellingPrice).toBeNull();
   });
 
-  it("treats a blank standard cost as unknown rather than as zero", async () => {
+  it("treats a blank reference price as absent rather than as zero", async () => {
     await signInWithRole("ADMIN");
 
-    // The distinction the whole costing layer rests on. Zero is a cost — it
-    // says the units were free. Null says nobody knows. A schema that coerced
-    // a cleared field to 0 would erase that difference at the door.
+    // The distinction the whole money layer rests on. Zero is a price — it says
+    // the part is given away. Null says nobody has set one, which is the real
+    // state of a part that is only ever quoted per customer. A schema that
+    // coerced a cleared field to 0 would erase that difference at the door.
     const created = await createProduct(
-      productForm({ standardCost: "", stockQuantity: "0" }),
+      productForm({ sellingPrice: "", stockQuantity: "0" }),
     );
 
     const product = await prisma.product.findUniqueOrThrow({
       where: { id: created.id },
     });
 
-    expect(product.standardCost).toBeNull();
+    expect(product.sellingPrice).toBeNull();
   });
 });
 
@@ -350,7 +352,6 @@ describe("editing a product", () => {
       sku: "EDIT-002",
       description: "Now with a description",
       category: "Accessories",
-      standardCost: "9.99",
       sellingPrice: "19.99",
       status: "INACTIVE",
       supplierId: supplier.id,
@@ -378,7 +379,6 @@ describe("editing a product", () => {
       name: product.name,
       sku: product.sku,
       category: product.category,
-      standardCost: "5.00",
       sellingPrice: "12.50",
       status: "ACTIVE",
       stockQuantity: "999999",
@@ -403,7 +403,6 @@ describe("editing a product", () => {
         name: "Renamed by staff",
         sku: "EDIT-004",
         category: "General",
-        standardCost: "1.00",
         sellingPrice: "2.00",
         status: "ACTIVE",
       }),
@@ -423,7 +422,6 @@ describe("editing a product", () => {
         name: "Ghost",
         sku: "GHOST-001",
         category: "General",
-        standardCost: "1.00",
         sellingPrice: "2.00",
         status: "ACTIVE",
       }),
@@ -572,7 +570,6 @@ describe("stock quantity", () => {
     await seedProduct({
       sku: "V-2",
       stockQuantity: 5,
-      standardCost: "9999.00",
       lotUnitCost: null,
     });
 

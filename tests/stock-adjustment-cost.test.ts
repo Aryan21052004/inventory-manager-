@@ -167,7 +167,6 @@ describe("an increase whose cost is genuinely unknown", () => {
       sku: "ADJ-106",
       stockQuantity: 0,
       // A planning number sitting right there, and deliberately not used.
-      standardCost: "7777.00",
     });
 
     await adjustStock(

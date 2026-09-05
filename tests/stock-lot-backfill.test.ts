@@ -156,7 +156,6 @@ async function preCostingProduct(sku: string, stockQuantity: number) {
       sku,
       name: `Part ${sku}`,
       category: "Airframe",
-      standardCost: "9999.00",
       sellingPrice: "12000.00",
       stockQuantity,
       createdAt: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000),
