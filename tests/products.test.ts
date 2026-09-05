@@ -83,7 +83,7 @@ describe("creating a product", () => {
     expect(product.description).toBe("Tenkeyless, brown switches");
     // Money round-trips through Decimal, not through a float.
     expect(product.standardCost?.toString()).toBe("45");
-    expect(product.sellingPrice.toString()).toBe("89.99");
+    expect(product.sellingPrice?.toString()).toBe("89.99");
     expect(product.status).toBe("ACTIVE");
   });
 
@@ -294,14 +294,27 @@ describe("input validation", () => {
     });
   });
 
-  it("does not read a blank number as zero", async () => {
+  it("treats a blank reference price as absent rather than as zero", async () => {
     await signInWithRole("ADMIN");
 
-    // `Number("")` is 0. A schema that coerced before checking would accept a
-    // cleared price as free.
-    await expect(
-      createProduct(productForm({ sellingPrice: "" })),
-    ).rejects.toMatchObject({ message: "Selling price is required" });
+    /*
+     * `Number("")` is 0, and the distinction matters as much here as it does on
+     * the cost side. Zero is a price — it says the part is given away. Null says
+     * the catalogue has no reference, which is the ordinary state for a part
+     * that is only ever quoted per customer.
+     *
+     * This test used to assert the field was required. It stopped being so when
+     * pricing moved to the order line; what is required now is the quote on the
+     * line, not a list price on the product.
+     */
+    const created = await createProduct(
+      productForm({ sellingPrice: "", stockQuantity: "0" }),
+    );
+
+    const product = await prisma.product.findUniqueOrThrow({
+      where: { id: created.id },
+    });
+    expect(product.sellingPrice).toBeNull();
   });
 
   it("treats a blank standard cost as unknown rather than as zero", async () => {

@@ -24,6 +24,7 @@ import { createOrder, loadCustomers, updateOrder } from "@/server/orders";
 
 import { signOut } from "./clerk-mock";
 import {
+  quoted,
   resetDatabase,
   seedCustomer,
   seedProduct,
@@ -93,7 +94,6 @@ async function seedOrder(
       customerId,
       status,
       subtotal: total,
-      discount: "0.00",
       total,
     },
   });
@@ -541,8 +541,7 @@ describe("archiving and existing orders", () => {
 
     const order = await createOrder({
       customerId: customer.id,
-      items: [{ productId: product.id, quantity: 2 }],
-      discount: "0.00",
+      items: await quoted([{ productId: product.id, quantity: 2 }]),
     });
 
     await setCustomerStatus(customer.id, { status: "INACTIVE" });
@@ -555,8 +554,7 @@ describe("archiving and existing orders", () => {
      */
     const updated = await updateOrder(order.id, {
       customerId: customer.id,
-      items: [{ productId: product.id, quantity: 5 }],
-      discount: "0.00",
+      items: await quoted([{ productId: product.id, quantity: 5 }]),
     });
 
     expect(Number(updated.total)).toBe(50);

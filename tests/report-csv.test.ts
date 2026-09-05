@@ -25,6 +25,7 @@ import { createPurchase, receivePurchase } from "@/server/purchases";
 import { signOut } from "./clerk-mock";
 import {
   createSupplier,
+  quoted,
   resetDatabase,
   seedProduct,
   signInWithRole,
@@ -203,8 +204,7 @@ describe("the CSV totals match the page totals", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 5 }],
-      discount: "25",
+      items: await quoted([{ productId: a.id, quantity: 5 }]),
     });
     await confirmOrder(order.id);
   }
@@ -224,7 +224,7 @@ describe("the CSV totals match the page totals", () => {
     expect(csv).toContain(String(page.data.totals.uncostedUnits));
   });
 
-  it("agrees on sales, including the discount gap", async () => {
+  it("agrees on sales", async () => {
     await signInWithRole("STAFF");
     await scenario();
 
@@ -233,8 +233,8 @@ describe("the CSV totals match the page totals", () => {
 
     const csv = await (await GET(request("sales"), routeParams("sales"))).text();
 
-    expect(csv).toContain(page.data.totals.salesAtListPrice);
-    expect(csv).toContain(page.data.totals.discounts);
+    expect(csv).toContain(page.data.totals.revenue);
+    expect(csv).toContain(String(page.data.totals.units));
   });
 
   it("agrees on purchase spend", async () => {
@@ -268,7 +268,13 @@ describe("the CSV totals match the page totals", () => {
     expect(bodyRows(csv)).toHaveLength(1); // the TOTAL row alone
   });
 
-  it("says when realised revenue is not apportioned", async () => {
+  it("reports revenue when grouped by product", async () => {
+    /*
+     * This used to assert the opposite — that the export said realised revenue
+     * was "not apportioned across lines" for this grouping, because an
+     * order-level discount could not be split. With the discount gone (§20)
+     * there is nothing to apportion and the figure is simply reported.
+     */
     await signInWithRole("STAFF");
     await scenario();
 
@@ -276,7 +282,8 @@ describe("the CSV totals match the page totals", () => {
       await GET(request("sales", "range=all&group=product"), routeParams("sales"))
     ).text();
 
-    expect(csv).toContain("not apportioned across lines");
+    expect(csv).not.toContain("not apportioned");
+    expect(csv).toContain("Revenue");
   });
 });
 
@@ -310,8 +317,7 @@ describe("the stock movement summary export", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 14 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 14 }]),
     });
     await confirmOrder(order.id);
   }

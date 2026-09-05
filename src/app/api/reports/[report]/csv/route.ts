@@ -219,36 +219,20 @@ async function render(
     const { rows, totals } = result.data;
 
     return toCsv(
-      ["Group", "Detail", "Orders", "Units", "Sales at list price", "Realised revenue"],
+      ["Group", "Detail", "Orders", "Units", "Revenue"],
       [
         ...rows.map((row) => [
           row.label,
           row.sublabel,
           row.orders,
           row.units,
-          row.salesAtListPrice,
-          row.realisedRevenue,
+          row.revenue,
         ]),
-        [
-          "TOTAL",
-          "",
-          totals.orders,
-          totals.units,
-          totals.salesAtListPrice,
-          totals.realisedRevenue,
-        ],
+        ["TOTAL", "", totals.orders, totals.units, totals.revenue],
       ],
       [
         ...preamble(report, params),
         "Confirmed and completed orders only, dated by when each was confirmed.",
-        "Realised revenue is after order-level discounts; sales at list price is before them. They differ by " +
-          totals.discounts +
-          " in this period.",
-        ...(params.grouping === "product" || params.grouping === "category"
-          ? [
-              "Realised revenue is blank for this grouping: an order-level discount applies to a whole order and is not apportioned across lines.",
-            ]
-          : []),
         ...truncated(rows.length),
       ],
     );

@@ -383,8 +383,6 @@ async function SalesBody({
   }
 
   const { rows, totals, total, page, pageCount, pageSize } = result.data;
-  const apportioned =
-    params.grouping === "product" || params.grouping === "category";
 
   if (rows.length === 0) {
     return (
@@ -400,23 +398,11 @@ async function SalesBody({
     <>
       <div className="grid gap-4 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
-          label="Realised revenue"
-          value={formatCurrency(totals.realisedRevenue)}
-          hint="After order-level discounts"
+          label="Revenue"
+          value={formatCurrency(totals.revenue)}
+          hint="What customers were charged"
           icon={ChevronsUpDown}
           tone="success"
-        />
-        <StatCard
-          label="Sales at list price"
-          value={formatCurrency(totals.salesAtListPrice)}
-          hint="Before order-level discounts"
-          icon={ChevronsUpDown}
-        />
-        <StatCard
-          label="Discounts"
-          value={formatCurrency(totals.discounts)}
-          hint="The gap between the two figures"
-          icon={ChevronsUpDown}
         />
         <StatCard
           label="Orders"
@@ -431,19 +417,7 @@ async function SalesBody({
         <span className="font-medium text-foreground">
           when each was confirmed
         </span>{" "}
-        — the moment stock left. Drafts and cancellations are excluded.{" "}
-        {apportioned ? (
-          <>
-            Realised revenue is blank for this grouping: an order-level discount
-            applies to a whole order, and this system does not apportion one
-            across the lines rather than invent a rule for splitting it.
-          </>
-        ) : (
-          <>
-            Realised revenue is after order-level discounts; sales at list price
-            is before them.
-          </>
-        )}
+        — the moment stock left. Drafts and cancellations are excluded.
       </BasisNote>
 
       <Table>
@@ -476,21 +450,11 @@ async function SalesBody({
               report="sales"
               params={params}
               defaults={defaults}
-              column="value"
-              className="text-right"
-              align="right"
-            >
-              At list price
-            </SortHead>
-            <SortHead
-              report="sales"
-              params={params}
-              defaults={defaults}
               column="revenue"
               className="text-right"
               align="right"
             >
-              Realised revenue
+              Revenue
             </SortHead>
           </TableRow>
         </TableHeader>
@@ -512,19 +476,7 @@ async function SalesBody({
                 {formatNumber(row.units)}
               </TableCell>
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(row.salesAtListPrice)}
-              </TableCell>
-              <TableCell className="tabular text-right font-medium">
-                {row.realisedRevenue === null ? (
-                  <span
-                    className="text-muted-foreground"
-                    title="An order-level discount is not apportioned across lines"
-                  >
-                    Not apportioned
-                  </span>
-                ) : (
-                  formatCurrency(row.realisedRevenue)
-                )}
+                {formatCurrency(row.revenue)}
               </TableCell>
             </TableRow>
           ))}

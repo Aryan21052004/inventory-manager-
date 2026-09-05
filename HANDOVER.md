@@ -142,9 +142,10 @@ not ours — but the line totals and grand total derived from it do not. Cost of
 sale is never sent by a client at all: it is resolved from the lots at the
 moment of confirmation and frozen on the order line.
 
-**No tax, anywhere.** An order's grand total is `subtotal - discount`. The `tax`
-column was dropped rather than left at zero, and a check constraint refuses a
-total that implies one. A purchase total is the sum of its line totals.
+**No tax and no discount, anywhere.** An order's grand total is `subtotal`. Both
+columns were dropped rather than left at zero, and a check constraint refuses a
+total that implies either. A purchase total is likewise the sum of its line
+totals. See §20 for the discount removal.
 
 **The database refuses invalid rows.** Check constraints enforce non-negative
 money, balanced document totals, a coherent stock ledger, and one current
@@ -402,6 +403,18 @@ no seed data. The one piece of machinery that would have served a return —
 batch's cost — exists solely for **cancellation**, which is a different event:
 the sale did not happen, rather than happened and was undone. See §19.
 
+**Discounts are removed, not merely out of scope.** An earlier note here
+recorded discount-aware *margin* as out of scope while `Order.discount` stayed
+on the document. That was superseded within the day: the feature was removed
+outright at the owner's direction (4 September 2026), column included. §20 is
+the account.
+
+Nothing is to be built back: no discount field on the schema, no discount input
+on an order or purchase form, no discount arithmetic in costing, no
+discount-based margin logic, no discount column on a report, and no discount UI
+or validation. `total = subtotal` is a check constraint, so the database refuses
+a total implying one whatever wrote it.
+
 **Other gaps.** No user management UI. No Clerk webhook, so a name or email
 changed in Clerk leaves a stale local mirror and a deletion is invisible
 (`src/server/auth.ts` explains the trade-off). No partial receipts on purchases.
@@ -615,18 +628,26 @@ the revenue: absent, so there is no number for the UI to render. At partial
 coverage the revenue is apportioned to the costed units
 (`unitPrice x costedQuantity` per line) and the coverage travels with the figure.
 
-### Two revenue bases
+**That apportionment needs no basis qualifier any more.** It briefly did: while
+an order-level discount existed, `unitPrice × costedQuantity` was a list-price
+figure and the margin on the order page was higher than the margin on what the
+customer actually paid. Removing the discount (§20) closed that gap by
+construction — line prices *are* what the customer was charged — so "Gross
+margin" on the order detail page is now correct without qualification.
 
-The Sales section reports **realised revenue** — `SUM(orders.total)`, after
-order-level discounts. The Costing section works at **list price** —
-`SUM(order_items.total)`, before them — because an order-level discount applies
-to a whole order and apportioning it across individual FIFO-costed units would
-mean inventing an allocation rule.
+### One revenue basis
 
-They differ by the discounts and a standing note on the page reconciles them.
-The word "revenue" appears in one section only; the costing figures are named
-for their basis in the code as well (`allSalesAtListPrice`,
-`costedSalesAtListPrice`).
+The Sales and Costing sections report the same number, because
+`orders.total = orders.subtotal = SUM(order_items.total)` by check constraint.
+
+This was two bases until the discount was removed (§20). Sales reported
+`SUM(orders.total)` net of an order-level discount, Costing worked at list price
+from `SUM(order_items.total)`, the two did not reconcile whenever an order
+carried a discount, and a standing paragraph on the page existed to explain why.
+That paragraph is gone rather than reworded: an explanation of a difference that
+can no longer occur is worse than no explanation. The fields renamed with it —
+`allSalesAtListPrice` became `allRevenue`, `costedSalesAtListPrice` became
+`costedRevenue` — because "at list price" no longer distinguishes anything.
 
 ### Certificates on the dashboard
 
@@ -707,12 +728,17 @@ Deliberate. The only honest margin on data with no cost coverage is an absence,
 and a report gets exported and forwarded where a caveat does not travel. When
 Tier 2 adds it, it must follow the dashboard's rules exactly.
 
-### Dates, discounts and grouping
+### Dates and grouping
 
-Grouping sales by product or category returns **null** for realised revenue
-rather than an apportioned figure — an order-level discount is not split across
-lines. Period and customer groupings can report it, because an order belongs to
-each of those whole.
+Revenue is reported at **every** grouping, product and category included.
+
+That is a change, and a capability gain rather than only a deletion. Those two
+groupings used to return null: revenue came from `SUM(orders.total)`, an
+order-level figure, and splitting an order-level discount across lines would
+have meant inventing an allocation rule. Revenue is now `SUM(order_items.total)`,
+which is already per-line, so it groups by anything without double-counting —
+and the `line_counts` join and division that existed to avoid that
+double-counting went with the discount (§20).
 
 ### CSV
 
@@ -1488,6 +1514,19 @@ only so that nobody re-derives them and mistakes them for a backlog.
 different event: the sale did not happen, rather than happened and was undone.
 The name is about the *lots* units go back to, not about a customer return.
 
+### Discounts in margin: resolved by removal
+
+Briefly recorded here as out of scope, then superseded the same day. Rather than
+keep the discount on the document and exclude it from margin, the feature was
+removed outright (§20).
+
+That resolves the finding rather than accepting it. The defect was that margin
+valued costed units at line price while `Order.total` was net of a discount, so
+the two disagreed; with no discount, line price *is* what the customer was
+charged and the two are the same number. The "Gross margin" figure on the order
+page became correct as a side effect of the removal, with no margin logic
+changed at all.
+
 ### What remains
 
 Two findings from the same review are still live work, and one is a question
@@ -1516,3 +1555,257 @@ rather than work. None has been started:
 * `tests/stock-adjustment-cost.test.ts`, `tests/stock-lot-reversal.test.ts`.
 
 No schema change, no migration, and no seed change was needed for any of it.
+
+---
+
+## 20. The discount, and why removing it simplified the reports
+
+`Order.discount` is gone — column, constraint, form field, report column and
+all — at the owner's direction (4 September 2026). The business does not
+discount, and a field nobody uses is a field that eventually gets used by
+accident.
+
+The invariant is now, and the check constraint enforces it:
+
+```text
+total = subtotal
+```
+
+### It was never really about the column
+
+The column drop was about twenty lines. The reason this was a real piece of work
+is that **the discount was the sole reason two revenue bases existed**.
+
+An order-level discount lives on the order, not on its lines, so
+`SUM(orders.total)` and `SUM(order_items.total)` were genuinely different
+numbers. Everything downstream had to cope with that:
+
+* the sales report carried **both** figures plus the gap between them;
+* it could not report revenue per product or per category **at all** — splitting
+  an order-level figure across lines needs an allocation rule nobody agreed —
+  so those groupings returned null;
+* the SQL joined a `line_counts` subquery and divided each order's total by its
+  line count, so an order spanning several lines contributed its total once per
+  group rather than once per line;
+* the CSV export carried two explanatory footnotes;
+* the dashboard's Costing section worked at list price while its Sales section
+  reported realised revenue, and a standing paragraph on the page existed purely
+  to tell the reader why two figures that both look like revenue disagreed.
+
+All of that was correct, and all of it described a difference that can no longer
+occur. `orders.total = orders.subtotal = SUM(order_items.total)` is now a check
+constraint, so summing the lines *is* summing the order.
+
+### What that bought
+
+**Revenue is reportable at every grouping**, product and category included. That
+is a capability the report did not previously have, gained by deletion rather
+than by writing an apportionment rule.
+
+**The `line_counts` join and its division are gone.** They existed only to avoid
+double-counting an order-level figure. `SUM(order_items.total)` is already
+per-line and groups by anything safely.
+
+**The order page's "Gross margin" became correct.** It valued costed units at
+line price while `Order.total` was net of the discount, so on a discounted order
+it read high. No margin logic changed; the discrepancy simply stopped existing.
+This is the finding recorded in §19 as G4, and it was resolved by removal rather
+than by the apportionment that had been designed for it.
+
+**The explanatory copy went with the thing it explained.** The dashboard
+paragraph reconciling two bases was deleted rather than reworded — an
+explanation of a difference that cannot occur is worse than no explanation.
+
+### What was renamed
+
+`allSalesAtListPrice` → `allRevenue`, and `costedSalesAtListPrice` →
+`costedRevenue`. Their values did not change. "At list price" was meaningful
+only in contrast to a discounted total, and a qualifier that no longer
+distinguishes anything is a qualifier that misleads.
+
+### The migration, and the honest part
+
+`20260904120000_remove_order_discount` follows the tax removal exactly — drop
+the constraints, restate the totals, drop the column, rebuild the constraints,
+every statement re-runnable because Prisma applies a migration file statement by
+statement rather than in one transaction.
+
+**Statement 2 restates historical totals, and that is destructive.** For an
+order that carried a discount, `total` recorded what the customer was charged;
+afterwards it records the sum of the line prices, which is larger. Revenue over
+any period containing such an order rises accordingly.
+
+There is no way around it. `total = subtotal − discount` and `total = subtotal`
+cannot both hold for a discounted order. The alternative — rewriting
+`order_items.unit_price` to absorb the discount — would falsify what each line
+sold for, which the schema explicitly forbids, and rounding would not land
+exactly.
+
+So the migration carries a gate rather than a silent `UPDATE`: run the query in
+its header first, and if any order has a non-zero discount, **stop**, export
+those rows, and record what was restated. If the query returns nothing, the
+migration is completely lossless.
+
+### Two columns holding one number, on purpose
+
+`total` and `subtotal` are now always equal, which is the duplication this
+codebase otherwise argues against — see the note on `OrderItem.fulfilledQuantity`
+about two stored numbers that must agree eventually disagreeing.
+
+Kept anyway, deliberately. `total` is what every list, report, dashboard and
+export reads; collapsing the pair would touch far more code than it would
+simplify, for no behavioural gain. `CHECK (total = subtotal)` is what makes the
+redundancy safe — the database arbitrates the agreement rather than trusting
+whatever writes an order.
+
+### How the removal is proved
+
+`tests/order-totals.test.ts` was the "prove tax is really gone" suite and is now
+the proof for both terms. It checks the four places a removed money term can
+survive:
+
+* the **schema** — no `discount` column on `orders`, and none anywhere in the
+  database under any table;
+* the **constraints** — no surviving check names `discount`, and
+  `orders_total_balances` is exactly `CHECK (total = subtotal)`;
+* the **generated client** — the field is absent at runtime, catching a client
+  generated from a stale schema;
+* the **source** — a scan for identifier shapes (`discount:`, `.discount`,
+  `discountCents`) rather than the bare word, so prose about the removal does
+  not trip it.
+
+**The source scan covers `tests/` as well as `src/`, and that is load-bearing.**
+`orderSchema` is a plain `z.object`, so Zod *strips* an unknown `discount`
+rather than rejecting it — deliberately, so a stale browser posting the old
+field after deployment is ignored instead of erroring. The cost of that
+leniency is that a caller still sending `discount` fails silently and for ever.
+Nothing else would catch it. The scan found one such fixture during the removal
+that a regex sweep had missed.
+
+The file excludes itself from its own scan, because it is where the patterns are
+written down and therefore necessarily contains every shape they match.
+
+### What must not come back
+
+No discount field on any schema. No discount input on an order or purchase form.
+No discount arithmetic in costing or valuation. No discount-based margin logic.
+No discount column on a report or export. If a commercial need for one ever
+arises, it is a new feature with a new decision behind it — not a restoration.
+
+---
+
+## 21. A product does not have one selling price either
+
+The mirror of §10, on the other side of the ledger. The same part is quoted at
+₹12,000 to one customer, ₹13,500 to another and ₹11,800 to a third, so no single
+column on the catalogue row can say what it sells for — exactly as no single
+column could say what it cost.
+
+```text
+Product.sellingPrice   optional reference — prefills a line, never history
+OrderItem.unitPrice    what this customer was quoted, frozen on the order
+StockLot.unitCost      what the batch actually cost — untouched by any of this
+```
+
+### What was already right
+
+Almost all of it, which is why this was a small change. `OrderItem.unitPrice`
+already existed, already stored the price per line, and **every revenue figure
+already read it** — directly, or through `order_items.total` and `orders.total`,
+which the check constraints tie together. Margin already took it as a parameter.
+Customer lifetime value already derived from it. No report anywhere used
+`Product.sellingPrice` as historical revenue.
+
+Confirmation, completion and cancellation never touched the price and still do
+not. A confirmed order was already immutable, because `isEditable` permits edits
+in no status but DRAFT and PENDING.
+
+### The defect
+
+`updateOrder` deleted every line and recreated it at the **current** catalogue
+price. Quote ₹12,500, let the reference move to ₹16,000, edit the quantity — and
+the quote silently became ₹16,000 while the order was still a draft and nothing
+on the screen said so.
+
+Three things reinforced it and all three are gone: the edit page seeded the
+builder from current product prices (with a comment explaining why), the
+`OrderProductOption.sellingPrice` docstring justified that on the grounds that
+`updateOrder` recalculated from it, and a test asserted the whole arrangement.
+
+The fix: the quote travels with the request, and the edit page seeds each line
+from its **stored** price. Preservation is then structural — an untouched line
+round-trips unchanged, and a deliberate re-quote arrives as a different number.
+
+Lines are still replaced wholesale rather than diffed, which is safe precisely
+because the price arrives with each one. The alternative — the server deciding
+which changes were "intentional" — cannot distinguish a re-quote from a stale
+client, so it would either block legitimate re-pricing or guess.
+
+### The trust boundary inverted, and what replaced it
+
+This is the part worth reading twice. The architecture used to treat a
+client-supplied price as an attack, and said so in three places: the line schema
+did not accept one, the module docstring read *"a total the browser calculated is
+a total the browser chose"*, and the server comment read *"so the client cannot
+name its own price."*
+
+Per-customer quoting requires the opposite. The quote exists nowhere but the
+submission, so it has to be an input. The protection did not disappear — it moved:
+
+* **Bounds instead of derivation.** Non-negative, at most two decimal places,
+  within the `Decimal(12, 2)` ceiling. The floor mirrors
+  `order_items_unit_price_non_negative`; the ceiling turns a typo into a field
+  error rather than a numeric-overflow. **No minimum or maximum sale price is
+  imposed** — there is no business rule for one, and inventing a threshold would
+  refuse legitimate quotes.
+* **Attribution, unchanged.** `Order.createdBy` is resolved from the session and
+  is not an input, so every quote is traceable to a person. There is no approval
+  workflow and none was asked for.
+* **Visibility.** The builder shows the reference price beside the quote and the
+  deviation beneath it, so quoting away from the catalogue is a seen choice
+  rather than something only the saved order would reveal.
+
+Derived money is still server money. A line total, subtotal or grand total sent
+from the browser is ignored and recomputed — a client that sends a believable
+price and an invented total gets the price and none of the total.
+
+Zero is a valid quote, deliberately. A free-of-charge line is a real commercial
+decision; a blank field is not, which is why the blank is refused and the zero
+is not.
+
+### The reference price's three remaining jobs
+
+It prefills a new order line, it values the valuation report's retail column,
+and it drives the indicative margin panel on the product page. All three now
+handle a null, because a part that is only ever quoted has no list price.
+
+**Retail valuation changed basis.** It used to be defended on the grounds that
+the selling price *"genuinely is authoritative in a way the old catalogue cost
+never was"* — a claim per-customer quoting withdraws. The column now discloses
+its own coverage the way the cost column always has: `valueAtRetail` for the
+products that have a reference, `unpricedUnits` for the stock that does not.
+Neither is valued at zero and neither is guessed.
+
+### Migration
+
+One statement, and it cannot lose data:
+
+```sql
+ALTER TABLE "products" ALTER COLUMN "selling_price" DROP NOT NULL;
+```
+
+A widening change — every existing row keeps its value, nothing is rewritten, no
+total is restated, and **no backfill was needed anywhere**, because every
+existing `OrderItem` already carried its historical price. That is the finding
+this whole section rests on.
+
+Optional for the same reason `standardCost` became optional on this table, and
+the note there makes the argument: requiring a figure means every form has to
+produce one whether anyone knows it or not.
+
+### What must not come back
+
+No code path may read `Product.sellingPrice` to compute historical revenue,
+margin, or customer value. It prefills and it indicates; it never settles what
+something sold for. If a figure has to be right, it comes from
+`OrderItem.unitPrice`.

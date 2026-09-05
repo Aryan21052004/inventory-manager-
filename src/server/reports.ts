@@ -120,6 +120,8 @@ export interface ValuationTotals {
   uncostedUnits: number;
   valueAtCost: string;
   valueAtRetail: string;
+  /** Units whose product carries no reference price. Excluded from retail. */
+  unpricedUnits: number;
   coverage: number;
   /** Retired products still holding stock, so it can be told apart. */
   retiredProducts: number;
@@ -150,6 +152,7 @@ interface ValuationSqlRow {
   uncosted_units: number;
   value_at_cost: string;
   value_at_retail: string;
+  unpriced_units: number;
   coverage: number;
 }
 
@@ -165,10 +168,18 @@ interface ValuationSqlRow {
  *
  * Two value columns, on two different bases, and the difference is not
  * cosmetic. Cost comes from the lots — what was actually paid, for the units
- * whose price is known. Retail is `stockQuantity × sellingPrice`, and the
- * selling price genuinely *is* authoritative in a way the old catalogue cost
- * never was. The report labels them separately so nobody reads them as two
- * estimates of one number.
+ * whose price is known. Retail is `stockQuantity × sellingPrice` at the
+ * catalogue's **reference** price.
+ *
+ * That qualifier is load-bearing. Retail used to be defended on the grounds
+ * that the selling price "genuinely is authoritative in a way the old catalogue
+ * cost never was" — a claim per-customer quoting withdrew. The same part goes
+ * out at ₹12,000 to one customer and ₹13,500 to another, so no single figure is
+ * what the shelf would realise. It is an indication, and the column says so.
+ *
+ * Both columns now disclose their own coverage: `uncostedUnits` for stock with
+ * no known acquisition cost, `unpricedUnits` for stock whose product has no
+ * reference price. Neither is valued at zero and neither is guessed.
  */
 export async function loadValuationReport(
   params: ReportParams,
@@ -223,7 +234,9 @@ export async function loadValuationReport(
           COALESCE(lots.costed, 0)::int               AS costed_units,
           COALESCE(lots.uncosted, 0)::int             AS uncosted_units,
           COALESCE(lots.value, 0)::text               AS value_at_cost,
-          (p.stock_quantity * p.selling_price)::text  AS value_at_retail,
+          COALESCE(p.stock_quantity * p.selling_price, 0)::text AS value_at_retail,
+          CASE WHEN p.selling_price IS NULL THEN p.stock_quantity ELSE 0 END::int
+                                                      AS unpriced_units,
           CASE
             WHEN COALESCE(lots.units, 0) = 0 THEN 0
             ELSE ROUND(COALESCE(lots.costed, 0)::numeric * 100 / lots.units, 1)
@@ -243,6 +256,7 @@ export async function loadValuationReport(
           uncosted_units: number;
           value_at_cost: string;
           value_at_retail: string;
+          unpriced_units: number;
           retired_products: number;
           retired_units: number;
           retired_value: string;
@@ -254,7 +268,10 @@ export async function loadValuationReport(
           COALESCE(SUM(COALESCE(lots.costed, 0)), 0)::int          AS costed_units,
           COALESCE(SUM(COALESCE(lots.uncosted, 0)), 0)::int        AS uncosted_units,
           COALESCE(SUM(COALESCE(lots.value, 0)), 0)::text          AS value_at_cost,
-          COALESCE(SUM(p.stock_quantity * p.selling_price), 0)::text AS value_at_retail,
+          COALESCE(SUM(p.stock_quantity * p.selling_price)
+            FILTER (WHERE p.selling_price IS NOT NULL), 0)::text  AS value_at_retail,
+          COALESCE(SUM(p.stock_quantity)
+            FILTER (WHERE p.selling_price IS NULL), 0)::int       AS unpriced_units,
           COUNT(*) FILTER (WHERE p.status <> 'ACTIVE')::int        AS retired_products,
           COALESCE(SUM(COALESCE(lots.units, 0))
             FILTER (WHERE p.status <> 'ACTIVE'), 0)::int           AS retired_units,
@@ -278,6 +295,7 @@ export async function loadValuationReport(
       uncosted_units: 0,
       value_at_cost: "0",
       value_at_retail: "0",
+      unpriced_units: 0,
       retired_products: 0,
       retired_units: 0,
       retired_value: "0",
@@ -300,6 +318,7 @@ export async function loadValuationReport(
           uncostedUnits: row.uncosted_units,
           valueAtCost: row.value_at_cost,
           valueAtRetail: row.value_at_retail,
+          unpricedUnits: row.unpriced_units,
           coverage: row.coverage,
         })),
         totals: {
@@ -309,6 +328,7 @@ export async function loadValuationReport(
           uncostedUnits: t.uncosted_units,
           valueAtCost: t.value_at_cost,
           valueAtRetail: t.value_at_retail,
+          unpricedUnits: t.unpriced_units,
           coverage:
             t.units === 0
               ? 0
@@ -338,31 +358,28 @@ export interface SalesRow {
   sublabel: string | null;
   orders: number;
   units: number;
-  /** `SUM(order_items.total)` — before order-level discounts. */
-  salesAtListPrice: string;
   /**
-   * `SUM(orders.total)` — after order-level discounts.
+   * `SUM(order_items.total)` — what the customer was charged.
    *
-   * Null for product and category groupings. An order-level discount applies to
-   * a whole order, and splitting it across the lines would mean inventing an
-   * allocation rule. The report says so rather than showing an apportioned
-   * figure nobody agreed the basis for.
+   * One basis, not two. This used to sit beside a separate `realisedRevenue`
+   * read from `SUM(orders.total)`, because an order-level discount made the two
+   * genuinely different numbers. With the discount feature removed (§20),
+   * `orders.total = orders.subtotal = SUM(order_items.total)` by check
+   * constraint, so the distinction described a difference that can no longer
+   * exist.
    */
-  realisedRevenue: string | null;
+  revenue: string;
 }
 
 export interface SalesTotals {
   orders: number;
   units: number;
-  salesAtListPrice: string;
-  realisedRevenue: string;
-  /** The gap between the two bases — order-level discounts, in total. */
-  discounts: string;
+  revenue: string;
 }
 
 const SALES_SORTS: Record<string, string> = {
-  value: "sales_at_list_price",
-  revenue: "realised_revenue",
+  value: "revenue",
+  revenue: "revenue",
   units: "units",
   orders: "orders",
   label: "label",
@@ -374,24 +391,27 @@ interface SalesSqlRow {
   sublabel: string | null;
   orders: number;
   units: number;
-  sales_at_list_price: string;
-  realised_revenue: string | null;
+  revenue: string;
 }
 
 /**
  * Realised sales, dated by when each order was confirmed.
  *
- * Two revenue concepts, never conflated. **Realised revenue** is
- * `SUM(orders.total)` — what customers actually paid, after the order-level
- * discount. **Sales at list price** is `SUM(order_items.total)` — line prices
- * before it. They differ by the discounts, and the totals row shows that gap
- * explicitly so the two columns reconcile on screen rather than looking like
- * one of them is wrong.
+ * **One revenue basis.** Revenue is `SUM(order_items.total)`, which is what the
+ * customer was charged, at every grouping.
  *
- * Grouping by product or category can only use the list-price basis. Realised
- * revenue exists at the order level and cannot be split across lines without an
- * allocation rule this system has not defined, so those groupings return null
- * for it rather than a plausible invention.
+ * This carried two bases until the discount feature was removed (§20). An
+ * order-level discount lived on the order rather than on its lines, so
+ * `SUM(orders.total)` and `SUM(order_items.total)` were different numbers and
+ * the report showed both plus the gap between them. It also meant revenue could
+ * not be reported per product or per category at all — splitting an order-level
+ * discount across lines would have meant inventing an allocation rule — so
+ * those groupings returned null.
+ *
+ * Both consequences are gone. `orders.total = orders.subtotal =
+ * SUM(order_items.total)` is now a check constraint, so summing the lines is
+ * summing the order, and **revenue is reportable at every grouping** including
+ * the two that previously could not have it.
  */
 export async function loadSalesReport(
   params: ReportParams,
@@ -455,27 +475,24 @@ export async function loadSalesReport(
       }
     })();
 
-    const wantsRevenue =
-      params.grouping === "period" || params.grouping === "customer";
-
     /*
-     * The order total is divided by its line count and summed back, so an order
-     * spanning several lines contributes its total exactly once per group
-     * rather than once per line. Equivalent to a distinct sum, and it avoids a
-     * second pass over the orders.
+     * No `line_counts` join, and no division.
+     *
+     * Revenue used to come from `orders.total`, an order-level figure, so
+     * summing it across a join to `order_items` counted it once per line. The
+     * fix was to divide each order's total by its line count and sum that back
+     * — correct, but only necessary because the order carried a discount its
+     * lines did not.
+     *
+     * Summing `order_items.total` needs none of that: it is already per-line,
+     * so it groups by anything without double-counting. The join and the
+     * division went with the discount (§20).
      */
-    const revenueExpr = wantsRevenue
-      ? Prisma.sql`COALESCE(SUM(o.total / NULLIF(line_counts.n, 0)), 0)::text`
-      : Prisma.sql`NULL::text`;
-
     const base = Prisma.sql`
       FROM order_items oi
       JOIN orders o    ON o.id = oi.order_id
       JOIN products pr ON pr.id = oi.product_id
       JOIN customers c ON c.id = o.customer_id
-      JOIN (
-        SELECT order_id, COUNT(*)::numeric AS n FROM order_items GROUP BY order_id
-      ) line_counts ON line_counts.order_id = o.id
       WHERE ${where}
     `;
 
@@ -487,21 +504,19 @@ export async function loadSalesReport(
           ${grouped.sublabel}                         AS sublabel,
           COUNT(DISTINCT o.id)::int                   AS orders,
           COALESCE(SUM(oi.quantity), 0)::int          AS units,
-          COALESCE(SUM(oi.total), 0)::text            AS sales_at_list_price,
-          ${revenueExpr}                              AS realised_revenue
+          COALESCE(SUM(oi.total), 0)::text            AS revenue
         ${base}
         GROUP BY ${grouped.key}, ${grouped.label}, ${grouped.sublabel}
         ORDER BY ${orderBy(SALES_SORTS, params.sort, params.direction, "value")}, label ASC
         LIMIT ${params.pageSize} OFFSET ${(params.page - 1) * params.pageSize}
       `,
       prisma.$queryRaw<
-        { orders: number; units: number; list: string; revenue: string }[]
+        { orders: number; units: number; revenue: string }[]
       >`
         SELECT
           COUNT(DISTINCT o.id)::int          AS orders,
           COALESCE(SUM(oi.quantity), 0)::int AS units,
-          COALESCE(SUM(oi.total), 0)::text   AS list,
-          COALESCE(SUM(o.total / NULLIF(line_counts.n, 0)), 0)::text AS revenue
+          COALESCE(SUM(oi.total), 0)::text   AS revenue
         ${base}
       `,
       prisma.$queryRaw<{ n: number }[]>`
@@ -511,7 +526,7 @@ export async function loadSalesReport(
       `,
     ]);
 
-    const t = totals[0] ?? { orders: 0, units: 0, list: "0", revenue: "0" };
+    const t = totals[0] ?? { orders: 0, units: 0, revenue: "0" };
     const count = countRows[0]?.n ?? 0;
 
     return {
@@ -523,15 +538,12 @@ export async function loadSalesReport(
           sublabel: row.sublabel,
           orders: row.orders,
           units: row.units,
-          salesAtListPrice: row.sales_at_list_price,
-          realisedRevenue: row.realised_revenue,
+          revenue: row.revenue,
         })),
         totals: {
           orders: t.orders,
           units: t.units,
-          salesAtListPrice: t.list,
-          realisedRevenue: t.revenue,
-          discounts: (Number(t.list) - Number(t.revenue)).toFixed(2),
+          revenue: t.revenue,
         },
         total: count,
         page: params.page,

@@ -378,7 +378,7 @@ async function SalesSection() {
         <StatCard
           label="Realised revenue"
           value={formatCurrency(data.realisedRevenue)}
-          hint="Confirmed and completed orders, after discounts"
+          hint="Confirmed and completed orders"
           icon={Wallet}
           tone="success"
         />
@@ -582,20 +582,35 @@ async function CostingSection() {
   if (!result.ok) return <SectionError message={result.error.message} />;
 
   const data = result.data;
+
+  /*
+   * Coverage is read against *fulfilled* units, never units sold.
+   *
+   * A unit that has been sold but not shipped has no acquisition cost because
+   * nothing has been acquired against it yet. Putting it in this denominator
+   * would make a procurement backlog look like a costing failure, and the two
+   * have nothing to do with each other — outstanding quantity is reported on
+   * its own line below instead.
+   */
   const coverage =
-    data.unitsSold === 0 ? 0 : (data.costedUnits / data.unitsSold) * 100;
-  const complete = data.unitsSold > 0 && data.costedUnits === data.unitsSold;
+    data.fulfilledUnits === 0
+      ? 0
+      : (data.costedUnits / data.fulfilledUnits) * 100;
+  const complete =
+    data.fulfilledUnits > 0 && data.costedUnits === data.fulfilledUnits;
 
   return (
     <div className="flex flex-col gap-4">
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Cost coverage"
-          value={data.unitsSold === 0 ? "—" : `${coverage.toFixed(1)}%`}
+          value={data.fulfilledUnits === 0 ? "—" : `${coverage.toFixed(1)}%`}
           hint={
-            data.unitsSold === 0
-              ? "Nothing sold yet"
-              : `${formatNumber(data.costedUnits)} of ${formatNumber(data.unitsSold)} units sold`
+            data.fulfilledUnits === 0
+              ? data.unitsSold === 0
+                ? "Nothing sold yet"
+                : "Nothing fulfilled yet"
+              : `${formatNumber(data.costedUnits)} of ${formatNumber(data.fulfilledUnits)} units fulfilled`
           }
           icon={Scale}
           tone={complete ? "success" : coverage === 0 ? "warning" : "default"}
@@ -606,16 +621,16 @@ async function CostingSection() {
           revenue: see the basis note under the meter.
         */}
         <StatCard
-          label="Costed sales at list price"
+          label="Revenue from costed units"
           value={
-            data.costedSalesAtListPrice === null
+            data.costedRevenue === null
               ? "—"
-              : formatCurrency(data.costedSalesAtListPrice)
+              : formatCurrency(data.costedRevenue)
           }
           hint={
-            data.costedSalesAtListPrice === null
+            data.costedRevenue === null
               ? "No sold units have a recorded cost"
-              : `List price of ${formatNumber(data.costedUnits)} costed units`
+              : `What ${formatNumber(data.costedUnits)} costed units sold for`
           }
           icon={ShoppingCart}
         />
@@ -637,12 +652,12 @@ async function CostingSection() {
         plain div rather than a charting dependency — the number is the point
         and the bar only makes it scannable.
       */}
-      {data.unitsSold > 0 ? (
+      {data.fulfilledUnits > 0 || data.outstandingUnits > 0 ? (
         <div className="flex flex-col gap-2">
           <div
             className="relative h-2 w-full overflow-hidden rounded-full bg-muted"
             role="img"
-            aria-label={`${formatNumber(data.costedUnits)} of ${formatNumber(data.unitsSold)} units sold have a recorded acquisition cost`}
+            aria-label={`${formatNumber(data.costedUnits)} of ${formatNumber(data.fulfilledUnits)} fulfilled units have a recorded acquisition cost`}
           >
             <div
               className={cn(
@@ -653,34 +668,39 @@ async function CostingSection() {
             />
           </div>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            {complete
-              ? `Every one of the ${formatNumber(data.unitsSold)} units sold has a recorded acquisition cost, so the margin above covers the whole business.`
-              : data.costedUnits === 0
-                ? `None of the ${formatNumber(data.unitsSold)} units sold has a recorded acquisition cost, so no margin can be calculated. Those units sold for ${formatCurrency(data.allSalesAtListPrice)} at list price; what they cost is unknown. Coverage grows as stock received since cost tracking began is sold.`
-                : `Margin is calculated over ${formatNumber(data.costedUnits)} of ${formatNumber(data.unitsSold)} units sold. The remaining ${formatNumber(data.unitsSold - data.costedUnits)} have no recorded acquisition cost and are excluded from both the cost and the revenue it is measured against.`}
+            {data.fulfilledUnits === 0
+              ? `None of the ${formatNumber(data.unitsSold)} units sold has been fulfilled from stock, so there is no cost of sale to report yet.`
+              : complete
+                ? `Every one of the ${formatNumber(data.fulfilledUnits)} units fulfilled has a recorded acquisition cost, so the margin above covers everything that has shipped.`
+                : data.costedUnits === 0
+                  ? `None of the ${formatNumber(data.fulfilledUnits)} units fulfilled has a recorded acquisition cost, so no margin can be calculated. Those units sold for ${formatCurrency(data.allRevenue)}; what they cost is unknown. Coverage grows as stock received since cost tracking began is sold.`
+                  : `Margin is calculated over ${formatNumber(data.costedUnits)} of ${formatNumber(data.fulfilledUnits)} units fulfilled. The remaining ${formatNumber(data.fulfilledUnits - data.costedUnits)} have no recorded acquisition cost and are excluded from both the cost and the revenue it is measured against.`}
           </p>
+
           {/*
-            The one place the two bases are reconciled. Without this the page
-            carries two figures that look like revenue and are not equal, and
-            the reader is left to work out why on their own.
+            Outstanding quantity, kept well away from the coverage sentence
+            above. These units are sold and not shipped; they are not uncosted,
+            they are unacquired, and folding them into a coverage percentage
+            would describe a procurement queue as a bookkeeping gap.
           */}
-          <p className="rounded-lg border border-border bg-muted/40 p-3 text-xs leading-relaxed text-muted-foreground">
-            <span className="font-medium text-foreground">
-              Two different bases, on purpose.
-            </span>{" "}
-            Everything in this section is measured at{" "}
-            <span className="font-medium text-foreground">list price</span> —
-            line-item prices before order-level discounts — because an
-            order-level discount applies to a whole order and apportioning it
-            across individual FIFO-costed units would mean inventing an
-            allocation rule. The Sales section above reports{" "}
-            <span className="font-medium text-foreground">
-              realised revenue
-            </span>
-            , which is what customers actually paid after those discounts. The
-            two will not match whenever an order carried one, and neither is
-            wrong.
-          </p>
+          {data.outstandingUnits > 0 ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              A further {formatNumber(data.outstandingUnits)}{" "}
+              {data.outstandingUnits === 1 ? "unit is" : "units are"} sold but
+              not yet fulfilled, so {data.outstandingUnits === 1 ? "it has" : "they have"}{" "}
+              no cost of sale at all. {data.outstandingUnits === 1 ? "It joins" : "They join"}{" "}
+              the figures above once the stock arrives and the order is
+              fulfilled.
+            </p>
+          ) : null}
+          {/*
+            A paragraph reconciling two revenue bases used to sit here, because
+            this section measured at list price while Sales reported revenue net
+            of an order-level discount, and the two did not match. The discount
+            feature is gone (§20), so there is one basis and nothing left to
+            reconcile. Removed rather than reworded: an explanation of a
+            difference that cannot occur is worse than no explanation at all.
+          */}
         </div>
       ) : null}
     </div>
@@ -702,10 +722,18 @@ function MarginTile({
     margin: string | null;
     marginPercent: number | null;
     costedUnits: number;
+    fulfilledUnits: number;
     unitsSold: number;
   };
 }) {
   if (data.margin === null) {
+    /*
+     * Three reasons for having no margin, and they are not interchangeable.
+     * Nothing sold; sold but nothing shipped, so no cost exists yet; or
+     * shipped from stock whose price was never recorded, which will never
+     * resolve on its own. Saying the wrong one sends someone looking in the
+     * wrong place.
+     */
     return (
       <StatCard
         label="Realised margin"
@@ -713,7 +741,9 @@ function MarginTile({
         hint={
           data.unitsSold === 0
             ? "Nothing sold yet"
-            : "No sold units have a recorded acquisition cost"
+            : data.fulfilledUnits === 0
+              ? "Nothing fulfilled yet, so there is no cost of sale"
+              : "No fulfilled units have a recorded acquisition cost"
         }
         icon={Scale}
         tone="warning"
@@ -721,7 +751,7 @@ function MarginTile({
     );
   }
 
-  const complete = data.costedUnits === data.unitsSold;
+  const complete = data.costedUnits === data.fulfilledUnits;
 
   return (
     <StatCard
@@ -729,8 +759,8 @@ function MarginTile({
       value={formatCurrency(data.margin)}
       hint={
         complete
-          ? `${(data.marginPercent ?? 0).toFixed(1)}% across every unit sold`
-          : `${(data.marginPercent ?? 0).toFixed(1)}% over ${formatNumber(data.costedUnits)} of ${formatNumber(data.unitsSold)} units sold`
+          ? `${(data.marginPercent ?? 0).toFixed(1)}% across every unit fulfilled`
+          : `${(data.marginPercent ?? 0).toFixed(1)}% over ${formatNumber(data.costedUnits)} of ${formatNumber(data.fulfilledUnits)} units fulfilled`
       }
       icon={Scale}
       tone={Number(data.margin) < 0 ? "destructive" : "success"}

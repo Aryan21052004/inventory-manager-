@@ -34,7 +34,7 @@ export async function generateMetadata({
 }
 
 /**
- * Editing an order's lines, customer and discount.
+ * Editing an order's lines and customer.
  *
  * A page rather than a dialog, and the same builder the create page uses —
  * editing an order means the same work as raising one, and two copies of a
@@ -113,7 +113,7 @@ export default async function EditOrderPage({
 
         <PageHeader
           title={`Edit ${order.orderNumber}`}
-          description="Change the customer, lines or discount. Totals are recalculated from current prices when you save, and inventory is untouched until the order is confirmed."
+          description="Change the customer or the lines. Totals are recalculated from current prices when you save, and inventory is untouched until the order is confirmed."
           actions={<OrderStatusBadge status={order.status} />}
         />
       </div>
@@ -125,16 +125,22 @@ export default async function EditOrderPage({
           id: order.id,
           orderNumber: order.orderNumber,
           customerId: order.customerId,
-          discount: order.discount,
           /*
-           * Prices come from the product as it is now, not from the unit price
-           * stored on the line. The server recalculates from the current price
-           * on save, so previewing with the historical one would show a total
-           * the save would not produce.
+           * Each line keeps the price it was quoted at, read from the order and
+           * not from the catalogue.
+           *
+           * This is the visible half of the re-pricing fix. It used to seed the
+           * builder from the product's *current* price, because the server
+           * recalculated from that on save — so opening a draft after a price
+           * change silently showed, and then saved, a different quote than the
+           * one that had been agreed. The price now round-trips: what was
+           * quoted is what is shown, and what is shown is what is saved.
            */
           lines: order.lines.flatMap((line) => {
             const product = byId.get(line.productId);
-            return product ? [{ product, quantity: line.quantity }] : [];
+            return product
+              ? [{ product, quantity: line.quantity, unitPrice: line.unitPrice }]
+              : [];
           }),
         }}
       />

@@ -22,6 +22,7 @@ import { cancelOrder, completeOrder, confirmOrder, createOrder } from "@/server/
 import { signOut } from "./clerk-mock";
 import {
   createSupplier,
+  quoted,
   resetDatabase,
   seedProduct,
   signInWithRole,
@@ -78,8 +79,7 @@ async function receive(
 async function sell(customerId: string, productId: string, quantity: number) {
   const order = await createOrder({
     customerId,
-    items: [{ productId, quantity }],
-    discount: "0",
+    items: await quoted([{ productId, quantity }]),
   });
   await confirmOrder(order.id);
   return order;
@@ -198,13 +198,13 @@ describe("cost coverage", () => {
 
     expect(costing.unitsSold).toBe(10);
     expect(costing.costedUnits).toBe(0);
-    expect(Number(costing.allSalesAtListPrice)).toBe(1_000);
+    expect(Number(costing.allRevenue)).toBe(1_000);
 
     // Nothing. Not zero, not the revenue, not a percentage.
     expect(costing.margin).toBeNull();
     expect(costing.marginPercent).toBeNull();
     expect(costing.knownCogs).toBeNull();
-    expect(costing.costedSalesAtListPrice).toBeNull();
+    expect(costing.costedRevenue).toBeNull();
   });
 
   it("never reports a hundred per cent margin on uncosted sales", async () => {
@@ -219,7 +219,7 @@ describe("cost coverage", () => {
 
     const costing = unwrap(await loadCosting());
     expect(costing.marginPercent).not.toBe(100);
-    expect(costing.margin).not.toBe(costing.allSalesAtListPrice);
+    expect(costing.margin).not.toBe(costing.allRevenue);
   });
 
   it("apportions revenue to the costed units at partial coverage", async () => {
@@ -244,8 +244,8 @@ describe("cost coverage", () => {
 
     expect(costing.unitsSold).toBe(20);
     expect(costing.costedUnits).toBe(10);
-    expect(Number(costing.allSalesAtListPrice)).toBe(2_000);
-    expect(Number(costing.costedSalesAtListPrice)).toBe(1_000);
+    expect(Number(costing.allRevenue)).toBe(2_000);
+    expect(Number(costing.costedRevenue)).toBe(1_000);
     expect(Number(costing.knownCogs)).toBe(600);
     expect(Number(costing.margin)).toBe(400);
     expect(Number(costing.margin)).not.toBe(1_400);
@@ -266,7 +266,7 @@ describe("cost coverage", () => {
     expect(costing.unitsSold).toBe(15);
     expect(costing.costedUnits).toBe(15);
     expect(Number(costing.knownCogs)).toBe(900);
-    expect(Number(costing.costedSalesAtListPrice)).toBe(1_500);
+    expect(Number(costing.costedRevenue)).toBe(1_500);
     expect(Number(costing.margin)).toBe(600);
     expect(costing.marginPercent).toBeCloseTo(40, 5);
   });
@@ -418,8 +418,7 @@ describe("needs attention", () => {
 
     await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 1 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 1 }]),
     });
     await sell(buyer.id, a.id, 2);
 
@@ -628,8 +627,7 @@ describe("sales figures", () => {
 
     await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 4 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 4 }]),
     });
 
     const sales = unwrap(await loadSales());
@@ -676,8 +674,7 @@ describe("sales figures", () => {
     for (let index = 0; index < 3; index += 1) {
       await createOrder({
         customerId: buyer.id,
-        items: [{ productId: a.id, quantity: 1 }],
-        discount: "0",
+        items: await quoted([{ productId: a.id, quantity: 1 }]),
       });
     }
 
@@ -771,8 +768,7 @@ describe("the dashboard agrees with the module figures", () => {
     await sell(buyer.id, a.id, 5);
     await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 1 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 1 }]),
     });
 
     const sales = unwrap(await loadSales());

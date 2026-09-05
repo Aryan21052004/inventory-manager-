@@ -21,6 +21,7 @@ import { adjustStock, createProduct } from "@/server/products";
 import { signOut } from "./clerk-mock";
 import {
   createSupplier,
+  quoted,
   resetDatabase,
   seedProduct,
   signInWithRole,
@@ -93,7 +94,7 @@ async function sell(
   customerId: string,
   items: { productId: string; quantity: number }[],
 ) {
-  const order = await createOrder({ customerId, items, discount: "0" });
+  const order = await createOrder({ customerId, items: await quoted(items) });
   await confirmOrder(order.id);
   return order;
 }

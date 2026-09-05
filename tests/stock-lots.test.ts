@@ -22,6 +22,7 @@ import {
   createSupplier,
   expectConsumptionsReconcile,
   expectLotsReconcile,
+  quoted,
   resetDatabase,
   seedProduct,
   signInWithRole,
@@ -200,8 +201,7 @@ describe("confirming an order costs it FIFO", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 15 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 15 }]),
     });
 
     const outcome = await confirmOrder(order.id);
@@ -244,8 +244,7 @@ describe("confirming an order costs it FIFO", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 15 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 15 }]),
     });
     await confirmOrder(order.id);
 
@@ -277,8 +276,7 @@ describe("confirming an order costs it FIFO", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 5 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 5 }]),
     });
     await confirmOrder(order.id);
 
@@ -325,8 +323,7 @@ describe("stock with no known cost", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 15 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 15 }]),
     });
 
     // Confirms. Cost being partially unknown is not a reason to refuse a sale.
@@ -358,8 +355,7 @@ describe("stock with no known cost", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 15 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 15 }]),
     });
     await confirmOrder(order.id);
 
@@ -409,8 +405,7 @@ describe("stock with no known cost", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 4 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 4 }]),
     });
     await confirmOrder(order.id);
 
@@ -458,8 +453,7 @@ describe("cancelling an order returns stock to its original batches", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 15 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 15 }]),
     });
     await confirmOrder(order.id);
     expect((await lotsOf(a.id)).map((l) => l.quantityRemaining)).toEqual([0, 5]);
@@ -491,8 +485,7 @@ describe("cancelling an order returns stock to its original batches", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 10 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 10 }]),
     });
     await confirmOrder(order.id);
 
@@ -519,8 +512,7 @@ describe("cancelling an order returns stock to its original batches", () => {
     await receive(supplier.id, a.id, 10, "8000.00");
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 6 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 6 }]),
     });
     await confirmOrder(order.id);
     await cancelOrder(order.id);
@@ -565,8 +557,7 @@ describe("cancelling an order confirmed before cost tracking existed", () => {
     const buyer = await customer();
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId, quantity }],
-      discount: "0",
+      items: await quoted([{ productId, quantity }]),
     });
     await confirmOrder(order.id);
 
@@ -698,8 +689,7 @@ describe("cancelling an order confirmed before cost tracking existed", () => {
 
     const sale = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 6 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 6 }]),
     });
     const outcome = await confirmOrder(sale.id);
 
@@ -728,8 +718,7 @@ describe("cancelling an order confirmed before cost tracking existed", () => {
     await receive(supplier.id, a.id, 10, "8000.00");
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 6 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 6 }]),
     });
     await confirmOrder(order.id);
     await cancelOrder(order.id);
@@ -777,8 +766,7 @@ describe("cancelling a received purchase", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 3 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 3 }]),
     });
     await confirmOrder(order.id);
 
@@ -815,8 +803,7 @@ describe("cancelling a received purchase", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 10 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 10 }]),
     });
     await confirmOrder(order.id);
 
@@ -843,8 +830,7 @@ describe("cancelling a received purchase", () => {
     const purchase = await receive(supplier.id, a.id, 10, "8000.00");
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 4 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 4 }]),
     });
     await confirmOrder(order.id);
 
@@ -958,8 +944,7 @@ describe("historical cost of sale", () => {
 
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 10 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 10 }]),
     });
     await confirmOrder(order.id);
 
@@ -984,8 +969,7 @@ describe("historical cost of sale", () => {
     await receive(supplier.id, a.id, 10, "8000.00");
     const order = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 10 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 10 }]),
     });
     await confirmOrder(order.id);
 
@@ -1022,13 +1006,11 @@ describe("concurrent confirmations", () => {
 
     const first = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 6 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 6 }]),
     });
     const second = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 6 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 6 }]),
     });
 
     const results = await Promise.allSettled([
@@ -1083,19 +1065,17 @@ describe("the valuation layer stays an index over the ledger", () => {
 
     const sold = await createOrder({
       customerId: buyer.id,
-      items: [
+      items: await quoted([
         { productId: a.id, quantity: 12 },
         { productId: b.id, quantity: 5 },
-      ],
-      discount: "0",
+      ]),
     });
     await confirmOrder(sold.id);
     await expectLotsReconcile();
 
     const cancelled = await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 3 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 3 }]),
     });
     await confirmOrder(cancelled.id);
     await cancelOrder(cancelled.id, "Changed their mind");

@@ -1,0 +1,32 @@
+-- ---------------------------------------------------------------------------
+-- Products: the selling price becomes an optional reference.
+--
+-- The business quotes per customer. The same part goes out at ₹12,000 to one
+-- and ₹13,500 to another, so no single column on the catalogue row can say what
+-- a part sells for. What it *can* hold is a reference someone typed, useful for
+-- prefilling a new order line and for nothing else.
+--
+-- The price that matters already lives on `order_items.unit_price`, frozen when
+-- the line was quoted. Nothing here touches it, and nothing needs to: every
+-- existing line already carries the price its order was written at.
+--
+-- Optional for the same reason `standard_cost` became optional on this table —
+-- a part that is only ever quoted has no list price, and requiring one would
+-- manufacture a number nobody stands behind.
+--
+-- ---------------------------------------------------------------------------
+--
+-- **This migration cannot lose data.** It widens a column: every existing row
+-- already holds a value and keeps it, no row is rewritten, and no total is
+-- restated. There is no gate to run first and nothing to export. Contrast the
+-- discount removal, which restated `orders.total` and needed both.
+--
+-- Reversible while no product has been saved without a price. Re-adding the
+-- constraint fails once one has, which is the honest failure — the null means a
+-- part genuinely has no reference price, and inventing one to satisfy NOT NULL
+-- is the fabrication this change exists to avoid.
+--
+-- There is no check constraint on `selling_price` to rebuild and no index on it.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE "products" ALTER COLUMN "selling_price" DROP NOT NULL;

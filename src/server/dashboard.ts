@@ -199,36 +199,31 @@ export interface CostingSnapshot {
    * Costed sales at list price — `unitPrice × costedQuantity` summed per line,
    * covering only the units whose cost is known.
    *
-   * Two things about this figure, and both are why it is not called revenue.
+   * It is *apportioned*, which is why it is not called revenue: setting a
+   * line's whole value against a cost that covers only part of it is what
+   * produces a margin approaching one hundred per cent on a business whose
+   * costs are unknown.
    *
-   * It is *apportioned*: setting a line's whole value against a cost that
-   * covers only part of it is what produces a margin approaching one hundred
-   * per cent on a business whose costs are unknown.
-   *
-   * And it is a *list-price* basis — line prices, before the order-level
-   * discount. That is deliberate and it is why this does not reconcile with the
-   * Sales section's realised revenue: an order-level discount applies to the
-   * order as a whole, and splitting it across individual FIFO-costed units
-   * would mean inventing an allocation rule. Margin here is therefore measured
-   * against the same line prices the cost was drawn from, and the dashboard
-   * says so rather than leaving two figures to be reconciled by the reader.
+   * It used to carry a second caveat — that it was a *list-price* basis, before
+   * the order-level discount, and so would not reconcile with the Sales
+   * section's realised revenue. That caveat is gone with the discount feature
+   * (§20). Line prices are what the customer was charged, so this figure and
+   * the Sales section are now on the same basis and do reconcile.
    */
-  costedSalesAtListPrice: string | null;
-  /** `costedSalesAtListPrice - knownCogs`. Null when nothing is costed. */
+  costedRevenue: string | null;
+  /** `costedRevenue - knownCogs`. Null when nothing is costed. */
   margin: string | null;
   /** Percentage of costed sales at list price. Null when nothing is costed. */
   marginPercent: number | null;
   /**
-   * All sales at list price — every unit sold on a realised order, costed or
-   * not, at its line price.
+   * Every unit sold on a realised order, costed or not, at its line price.
    *
    * The denominator the coverage figures are read against, and on the same
-   * list-price basis as `costedSalesAtListPrice` above so the two are
-   * comparable. Deliberately **not** named revenue: it is the sum of
-   * `order_items.total`, before order-level discounts, and it will not equal
-   * the Sales section's realised revenue whenever any order carried one.
+   * basis as `costedRevenue` above so the two are comparable. This is the sum
+   * of `order_items.total`, which since the discount removal (§20) is also
+   * `SUM(orders.total)` — so unlike before, it agrees with the Sales section.
    */
-  allSalesAtListPrice: string;
+  allRevenue: string;
   /** Stock on hand with no recorded cost, mirrored here for the section. */
   uncostedStockUnits: number;
 }
@@ -755,11 +750,11 @@ export async function loadCosting(): Promise<Result<CostingSnapshot>> {
           totals.units_sold - totals.fulfilled_units,
         ),
         knownCogs: costed ? totals.known_cogs : null,
-        costedSalesAtListPrice: costed ? totals.costed_revenue : null,
+        costedRevenue: costed ? totals.costed_revenue : null,
         margin: costed ? margin.toFixed(2) : null,
         marginPercent:
           costed && costedRevenue !== 0 ? (margin / costedRevenue) * 100 : null,
-        allSalesAtListPrice: totals.total_revenue,
+        allRevenue: totals.total_revenue,
         uncostedStockUnits: totals.uncosted_stock_units,
       },
     };

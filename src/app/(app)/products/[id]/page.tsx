@@ -264,10 +264,16 @@ export default async function ProductDetailPage({
                 uncostedUnits={product.uncostedUnits}
               />
             </DetailRow>
-            <DetailRow label="Selling price">
-              <span className="tabular text-sm font-medium">
-                {formatCurrency(product.sellingPrice)}
-              </span>
+            <DetailRow label="Reference price">
+              {product.sellingPrice === null ? (
+                <span className="text-sm text-muted-foreground">
+                  Not set — quoted per order
+                </span>
+              ) : (
+                <span className="tabular text-sm font-medium">
+                  {formatCurrency(product.sellingPrice)}
+                </span>
+              )}
             </DetailRow>
             <DetailRow label="Margin">
               <Margin
@@ -680,8 +686,25 @@ function Margin({
   stockValue: string;
   costedUnits: number;
   uncostedUnits: number;
-  price: string;
+  /** The reference price. Null when the product is only ever quoted. */
+  price: string | null;
 }) {
+  /*
+   * No reference price, no indicative margin.
+   *
+   * The symmetric guard to the one below. This panel measures a reference price
+   * against what the stock on hand actually cost, and the business quotes per
+   * customer — so a product may legitimately have no reference at all. Treating
+   * a missing one as zero would report the entire cost as a loss.
+   */
+  if (price === null) {
+    return (
+      <span className="text-sm text-muted-foreground">
+        No reference price — this part is quoted per order
+      </span>
+    );
+  }
+
   if (costedUnits === 0) {
     return (
       <span className="text-sm text-muted-foreground">

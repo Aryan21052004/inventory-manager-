@@ -888,7 +888,7 @@ describe("changing the supplier on an existing product", () => {
     // Not just the supplier — the whole row, including the name the edit tried
     // to change. The transaction rolled back rather than half-applying.
     expect(after.name).toBe(before.name);
-    expect(after.sellingPrice.toString()).toBe(before.sellingPrice.toString());
+    expect(after.sellingPrice?.toString()).toBe(before.sellingPrice?.toString());
     expect(after.supplierId).toBe(from.id);
   });
 

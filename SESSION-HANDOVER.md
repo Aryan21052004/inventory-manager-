@@ -219,75 +219,86 @@ UI and are still in the development database:
 
 ## 4. Open items and known gaps
 
-**Synthetic development fixtures exist but are not in the development database.**
-`prisma/seed.ts` now creates four clearly-synthetic certificates covering the
-required states — valid with no expiry, superseded plus its current replacement,
-expiring soon, expired, and batches deliberately left uncovered. They are
-**unmistakably** development samples: types like "SAMPLE Conformity Record",
-numbers like `DEV-SAMPLE-0001`, filenames prefixed `SYNTHETIC-`, and PDF bodies
-whose visible text reads "SYNTHETIC DEVELOPMENT SAMPLE - NOT A REAL
-CERTIFICATE". Nothing resembles a genuine 8130-3 or EASA Form 1.
+**No link from a purchase to the order waiting on it.** `StockReferenceType` has
+no ORDER↔PURCHASE pair, so "which delivery clears this backlog" is unanswerable
+from the data. The natural next workstream, and additive.
 
-The seed has **not been run**, because `db:seed` clears every table and would
-destroy the development data the four financial regression figures are measured
-against. Run it deliberately when you want the fixtures, and expect those
-figures to change with the data.
+**No outstanding-orders screen.** Outstanding quantity is visible on an order
+and in the orders list; there is no "what do we owe" view across the book. This
+is also why the migration adds **no index** — such a screen would need an
+expression index on the difference, not one on the column.
 
-The seed writes files straight into `FILE_STORAGE_DIR` with the same
-`certificates/<uuid>.pdf` key format the storage layer uses, because
-`src/server/storage` is `server-only` and cannot be imported from a plain
-script. If that key format ever changes, this is a second place to change.
+**A business question left open, and it matters.** If goods physically reach the
+customer while this system says nothing shipped, units left from a source it
+does not track. The deficit model records that faithfully as an obligation, but
+the more accurate long-run model may be an inbound movement recording the
+untracked acquisition, followed by an ordinary fulfilment. The answer decides
+whether outstanding quantities clear in days or sit open indefinitely.
 
-**A batch drawn to zero keeps its paperwork but has no UI reaching it.** The
-product detail lists open lots only. Order lines reach it, and the certificate
-compliance register will.
+**Three development rows remain** from browser QA (listed in §3). They are
+ordinary orders and a purchase, not synthetic paperwork, and can be left or
+cancelled as you prefer.
 
-**Cost coverage is 0% on the current data**, unchanged.
+**Returns are closed, not open.** Listed here only so nobody reads their absence
+as an oversight and reopens them. There is no sales-return workflow, none is
+planned, and the three questions a return design would have needed answered —
+quarantine versus straight back to sellable stock, credit versus replacement,
+and whether a return reduces revenue here — are moot rather than outstanding.
+Decided at the owner's direction, 4 September 2026. `HANDOVER.md` §8 carries the
+statement and the reason; §19 records what it means for the reversal-netting fix.
 
-**Two pre-existing shared-shell issues, still unfixed and still out of scope:**
-`range=custom` renders a blank Period trigger in the report filter bar, and a
-`?page=N` beyond the last page shows the empty state rather than clamping.
+**The discount feature is removed outright**, superseding the "out of scope for
+margin" note that stood here earlier the same day. Column, constraint, form
+field, report column and explanatory copy are all gone; `total = subtotal` is a
+check constraint. It collapsed the two revenue bases into one, which made
+revenue reportable at product and category grouping for the first time and made
+the order page's "Gross margin" correct without changing any margin logic.
+`HANDOVER.md` §20 is the account. **The migration is written but has not been
+applied to production** — see §7 below.
+
+**Where the costing review's findings now stand.** G1 (adjustment cost) and G2
+(reversal netting) are implemented and tested; returns are out of scope;
+discount-in-margin was resolved by removing the discount feature outright (§20);
+the seed's single-price data and `Product.standardCost` are live work; landed
+cost is a business question. `HANDOVER.md` §19 has the table.
 
 ---
 
 ## 5. What not to change
 
-Carried forward, and still in force:
-
-- **Never** treat unknown acquisition cost as ₹0, and never substitute
-  `standardCost` for it.
-- **Never** compute `revenue − knownCost` as margin when coverage is incomplete.
-  Suppress the figure instead — `null`, not zero.
-- Do not reconstruct historical COGS for pre-FIFO orders.
-- Do not create a second inventory quantity system. `Product.stockQuantity` is
-  the source of truth; `StockLot` is a valuation and provenance index over it.
-- Do not modify Clerk authentication, the stock engine, FIFO allocation,
-  inventory locking, or the certificate *file storage* layer without a
-  deliberate decision.
-- Do not delete or squash historical migrations.
-- **No threshold-based stock features** — see `HANDOVER.md` §16.
-- **Never read a movement's direction from its type.** `new_stock -
-  previous_stock` is the only expression correct for all four types.
-- **Do not add a second report parameter parser.**
-- **A certificate belongs to a lot, never to a product.** Do not reintroduce a
-  product-level current certificate, do not backfill legacy rows onto a lot, and
-  do not invent an issuing authority. `0 units` and "no paperwork on file" are
-  both valid answers.
-- **Certificate presence must never affect inventory.** Nothing in FIFO,
-  valuation, allocation or stock movement may consult a certificate.
+- **The stock engine.** It did not need to change for this and it did not.
+- **Any negative-stock guard**, in code or in the database.
+- **`confirmedAt` on confirmation.** The sales report dates revenue by it; an
+  unfulfilled order that left it null would vanish from every financial report.
+- **The coverage denominator.** `fulfilledQuantity`, never `quantity`.
+  `marginOf` takes it as a required argument on purpose.
+- **`LotCostSource.UNKNOWN`.** It means "real units we cannot price", not
+  "units that do not exist". Nothing about outstanding quantity may borrow it.
+- **Threshold vocabulary.** Ordered / Fulfilled / Outstanding. Not low stock,
+  out of stock, short, or reorder — §16 removed that at the owner's direction.
+- **Returns.** Out of scope by decision, not deferred. No return model, status,
+  quarantine logic, returned quantity, UI, migration, seed data or tests are to
+  be added, and `COMPLETED → CANCELLED` stays refused. `returnToLots` serves
+  **cancellation** — a sale that did not happen, rather than one undone — and
+  its name refers to the lots units go back into, not to a customer return.
+- **Product-level selling prices.** `Product.sellingPrice` is an optional
+  *reference* that prefills a new order line. It is never historical revenue and
+  must never overwrite an existing `OrderItem.unitPrice` — see `HANDOVER.md`
+  §21. The quoted price on a line is the only price any money figure may read.
+- **Discounts.** Removed entirely, not deferred. No discount field on any
+  schema, no input on any form, no arithmetic in costing, no margin logic, no
+  report column, no UI. `total = subtotal` is enforced by check constraint. If a
+  commercial need ever arises it is a new feature with a new decision behind it,
+  not a restoration. See `HANDOVER.md` §20.
 
 ---
 
 ## 6. Next development steps
 
-1. **Certificate compliance register** — now unblocked. A current-state, flat,
-   **lot-grain** register: product/SKU, lot, supplier (lot provenance),
-   purchase, lot quantity, certificate type, number, issue date, expiry, days
-   remaining, status. It reuses the existing report framework — same
-   `REPORT_CONFIG`, same parser, same loader for page and CSV.
-2. **Reports Tier 2, continued** — profitability and cost coverage, inventory
-   ageing by lot, supplier provenance. Profitability still cannot report a
-   margin until cost coverage is non-zero.
-3. **Historical as-of valuation** — reconstructible from the append-only
-   consumption table, but needs explicit handling of the pre-costing migration
-   boundary. See `HANDOVER.md` §13.
+1. **Review and commit this workstream.** Nothing is committed; the diff is
+   sixteen modified files, two new ones, and one migration.
+2. **Answer the business question in §4.** It is the only thing here that could
+   change the shape of what has been built.
+3. **The ORDER↔PURCHASE link**, then an outstanding-orders screen on top of it.
+4. **Certificate compliance register** — still the most valuable unbuilt report,
+   unchanged in scope by this workstream.

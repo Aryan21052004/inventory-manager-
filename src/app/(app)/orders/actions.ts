@@ -75,10 +75,17 @@ function revalidateOrder(orderId?: string, movedStock = false): void {
   }
 }
 
+/**
+ * What the order form posts.
+ *
+ * A customer and lines, and nothing else. No money travels from the browser:
+ * unit prices, line totals, the subtotal and the grand total are all computed
+ * on the server from prices read there. The discount was the one money field an
+ * order submission ever carried, and it went with the feature (§20).
+ */
 export interface OrderSubmission {
   customerId: string;
   items: { productId: string; quantity: number }[];
-  discount: string;
 }
 
 /**

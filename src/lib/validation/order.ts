@@ -4,10 +4,10 @@ import { z } from "zod";
  * Validation for orders.
  *
  * Note what an order submission does *not* contain: a subtotal, and a total.
- * The client sends a customer, a set of lines, and a discount; every figure
- * derived from those is computed on the server from prices read out of the
- * database at that moment. A total the browser calculated is a number the
- * browser can choose, and an order is a financial document.
+ * The client sends a customer and a set of lines; every figure derived from
+ * those is computed on the server from prices read out of the database at that
+ * moment. A total the browser calculated is a number the browser can choose,
+ * and an order is a financial document.
  *
  * The unit price is not accepted from the client either. It is copied from the
  * product when the line is written — an order must not change retrospectively
@@ -28,31 +28,60 @@ const lineQuantity = z
   .refine((value) => value > 0, "Quantity must be at least 1")
   .refine((value) => value <= 1_000_000, "Quantity is too large");
 
+/**
+ * The quoted price on a line, as it arrives from a form.
+ *
+ * The string is checked before it is converted, for the reason every money
+ * field in this codebase is: `Number("")` is 0, so coercing first would read a
+ * cleared field as "these units are free" — a price, and a wrong one.
+ *
+ * Bounded below at zero and above by what `Decimal(12, 2)` can hold. Neither is
+ * a commercial rule: the floor mirrors the `order_items_unit_price_non_negative`
+ * check constraint, and the ceiling turns a typo into a readable field error
+ * rather than a Postgres numeric-overflow nobody can act on. **No minimum or
+ * maximum sale price is imposed** — there is no business rule for one, and
+ * inventing a threshold here would refuse legitimate quotes.
+ *
+ * Zero is accepted deliberately. A free-of-charge line is a real commercial
+ * decision — a warranty replacement, a goodwill shipment — and it is different
+ * from a blank field, which is why the blank is rejected and the zero is not.
+ */
+const quotedPrice = z
+  .union([z.string(), z.number()])
+  .transform((value) => (typeof value === "number" ? String(value) : value.trim()))
+  .refine((value) => value !== "", "Enter a unit price for every line")
+  .refine((value) => Number.isFinite(Number(value)), "Unit price must be a number")
+  .refine(
+    (value) => /^-?\d*(\.\d{1,2})?$/.test(value),
+    "Unit price cannot have more than two decimal places",
+  )
+  .transform(Number)
+  .refine((value) => value >= 0, "Unit price cannot be negative")
+  .refine((value) => value <= 9_999_999_999.99, "Unit price is too large");
+
 export const orderLineSchema = z.object({
   productId: z.string().trim().min(1, "Product is required"),
   quantity: lineQuantity,
+  /**
+   * What this customer is being quoted for one unit.
+   *
+   * The one money field an order submission carries, and it is a deliberate
+   * reversal of what this module used to enforce. The price used to be resolved
+   * on the server from `Product.sellingPrice` and a price in the payload was
+   * silently stripped, because "the client cannot name its own price" was a
+   * security property. It is now a commercial input: the same part is quoted
+   * differently to different customers, and that number exists nowhere but here.
+   *
+   * What replaced the old protection is bounds rather than derivation — see
+   * `quotedPrice` — plus attribution, which is unchanged: `Order.createdBy` is
+   * resolved from the session and is not an input, so every quote is traceable
+   * to a person. Everything *derived* from the price is still computed on the
+   * server; a line total or an order total sent from the browser is ignored.
+   */
+  unitPrice: quotedPrice,
 });
 
 export type OrderLineInput = z.infer<typeof orderLineSchema>;
-
-/**
- * Money from a form. Same treatment as the product schema: the string is
- * checked before conversion, because `Number("")` is 0 and coercing first would
- * read a cleared field as a valid zero.
- */
-const money = (label: string) =>
-  z
-    .union([z.string(), z.number()])
-    .transform((value) => (typeof value === "number" ? String(value) : value.trim()))
-    .transform((value) => (value === "" ? "0" : value))
-    .refine((value) => Number.isFinite(Number(value)), `${label} must be a number`)
-    .transform(Number)
-    .refine((value) => value >= 0, `${label} cannot be negative`)
-    .refine((value) => value <= 9_999_999_999.99, `${label} is too large`)
-    .refine(
-      (value) => Number.isInteger(Math.round(value * 100)),
-      `${label} must be a valid amount`,
-    );
 
 export const orderSchema = z.object({
   customerId: z.string().trim().min(1, "Choose a customer"),
@@ -89,15 +118,13 @@ export const orderSchema = z.object({
       }
     }),
 
-  discount: money("Discount"),
-
   note: z.string().trim().max(500, "Note must be 500 characters or fewer").optional(),
 });
 
 export type OrderInput = z.infer<typeof orderSchema>;
 
 export type OrderFieldErrors = Partial<
-  Record<"customerId" | "items" | "discount" | "form", string>
+  Record<"customerId" | "items" | "form", string>
 >;
 
 export function toOrderFieldErrors(error: z.ZodError): OrderFieldErrors {
@@ -105,10 +132,7 @@ export function toOrderFieldErrors(error: z.ZodError): OrderFieldErrors {
 
   for (const issue of error.issues) {
     const field = issue.path[0];
-    const key =
-      field === "customerId" || field === "discount" || field === "items"
-        ? field
-        : "form";
+    const key = field === "customerId" || field === "items" ? field : "form";
 
     if (!fieldErrors[key]) fieldErrors[key] = issue.message;
   }
@@ -117,33 +141,35 @@ export function toOrderFieldErrors(error: z.ZodError): OrderFieldErrors {
 }
 
 /**
- * The one arithmetic rule in the module: **grand total = subtotal − discount**.
+ * The one arithmetic rule in the module: **grand total = subtotal**.
  *
- * There is no tax term and no place to add one. Everything works in integer
- * cents because money in floating point drifts — 0.1 + 0.2 is famously not 0.3,
- * and a subtotal is a sum of many such numbers. The caller converts to a
- * decimal string once, at the edge.
+ * There is no tax term, no discount term, and no place to add either. Both were
+ * removed rather than left at zero — see §20 — and the check constraint on
+ * `orders` enforces the equality, so a total that implies anything else is
+ * refused by the database whatever wrote it.
+ *
+ * This still returns both figures rather than one. `total` is a real column
+ * that every list, report and export reads; the function exists to compute the
+ * pair together so no caller has to remember they are the same number.
+ *
+ * Everything works in integer cents because money in floating point drifts —
+ * 0.1 + 0.2 is famously not 0.3, and a subtotal is a sum of many such numbers.
+ * The caller converts to a decimal string once, at the edge.
  */
 export interface OrderTotals {
   subtotalCents: number;
-  discountCents: number;
   totalCents: number;
 }
 
 export function calculateTotals(
   lines: readonly { unitPriceCents: number; quantity: number }[],
-  discountCents: number,
 ): OrderTotals {
   const subtotalCents = lines.reduce(
     (sum, line) => sum + line.unitPriceCents * line.quantity,
     0,
   );
 
-  return {
-    subtotalCents,
-    discountCents,
-    totalCents: subtotalCents - discountCents,
-  };
+  return { subtotalCents, totalCents: subtotalCents };
 }
 
 /**

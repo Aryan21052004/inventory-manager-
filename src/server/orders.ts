@@ -91,7 +91,6 @@ export interface OrderListItem {
    */
   outstandingUnits: number;
   subtotal: string;
-  discount: string;
   total: string;
   createdAt: Date;
   createdByName: string | null;
@@ -187,7 +186,6 @@ export interface OrderDetail {
   orderNumber: string;
   status: OrderStatus;
   subtotal: string;
-  discount: string;
   total: string;
   createdAt: Date;
   updatedAt: Date;
@@ -230,11 +228,18 @@ export interface OrderProductOption {
   name: string;
   sku: string;
   /**
-   * The product's price *now*. The order builder previews with this because
-   * `updateOrder` recalculates from it — showing the price stored on an
-   * existing line would preview a total the save would not produce.
+   * The catalogue's reference price, used to **prefill a new line only**.
+   *
+   * Null when the product has no reference price, in which case the salesperson
+   * types the quote in. Either way this is a default, never a price the server
+   * will impose: a line already on an order shows the price it was quoted at,
+   * which the builder carries in its own state.
+   *
+   * This docstring used to say the builder previews with the current price
+   * "because `updateOrder` recalculates from it". It no longer does — that was
+   * the re-pricing defect.
    */
-  sellingPrice: string;
+  sellingPrice: string | null;
   stockQuantity: number;
   /**
    * Always true for search results, which only return ACTIVE products. It can
@@ -327,7 +332,6 @@ export async function listOrders(
           orderNumber: true,
           status: true,
           subtotal: true,
-          discount: true,
           total: true,
           createdAt: true,
           customerId: true,
@@ -354,7 +358,6 @@ export async function listOrders(
             0,
           ),
           subtotal: row.subtotal.toString(),
-          discount: row.discount.toString(),
           total: row.total.toString(),
           createdAt: row.createdAt,
           createdByName: row.createdByUser?.name ?? null,
@@ -492,7 +495,7 @@ export async function searchOrderProducts(
       id: row.id,
       name: row.name,
       sku: row.sku,
-      sellingPrice: row.sellingPrice.toString(),
+      sellingPrice: row.sellingPrice?.toString() ?? null,
       stockQuantity: row.stockQuantity,
       isActive: true,
     }));
@@ -533,7 +536,7 @@ export async function loadOrderProducts(
       id: row.id,
       name: row.name,
       sku: row.sku,
-      sellingPrice: row.sellingPrice.toString(),
+      sellingPrice: row.sellingPrice?.toString() ?? null,
       stockQuantity: row.stockQuantity,
       isActive: row.status === "ACTIVE",
     }));
@@ -732,7 +735,6 @@ export async function getOrderDetail(
         orderNumber: order.orderNumber,
         status: order.status,
         subtotal: order.subtotal.toString(),
-        discount: order.discount.toString(),
         total: order.total.toString(),
         createdAt: order.createdAt,
         updatedAt: order.updatedAt,
@@ -828,11 +830,10 @@ export interface CreatedOrder {
  * Creates an order as a draft.
  *
  * Every figure is computed here, from prices read out of the database in this
- * transaction. The client sends a customer, some product ids and quantities,
- * and a discount; it does not send unit prices, line totals, a subtotal or a
- * grand total, and none of those would be believed if it did. An order is a
- * financial document, and a total the browser calculated is a total the browser
- * chose.
+ * transaction. The client sends a customer and some product ids and quantities;
+ * it does not send unit prices, line totals, a subtotal or a grand total, and
+ * none of those would be believed if it did. An order is a financial document,
+ * and a total the browser calculated is a total the browser chose.
  *
  * Creating never moves stock, whatever the quantities. Deduction happens on
  * confirmation and nowhere else.
@@ -852,7 +853,6 @@ export async function createOrder(input: unknown): Promise<CreatedOrder> {
   }
 
   const order = parsed.data;
-  const discountCents = toCents(order.discount);
 
   // Retried because the order number is computed by reading the highest one
   // that exists; see `nextOrderNumber`.
@@ -873,12 +873,9 @@ export async function createOrder(input: unknown): Promise<CreatedOrder> {
 
         const products = await tx.product.findMany({
           where: { id: { in: order.items.map((item) => item.productId) } },
-          select: {
-            id: true,
-            name: true,
-            sellingPrice: true,
-            status: true,
-          },
+          // No price: the quote arrives with the request. Only identity and
+          // sellability are read from the catalogue now.
+          select: { id: true, name: true, status: true },
         });
 
         const byId = new Map(products.map((product) => [product.id, product]));
@@ -900,26 +897,27 @@ export async function createOrder(input: unknown): Promise<CreatedOrder> {
             );
           }
 
-          // Copied from the product now, so the order does not change
-          // retrospectively when someone edits the price list — and so the
-          // client cannot name its own price.
-          const unitPriceCents = toCents(Number(product.sellingPrice));
-
+          /*
+           * The salesperson's quote, not the catalogue's reference price.
+           *
+           * This used to read `product.sellingPrice`, because the client naming
+           * a price was treated as an attack. It is now the whole point: the
+           * same part is quoted at ₹12,000 to one customer and ₹13,500 to
+           * another, and that number exists nowhere except the submission.
+           *
+           * What still comes from the server is everything *derived* from it —
+           * the line total below, the subtotal, the grand total — so a client
+           * that sends a believable price and an invented total gets the price
+           * and none of the total.
+           */
           return {
             productId: product.id,
             quantity: item.quantity,
-            unitPriceCents,
+            unitPriceCents: toCents(item.unitPrice),
           };
         });
 
-        const totals = calculateTotals(lines, discountCents);
-
-        if (totals.discountCents > totals.subtotalCents) {
-          throw badRequest(
-            "discount",
-            "The discount is larger than the order total.",
-          );
-        }
+        const totals = calculateTotals(lines);
 
         const created = await tx.order.create({
           data: {
@@ -927,7 +925,6 @@ export async function createOrder(input: unknown): Promise<CreatedOrder> {
             status: "DRAFT",
             customerId: order.customerId,
             subtotal: centsToDecimalString(totals.subtotalCents),
-            discount: centsToDecimalString(totals.discountCents),
             total: centsToDecimalString(totals.totalCents),
             // From the session. Not a parameter, so no caller can raise an
             // order in somebody else's name.
@@ -1677,7 +1674,7 @@ export async function setOrderStatus(
 }
 
 /**
- * Replaces the lines and discount on an order that has not yet committed.
+ * Replaces the lines on an order that has not yet committed.
  *
  * Only DRAFT and PENDING orders can be edited, and neither has moved stock, so
  * this never touches inventory. Editing a confirmed order would mean the
@@ -1699,7 +1696,6 @@ export async function updateOrder(
   }
 
   const order = parsed.data;
-  const discountCents = toCents(order.discount);
 
   return prisma.$transaction(async (tx) => {
     const existing = await lockOrder(tx, orderId);
@@ -1728,7 +1724,8 @@ export async function updateOrder(
 
     const products = await tx.product.findMany({
       where: { id: { in: order.items.map((item) => item.productId) } },
-      select: { id: true, name: true, sellingPrice: true, status: true },
+      // No price, for the same reason as in `createOrder` above.
+      select: { id: true, name: true, status: true },
     });
 
     const byId = new Map(products.map((product) => [product.id, product]));
@@ -1750,18 +1747,30 @@ export async function updateOrder(
         );
       }
 
+      /*
+       * The quote travels with the request, which is what fixes the defect.
+       *
+       * This read `product.sellingPrice`, so every edit re-priced the order
+       * from the catalogue as it stood at that moment. Changing a quantity on
+       * a draft silently replaced an agreed ₹12,500 with today's ₹16,000, and
+       * nothing on the screen said so.
+       *
+       * Lines are still replaced wholesale rather than diffed. That is safe now
+       * precisely because the price arrives with each line: an untouched line
+       * round-trips its stored price back unchanged, and a deliberate re-quote
+       * arrives as a different number. The alternative — having the server
+       * decide which changes were "intentional" — cannot distinguish a re-quote
+       * from a stale client, so it would either block legitimate re-pricing or
+       * guess.
+       */
       return {
         productId: product.id,
         quantity: item.quantity,
-        unitPriceCents: toCents(Number(product.sellingPrice)),
+        unitPriceCents: toCents(item.unitPrice),
       };
     });
 
-    const totals = calculateTotals(lines, discountCents);
-
-    if (totals.discountCents > totals.subtotalCents) {
-      throw badRequest("discount", "The discount is larger than the order total.");
-    }
+    const totals = calculateTotals(lines);
 
     // Replaced wholesale rather than diffed. The lines are a small set with no
     // identity of their own, and a delete-then-insert inside the transaction is
@@ -1773,7 +1782,6 @@ export async function updateOrder(
       data: {
         customerId: order.customerId,
         subtotal: centsToDecimalString(totals.subtotalCents),
-        discount: centsToDecimalString(totals.discountCents),
         total: centsToDecimalString(totals.totalCents),
         items: {
           create: lines.map((line) => ({

@@ -64,9 +64,11 @@ const prisma = new PrismaClient({
 /** Cents to the string form Prisma wants for a Decimal column. */
 const money = (cents: number): string => (cents / 100).toFixed(2);
 
-/** Rounds half away from zero, the way an invoice does — not the way JS does. */
-const roundCents = (value: number): number =>
-  Math.sign(value) * Math.round(Math.abs(value));
+/*
+ * A `roundCents` helper stood here, used for exactly one thing: apportioning an
+ * order-level discount to whole cents. It went with the discount (§20). Every
+ * remaining figure in this seed is a sum of integer cents, so nothing rounds.
+ */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = Date.now();
@@ -376,9 +378,15 @@ const PURCHASES = [
  * Sales orders. Stock leaves on CONFIRMED and stays gone through FULFILLED;
  * DRAFT and CANCELLED move nothing.
  *
- * `discountPct` is applied to the subtotal and rounded to whole cents, so
- * `total = subtotal - discount` holds exactly. This system calculates no tax,
- * and the check constraint on `orders` would reject a total that implied one.
+ * `total = subtotal` — the sum of the line totals, and nothing else. This
+ * system calculates no tax and has no discount, and the check constraint on
+ * `orders` would reject a total that implied either.
+ *
+ * A line may carry a `quotedCents` of its own. That is the model this seed
+ * exists to demonstrate: the business quotes per customer, so the same part
+ * leaves at one price for one buyer and another price for the next, and the
+ * catalogue's reference price is only where the quote starts. Lines without one
+ * were quoted at the reference.
  */
 const ORDERS = [
   {
@@ -386,9 +394,9 @@ const ORDERS = [
     customer: "brightline",
     status: "COMPLETED",
     daysAgo: 21,
-    discountPct: 0,
     lines: [
-      { product: "kb-87", quantity: 4 },
+      // Quoted below the ₹89.99 reference for a long-standing account.
+      { product: "kb-87", quantity: 4, quotedCents: 7999 },
       { product: "mouse-erg", quantity: 4 },
     ],
   },
@@ -397,7 +405,6 @@ const ORDERS = [
     customer: "calder",
     status: "COMPLETED",
     daysAgo: 16,
-    discountPct: 5,
     lines: [
       { product: "mon-27", quantity: 3 },
       { product: "dock-usbc", quantity: 3 },
@@ -409,7 +416,6 @@ const ORDERS = [
     customer: "penrose",
     status: "COMPLETED",
     daysAgo: 12,
-    discountPct: 10,
     lines: [
       { product: "chair-erg", quantity: 6 },
       { product: "desk-std", quantity: 2 },
@@ -420,7 +426,6 @@ const ORDERS = [
     customer: "quayside",
     status: "PENDING",
     daysAgo: 6,
-    discountPct: 0,
     lines: [
       { product: "box-ship", quantity: 300 },
       { product: "label-therm", quantity: 24 },
@@ -431,10 +436,11 @@ const ORDERS = [
     customer: "wren",
     status: "CONFIRMED",
     daysAgo: 2,
-    discountPct: 0,
     lines: [
       { product: "paper-a4", quantity: 120 },
-      { product: "kb-87", quantity: 2 },
+      // The same part, a different customer, a higher quote — the point of the
+      // per-order pricing model, visible in the seeded data.
+      { product: "kb-87", quantity: 2, quotedCents: 9450 },
     ],
   },
   {
@@ -443,7 +449,6 @@ const ORDERS = [
     customer: "brightline",
     status: "DRAFT",
     daysAgo: 1,
-    discountPct: 0,
     lines: [
       { product: "desk-std", quantity: 1 },
       { product: "chair-erg", quantity: 1 },
@@ -455,7 +460,6 @@ const ORDERS = [
     customer: "quayside",
     status: "CANCELLED",
     daysAgo: 9,
-    discountPct: 0,
     lines: [{ product: "mouse-erg", quantity: 10 }],
   },
 ] as const;
@@ -861,7 +865,9 @@ async function main(): Promise<void> {
     const placedAt = daysAgo(order.daysAgo, 14);
 
     const lines = order.lines.map((line) => {
-      const unitPrice = productPrice.get(line.product)!;
+      // The quote if one was agreed, otherwise the catalogue's reference.
+      const quoted = (line as { quotedCents?: number }).quotedCents;
+      const unitPrice = quoted ?? productPrice.get(line.product)!;
       return {
         ...line,
         unitPriceCents: unitPrice,
@@ -870,16 +876,13 @@ async function main(): Promise<void> {
     });
 
     const subtotalCents = lines.reduce((sum, line) => sum + line.totalCents, 0);
-    const discountCents = roundCents((subtotalCents * order.discountPct) / 100);
-    const totalCents = subtotalCents - discountCents;
 
     const row = await prisma.order.create({
       data: {
         orderNumber: order.number,
         status: order.status as OrderStatus,
         subtotal: money(subtotalCents),
-        discount: money(discountCents),
-        total: money(totalCents),
+        total: money(subtotalCents),
         createdAt: placedAt,
         customerId: customerIds.get(order.customer)!,
         items: {

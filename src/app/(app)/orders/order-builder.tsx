@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   Check,
+  Info,
   Loader2,
   Package,
   Plus,
@@ -57,7 +58,7 @@ import { cn } from "@/lib/utils";
  * grand total are recomputed on the server from prices read out of the database
  * at the moment the order is written — this component does not send them, and
  * they would not be believed if it did. What it sends is a customer, a set of
- * product ids and quantities, and a discount.
+ * product ids and quantities.
  *
  * The arithmetic is duplicated rather than shared because the two copies answer
  * different questions: this one tells the user what they are about to commit
@@ -95,8 +96,14 @@ export interface ProductOption {
   id: string;
   name: string;
   sku: string;
-  /** The product's price now — what the server will recalculate the line from. */
-  sellingPrice: string;
+  /**
+   * The catalogue's reference price, used to prefill a new line's quote.
+   *
+   * Null when the product has no reference price, in which case the line starts
+   * blank and the salesperson enters the quote. It is a default and nothing
+   * more: once a line exists, its price lives in `OrderLine.unitPrice`.
+   */
+  sellingPrice: string | null;
   stockQuantity: number;
   /**
    * False only for a line already on an order whose product has since been
@@ -108,6 +115,12 @@ export interface ProductOption {
 interface OrderLine {
   product: ProductOption;
   quantity: number;
+  /**
+   * The quoted unit price, as typed. Held as a string rather than a number so a
+   * half-typed value ("12.", "") survives editing instead of collapsing to 0 —
+   * the same reason the server checks the string before converting it.
+   */
+  unitPrice: string;
 }
 
 /** An order being edited, as the page hands it over. */
@@ -115,7 +128,6 @@ export interface ExistingOrder {
   id: string;
   orderNumber: string;
   customerId: string;
-  discount: string;
   lines: OrderLine[];
 }
 
@@ -143,7 +155,6 @@ function OrderBuilder({
     order?.customerId ?? initialCustomerId ?? "",
   );
   const [lines, setLines] = useState<OrderLine[]>(order?.lines ?? []);
-  const [discount, setDiscount] = useState(order?.discount ?? "0.00");
   const [submitting, setSubmitting] = useState(false);
 
   const [search, setSearch] = useState("");
@@ -187,13 +198,30 @@ function OrderBuilder({
       return;
     }
 
-    setLines((current) => [...current, { product, quantity: 1 }]);
+    /*
+     * The reference price prefills the quote; a product without one starts
+     * blank and must be filled in. Prefilling happens *here*, when the line is
+     * created, and nowhere else — a line that already carries a quote must
+     * never be re-seeded from the catalogue.
+     */
+    setLines((current) => [
+      ...current,
+      { product, quantity: 1, unitPrice: product.sellingPrice ?? "" },
+    ]);
   }
 
   function setQuantity(productId: string, quantity: number) {
     setLines((current) =>
       current.map((line) =>
         line.product.id === productId ? { ...line, quantity } : line,
+      ),
+    );
+  }
+
+  function setUnitPrice(productId: string, unitPrice: string) {
+    setLines((current) =>
+      current.map((line) =>
+        line.product.id === productId ? { ...line, unitPrice } : line,
       ),
     );
   }
@@ -207,16 +235,28 @@ function OrderBuilder({
   // Integer cents throughout, for the same reason the server uses them: a
   // subtotal is a sum of many numbers, and floating point drifts.
   const subtotalCents = lines.reduce(
-    (sum, line) =>
-      sum + Math.round(Number(line.product.sellingPrice) * 100) * line.quantity,
+    (sum, line) => sum + quoteCents(line.unitPrice) * line.quantity,
     0,
   );
-  const discountCents = Math.round((Number(discount) || 0) * 100);
-  const totalCents = subtotalCents - discountCents;
-
-  const discountTooLarge = discountCents > subtotalCents;
+  // The grand total is the subtotal. There is no discount term and no tax
+  // term — see the check constraint on `orders`.
+  const totalCents = subtotalCents;
+  /*
+   * Lines the shelf cannot fill today.
+   *
+   * No longer an error. This business sells parts it does not yet hold, so
+   * confirming such a line deducts what is on hand and records the rest as an
+   * outstanding obligation on the order — the button below stays enabled and
+   * the message says what will happen rather than refusing.
+   */
   const overStock = lines.filter(
     (line) => line.quantity > line.product.stockQuantity,
+  );
+
+  const outstandingUnits = overStock.reduce(
+    (sum, line) =>
+      sum + (line.quantity - Math.max(0, line.product.stockQuantity)),
+    0,
   );
 
   /*
@@ -229,8 +269,10 @@ function OrderBuilder({
   const canSubmit =
     customerId !== "" &&
     lines.length > 0 &&
-    !discountTooLarge &&
     retired.length === 0 &&
+    // Every line must carry a price the server will accept. The button is
+    // disabled rather than the save being allowed to fail on a round trip.
+    lines.every((line) => isValidQuote(line.unitPrice)) &&
     !submitting;
 
   const submission = () => ({
@@ -238,11 +280,14 @@ function OrderBuilder({
     items: lines.map((line) => ({
       productId: line.product.id,
       quantity: line.quantity,
+      /*
+       * The quote, and the only money that travels from here. Line totals, the
+       * subtotal and the grand total are all recomputed on the server from this
+       * and the quantity — a total the browser calculated is a total the
+       * browser chose.
+       */
+      unitPrice: line.unitPrice.trim(),
     })),
-    // Sent as a plain amount. Every other figure — unit prices, line totals,
-    // the subtotal, the grand total — is recomputed on the server from prices
-    // read there, so none of them travel from here.
-    discount: String(discountCents / 100),
   });
 
   async function submit(confirm: boolean) {
@@ -352,7 +397,7 @@ function OrderBuilder({
                       <TableHead>Product</TableHead>
                       <TableHead className="hidden sm:table-cell">SKU</TableHead>
                       <TableHead className="text-right">Stock</TableHead>
-                      <TableHead className="text-right">Price</TableHead>
+                      <TableHead className="text-right">Reference</TableHead>
                       <TableHead className="w-12">
                         <span className="sr-only">Add</span>
                       </TableHead>
@@ -374,7 +419,11 @@ function OrderBuilder({
                             {formatNumber(option.stockQuantity)}
                           </TableCell>
                           <TableCell className="tabular text-right font-medium">
-                            {formatCurrency(option.sellingPrice)}
+                            {option.sellingPrice === null ? (
+                              <span className="text-muted-foreground">—</span>
+                            ) : (
+                              formatCurrency(option.sellingPrice)
+                            )}
                           </TableCell>
                           <TableCell className="text-right">
                             <Button
@@ -424,7 +473,7 @@ function OrderBuilder({
                   <TableRow>
                     <TableHead>Product</TableHead>
                     <TableHead className="text-right">Available</TableHead>
-                    <TableHead className="text-right">Unit price</TableHead>
+                    <TableHead className="text-right">Quoted unit price</TableHead>
                     <TableHead className="w-32 text-right">Quantity</TableHead>
                     <TableHead className="text-right">Line total</TableHead>
                     <TableHead className="w-12">
@@ -454,18 +503,55 @@ function OrderBuilder({
                             </Badge>
                           )}
                         </TableCell>
+                        {/*
+                          Emphasis, not alarm. A short line is a valid order
+                          that will leave units outstanding, so the figure is
+                          highlighted rather than coloured as an error.
+                        */}
                         <TableCell
                           className={cn(
                             "tabular text-right",
                             short
-                              ? "font-medium text-destructive"
+                              ? "font-medium text-foreground"
                               : "text-muted-foreground",
                           )}
                         >
                           {formatNumber(line.product.stockQuantity)}
+                          {short ? (
+                            <span className="block text-xs font-normal text-muted-foreground">
+                              {formatNumber(
+                                line.quantity -
+                                  Math.max(0, line.product.stockQuantity),
+                              )}{" "}
+                              outstanding
+                            </span>
+                          ) : null}
                         </TableCell>
-                        <TableCell className="tabular text-right">
-                          {formatCurrency(line.product.sellingPrice)}
+                        {/*
+                          The quote, and the point of the whole screen. The
+                          reference price sits above it as a default the
+                          salesperson has already accepted or typed over, so a
+                          deviation is a visible choice rather than something
+                          only the saved order would reveal.
+                        */}
+                        <TableCell className="text-right">
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            inputMode="decimal"
+                            value={line.unitPrice}
+                            aria-label={`Quoted unit price for ${line.product.name}`}
+                            aria-invalid={!isValidQuote(line.unitPrice)}
+                            onChange={(event) =>
+                              setUnitPrice(line.product.id, event.target.value)
+                            }
+                            className="tabular ml-auto w-32 text-right"
+                          />
+                          <QuoteNote
+                            reference={line.product.sellingPrice}
+                            quoted={line.unitPrice}
+                          />
                         </TableCell>
                         <TableCell className="text-right">
                           <Input
@@ -474,7 +560,6 @@ function OrderBuilder({
                             step="1"
                             value={line.quantity}
                             aria-label={`Quantity for ${line.product.name}`}
-                            aria-invalid={short}
                             onChange={(event) => {
                               const next = Number(event.target.value);
                               setQuantity(
@@ -515,48 +600,20 @@ function OrderBuilder({
         <Card className="lg:sticky lg:top-6">
           <CardHeader>
             <CardTitle>Summary</CardTitle>
-            <CardDescription>Grand total is subtotal minus discount.</CardDescription>
+            <CardDescription>Grand total is the sum of the lines.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
-            <Field
-              label="Discount"
-              htmlFor="discount"
-              hint="A cash amount off the subtotal."
-              error={
-                discountTooLarge
-                  ? "The discount is larger than the subtotal."
-                  : undefined
-              }
-            >
-              <Input
-                id="discount"
-                type="number"
-                min="0"
-                step="0.01"
-                value={discount}
-                onChange={(event) => setDiscount(event.target.value)}
-                aria-invalid={discountTooLarge}
-                className="tabular"
-              />
-            </Field>
-
-            <dl className="flex flex-col gap-2 border-t border-border pt-4 text-sm">
+            <dl className="flex flex-col gap-2 text-sm">
               <div className="flex items-center justify-between">
                 <dt className="text-muted-foreground">Subtotal</dt>
                 <dd className="tabular font-medium">
                   {formatCurrency(subtotalCents / 100)}
                 </dd>
               </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-muted-foreground">Discount</dt>
-                <dd className="tabular font-medium text-destructive">
-                  {discountCents > 0 ? "−" : ""}
-                  {formatCurrency(discountCents / 100)}
-                </dd>
-              </div>
               {/*
-                No tax line, and no place for one. The grand total is the
-                discounted subtotal — see the check constraint on `orders`.
+                No tax line and no discount line, and no place for either. The
+                grand total is the subtotal — see the check constraint on
+                `orders`.
               */}
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <dt className="font-medium">Grand total</dt>
@@ -580,15 +637,15 @@ function OrderBuilder({
             ) : null}
 
             {overStock.length > 0 ? (
-              <p className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs leading-relaxed text-warning">
-                <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+              <p className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3 text-xs leading-relaxed text-muted-foreground">
+                <Info className="mt-0.5 size-4 shrink-0" aria-hidden />
                 <span>
                   {overStock.length === 1
                     ? `${overStock[0]!.product.name} has fewer units on hand than this order asks for.`
                     : `${overStock.length} lines ask for more than is on hand.`}{" "}
                   {editing
-                    ? "You can still save; confirming will be refused until stock is available."
-                    : "You can still save a draft; confirming will be refused until stock is available."}
+                    ? `Confirming will fulfil what is in stock and leave ${formatNumber(outstandingUnits)} ${outstandingUnits === 1 ? "unit" : "units"} outstanding.`
+                    : `Confirming will fulfil what is in stock and leave ${formatNumber(outstandingUnits)} ${outstandingUnits === 1 ? "unit" : "units"} outstanding, to be shipped once more arrives.`}
                 </span>
               </p>
             ) : null}
@@ -618,7 +675,7 @@ function OrderBuilder({
                   <Button
                     type="button"
                     onClick={() => submit(true)}
-                    disabled={!canSubmit || overStock.length > 0}
+                    disabled={!canSubmit}
                   >
                     {submitting ? <Loader2 className="animate-spin" /> : null}
                     Save and confirm
@@ -632,8 +689,10 @@ function OrderBuilder({
                     Save as draft
                   </Button>
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    Confirming deducts stock immediately and writes a movement
-                    against your account. A draft changes nothing.
+                    Confirming deducts the stock that is on hand immediately and
+                    writes a movement against your account. Anything short is
+                    recorded as outstanding, not refused. A draft changes
+                    nothing.
                   </p>
                 </>
               )}
@@ -684,6 +743,69 @@ function SelectedCustomer({ customer }: { customer?: CustomerOption }) {
         ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * A typed quote as integer cents, or zero while it is unusable.
+ *
+ * Zero for a blank or half-typed value is safe here because `pricedLines` below
+ * refuses to submit until every line parses — the preview simply shows a
+ * partial subtotal while someone is mid-keystroke, rather than NaN.
+ */
+function quoteCents(value: string): number {
+  const trimmed = value.trim();
+  if (trimmed === "" || !Number.isFinite(Number(trimmed))) return 0;
+  return Math.round(Number(trimmed) * 100);
+}
+
+/** Whether a typed quote is something the server will accept. */
+function isValidQuote(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed === "" || !Number.isFinite(Number(trimmed))) return false;
+  if (!/^\d*(\.\d{1,2})?$/.test(trimmed)) return false;
+  const amount = Number(trimmed);
+  return amount >= 0 && amount <= 9_999_999_999.99;
+}
+
+/**
+ * The reference price, and how far this quote sits from it.
+ *
+ * Informational, never an error. Quoting away from the catalogue is ordinary
+ * business — the same part goes to one customer at ₹12,000 and another at
+ * ₹13,500 — so this reports the deviation rather than warning about it. What it
+ * prevents is a quote drifting from the reference *unnoticed*, which is the
+ * protection that replaced the server refusing client-supplied prices at all.
+ *
+ * Nothing is shown when there is no reference to compare against, when the
+ * quote is not yet usable, or when the two agree.
+ */
+function QuoteNote({
+  reference,
+  quoted,
+}: {
+  reference: string | null;
+  quoted: string;
+}) {
+  if (reference === null || !isValidQuote(quoted)) return null;
+
+  const referenceCents = Math.round(Number(reference) * 100);
+  const quotedCents = quoteCents(quoted);
+  const difference = quotedCents - referenceCents;
+
+  if (difference === 0) return null;
+
+  const percent =
+    referenceCents === 0
+      ? null
+      : Math.abs((difference / referenceCents) * 100).toFixed(1);
+
+  return (
+    <span className="mt-1 block text-xs text-muted-foreground">
+      {formatCurrency(Math.abs(difference) / 100)}{" "}
+      {difference < 0 ? "below" : "above"} reference
+      {percent === null ? null : ` · ${percent}%`}
+    </span>
   );
 }
 

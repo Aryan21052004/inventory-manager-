@@ -112,7 +112,7 @@ async function ProductsTable({
               Std cost
             </SortableHead>
             <SortableHead params={params} column="sellingPrice" className="text-right" align="right">
-              Price
+              Reference
             </SortableHead>
             <SortableHead params={params} column="stockQuantity" className="text-right" align="right">
               Stock
@@ -165,7 +165,11 @@ async function ProductsTable({
               </TableCell>
 
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(product.sellingPrice)}
+                {product.sellingPrice === null ? (
+                  <span className="text-muted-foreground">—</span>
+                ) : (
+                  formatCurrency(product.sellingPrice)
+                )}
               </TableCell>
 
               <TableCell className="tabular text-right font-medium">

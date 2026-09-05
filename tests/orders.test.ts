@@ -27,6 +27,7 @@ import {
   expectFulfilmentMatchesLedger,
   expectFulfilmentReconciles,
   expectLotsReconcile,
+  quoted,
   resetDatabase,
   seedProduct,
   signInWithRole,
@@ -67,10 +68,9 @@ async function product(sku: string, stockQuantity: number, price = "10.00") {
 
 async function draftOrder(
   customerId: string,
-  items: { productId: string; quantity: number }[],
-  discount = "0",
+  items: { productId: string; quantity: number; unitPrice?: string }[],
 ) {
-  return createOrder({ customerId, items, discount });
+  return createOrder({ customerId, items: await quoted(items) });
 }
 
 async function stockOf(productId: string): Promise<number> {
@@ -668,8 +668,7 @@ describe("state transitions", () => {
     await expect(
       updateOrder(order.id, {
         customerId: customer.id,
-        items: [{ productId: part.id, quantity: 99 }],
-        discount: "0",
+        items: await quoted([{ productId: part.id, quantity: 99 }]),
       }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
 
@@ -682,7 +681,7 @@ describe("state transitions", () => {
 // ---------------------------------------------------------------------------
 
 describe("concurrency", () => {
-  it("lets exactly one of two competing orders through", async () => {
+  it("lets two competing orders share the last units without overdrawing", async () => {
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const part = await product("X-1", 100);
@@ -843,8 +842,7 @@ describe("attribution", () => {
     // this is what it takes to express it at all — and it reaches nothing.
     const order = await createOrder({
       customerId: customer.id,
-      items: [{ productId: part.id, quantity: 10 }],
-      discount: "0",
+      items: await quoted([{ productId: part.id, quantity: 10 }]),
       createdBy: somebodyElse.id,
       userId: somebodyElse.id,
     });
@@ -864,16 +862,29 @@ describe("attribution", () => {
     expect(movement.createdBy).not.toBe(actor.clerkId);
   });
 
-  it("ignores a unit price the client tried to name", async () => {
+  it("honours the quoted price but computes every total from it", async () => {
+    /*
+     * This test used to assert the opposite of its first half: that a price
+     * from the client was ignored and the catalogue's read instead, because
+     * "the client cannot name its own price" was a security property.
+     *
+     * Per-customer quoting inverts that. The price is now a commercial input —
+     * it exists nowhere but the submission — so it is honoured. What is *not*
+     * honoured is anything derived from it: the line total, the subtotal and
+     * the grand total are still computed on the server, so a client that sends
+     * a believable price and an invented total gets the price and none of the
+     * total. That half of the protection is what this now pins.
+     */
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const part = await product("T-2", 100, "250.00");
 
     const order = await createOrder({
       customerId: customer.id,
-      // A price of its own choosing, and a total to match.
-      items: [{ productId: part.id, quantity: 2, unitPrice: "0.01", total: "0.02" }],
-      discount: "0",
+      // A real quote, and totals of the client's choosing.
+      items: [
+        { productId: part.id, quantity: 2, unitPrice: "180.00", total: "0.02" },
+      ],
       subtotal: "0.02",
       total: "0.02",
     });
@@ -883,10 +894,10 @@ describe("attribution", () => {
       include: { items: true },
     });
 
-    // Read from the product, in the transaction, every time.
-    expect(row.items[0]!.unitPrice.toString()).toBe("250");
-    expect(row.subtotal.toString()).toBe("500");
-    expect(row.total.toString()).toBe("500");
+    expect(row.items[0]!.unitPrice.toString()).toBe("180");
+    expect(row.items[0]!.total.toString()).toBe("360");
+    expect(row.subtotal.toString()).toBe("360");
+    expect(row.total.toString()).toBe("360");
   });
 
   it("refuses an unauthenticated order", async () => {
@@ -896,8 +907,7 @@ describe("attribution", () => {
     await expect(
       createOrder({
         customerId: customer.id,
-        items: [{ productId: part.id, quantity: 1 }],
-        discount: "0",
+        items: await quoted([{ productId: part.id, quantity: 1 }]),
       }),
     ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 
@@ -922,19 +932,18 @@ describe("attribution", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 13 — totals, and the absence of tax
+// Test 13 — totals, and the absence of tax and discount
 // ---------------------------------------------------------------------------
 
 describe("order totals", () => {
-  it("computes grand total as subtotal minus discount", async () => {
+  it("computes grand total as the subtotal, with nothing in between", async () => {
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const part = await product("V-1", 100, "1000.00");
 
     const order = await createOrder({
       customerId: customer.id,
-      items: [{ productId: part.id, quantity: 10 }],
-      discount: "500",
+      items: await quoted([{ productId: part.id, quantity: 10 }]),
     });
 
     const row = await prisma.order.findUniqueOrThrow({
@@ -942,11 +951,11 @@ describe("order totals", () => {
     });
 
     expect(Number(row.subtotal)).toBe(10_000);
-    expect(Number(row.discount)).toBe(500);
-    expect(Number(row.total)).toBe(9_500);
-    // No tax term, and no column that could carry one.
+    expect(Number(row.total)).toBe(10_000);
+
+    // No tax term and no discount term, and no column that could carry either.
     expect(Object.keys(row)).not.toContain("tax");
-    expect(Number(row.total)).toBe(Number(row.subtotal) - Number(row.discount));
+    expect(Object.keys(row)).not.toContain("discount");
   });
 
   it("sums several lines correctly", async () => {
@@ -957,11 +966,10 @@ describe("order totals", () => {
 
     const order = await createOrder({
       customerId: customer.id,
-      items: [
+      items: await quoted([
         { productId: a.id, quantity: 3 },
         { productId: b.id, quantity: 7 },
-      ],
-      discount: "0",
+      ]),
     });
 
     const row = await prisma.order.findUniqueOrThrow({
@@ -973,33 +981,12 @@ describe("order totals", () => {
     expect(row.total.toString()).toBe("95.32");
   });
 
-  it("refuses a discount larger than the subtotal", async () => {
-    await signInWithRole("STAFF");
-    const customer = await createCustomer();
-    const part = await product("V-4", 100, "10.00");
-
-    await expect(
-      createOrder({
-        customerId: customer.id,
-        items: [{ productId: part.id, quantity: 1 }],
-        discount: "50",
-      }),
-    ).rejects.toMatchObject({ code: "BAD_REQUEST", details: { field: "discount" } });
-  });
-
-  it("refuses a negative discount", async () => {
-    await signInWithRole("STAFF");
-    const customer = await createCustomer();
-    const part = await product("V-5", 100);
-
-    await expect(
-      createOrder({
-        customerId: customer.id,
-        items: [{ productId: part.id, quantity: 1 }],
-        discount: "-5",
-      }),
-    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
-  });
+  /*
+   * Two tests stood here refusing a discount larger than the subtotal and a
+   * negative one. Both went with the feature (§20): there is no field to
+   * refuse, and a test asserting that an absent input is rejected would pass
+   * for the wrong reason forever.
+   */
 });
 
 // ---------------------------------------------------------------------------
@@ -1012,7 +999,7 @@ describe("validation", () => {
     const customer = await createCustomer();
 
     await expect(
-      createOrder({ customerId: customer.id, items: [], discount: "0" }),
+      createOrder({ customerId: customer.id, items: await quoted([]) }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
@@ -1024,11 +1011,10 @@ describe("validation", () => {
     await expect(
       createOrder({
         customerId: customer.id,
-        items: [
+        items: await quoted([
           { productId: part.id, quantity: 1 },
           { productId: part.id, quantity: 2 },
-        ],
-        discount: "0",
+        ]),
       }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
 
@@ -1044,8 +1030,7 @@ describe("validation", () => {
       await expect(
         createOrder({
           customerId: customer.id,
-          items: [{ productId: part.id, quantity }],
-          discount: "0",
+          items: await quoted([{ productId: part.id, quantity }]),
         }),
       ).rejects.toMatchObject({ code: "BAD_REQUEST" });
     }
@@ -1058,8 +1043,7 @@ describe("validation", () => {
     await expect(
       createOrder({
         customerId: "no-such-customer",
-        items: [{ productId: part.id, quantity: 1 }],
-        discount: "0",
+        items: await quoted([{ productId: part.id, quantity: 1 }]),
       }),
     ).rejects.toMatchObject({
       code: "BAD_REQUEST",
@@ -1080,8 +1064,7 @@ describe("validation", () => {
     await expect(
       createOrder({
         customerId: customer.id,
-        items: [{ productId: retired.id, quantity: 1 }],
-        discount: "0",
+        items: await quoted([{ productId: retired.id, quantity: 1 }]),
       }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
@@ -1093,8 +1076,7 @@ describe("validation", () => {
     await expect(
       createOrder({
         customerId: customer.id,
-        items: [{ productId: "no-such-product", quantity: 1 }],
-        discount: "0",
+        items: await quoted([{ productId: "no-such-product", quantity: 1 }]),
       }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
@@ -1558,13 +1540,12 @@ describe("editing an order", () => {
 
     await updateOrder(order.id, {
       customerId: customer.id,
-      items: [
+      items: await quoted([
         // Quantity changed on the line that stays…
         { productId: a.id, quantity: 5 },
         // …and a product added.
         { productId: b.id, quantity: 3 },
-      ],
-      discount: "0",
+      ]),
     });
 
     const row = await prisma.order.findUniqueOrThrow({
@@ -1596,8 +1577,7 @@ describe("editing an order", () => {
 
     await updateOrder(order.id, {
       customerId: customer.id,
-      items: [{ productId: a.id, quantity: 1 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 1 }]),
     });
 
     const row = await prisma.order.findUniqueOrThrow({
@@ -1622,8 +1602,7 @@ describe("editing an order", () => {
 
     await updateOrder(order.id, {
       customerId: customer.id,
-      items: [{ productId: part.id, quantity: 4 }],
-      discount: "0",
+      items: await quoted([{ productId: part.id, quantity: 4 }]),
     });
 
     const row = await prisma.order.findUniqueOrThrow({
@@ -1636,7 +1615,7 @@ describe("editing an order", () => {
     expect(row.subtotal.toString()).toBe("40");
   });
 
-  it("changes the customer and the discount", async () => {
+  it("changes the customer and the lines", async () => {
     await signInWithRole("STAFF");
     const first = await createCustomer("First Customer");
     const second = await createCustomer("Second Customer");
@@ -1648,8 +1627,7 @@ describe("editing an order", () => {
 
     await updateOrder(order.id, {
       customerId: second.id,
-      items: [{ productId: part.id, quantity: 10 }],
-      discount: "250",
+      items: await quoted([{ productId: part.id, quantity: 10 }]),
     });
 
     const row = await prisma.order.findUniqueOrThrow({
@@ -1658,11 +1636,10 @@ describe("editing an order", () => {
 
     expect(row.customerId).toBe(second.id);
     expect(row.subtotal.toString()).toBe("1000");
-    expect(row.discount.toString()).toBe("250");
-    // Subtotal minus discount, with nothing else in between.
-    expect(row.total.toString()).toBe("750");
-    expect(Number(row.total)).toBe(Number(row.subtotal) - Number(row.discount));
+    // The subtotal, with nothing at all in between.
+    expect(row.total.toString()).toBe("1000");
     expect(Object.keys(row)).not.toContain("tax");
+    expect(Object.keys(row)).not.toContain("discount");
   });
 
   it("refuses a customer that does not exist", async () => {
@@ -1676,8 +1653,7 @@ describe("editing an order", () => {
     await expect(
       updateOrder(order.id, {
         customerId: "no-such-customer",
-        items: [{ productId: part.id, quantity: 1 }],
-        discount: "0",
+        items: await quoted([{ productId: part.id, quantity: 1 }]),
       }),
     ).rejects.toMatchObject({
       code: "BAD_REQUEST",
@@ -1692,7 +1668,13 @@ describe("editing an order", () => {
 });
 
 describe("editing recalculates money on the server", () => {
-  it("uses the product's current price, not the one the client sent", async () => {
+  it("recomputes the totals from the quote, ignoring the ones sent", async () => {
+    /*
+     * The other half of the split described above, on the edit path. This test
+     * used to move the catalogue price to 30 and assert the line followed —
+     * which was the re-pricing defect written down as a requirement. What
+     * survives is the part that is still true: derived money is server money.
+     */
     await signInWithRole("STAFF");
     const customer = await createCustomer();
     const part = await product("R-1", 100, "10.00");
@@ -1701,19 +1683,11 @@ describe("editing recalculates money on the server", () => {
       { productId: part.id, quantity: 2 },
     ]);
 
-    // The catalogue price moves after the order was raised.
-    await prisma.product.update({
-      where: { id: part.id },
-      data: { sellingPrice: "30.00" },
-    });
-
     await updateOrder(order.id, {
       customerId: customer.id,
-      // A price and totals of the client's choosing, all ignored.
       items: [
-        { productId: part.id, quantity: 2, unitPrice: "0.01", total: "0.02" },
+        { productId: part.id, quantity: 2, unitPrice: "10.00", total: "0.02" },
       ],
-      discount: "0",
       subtotal: "0.02",
       total: "0.02",
     });
@@ -1723,10 +1697,10 @@ describe("editing recalculates money on the server", () => {
       include: { items: true },
     });
 
-    expect(row.items[0]!.unitPrice.toString()).toBe("30");
-    expect(row.items[0]!.total.toString()).toBe("60");
-    expect(row.subtotal.toString()).toBe("60");
-    expect(row.total.toString()).toBe("60");
+    expect(row.items[0]!.unitPrice.toString()).toBe("10");
+    expect(row.items[0]!.total.toString()).toBe("20");
+    expect(row.subtotal.toString()).toBe("20");
+    expect(row.total.toString()).toBe("20");
   });
 
   it("ignores a createdBy the client tried to send", async () => {
@@ -1748,8 +1722,7 @@ describe("editing recalculates money on the server", () => {
 
     await updateOrder(order.id, {
       customerId: customer.id,
-      items: [{ productId: part.id, quantity: 2 }],
-      discount: "0",
+      items: await quoted([{ productId: part.id, quantity: 2 }]),
       createdBy: somebodyElse.id,
     });
 
@@ -1776,11 +1749,10 @@ describe("editing never touches inventory", () => {
 
     await updateOrder(order.id, {
       customerId: customer.id,
-      items: [
+      items: await quoted([
         { productId: a.id, quantity: 150 },
         { productId: b.id, quantity: 75 },
-      ],
-      discount: "0",
+      ]),
     });
 
     // Nothing is committed until the order is confirmed, so the quantities on
@@ -1803,8 +1775,7 @@ describe("editing never touches inventory", () => {
     // balances because it commits nothing.
     await updateOrder(order.id, {
       customerId: customer.id,
-      items: [{ productId: part.id, quantity: 500 }],
-      discount: "0",
+      items: await quoted([{ productId: part.id, quantity: 500 }]),
     });
 
     expect(await stockOf(part.id)).toBe(5);
@@ -1858,8 +1829,7 @@ describe("orders that cannot be edited", () => {
       await expect(
         updateOrder(order.id, {
           customerId: customer.id,
-          items: [{ productId: part.id, quantity: 999 }],
-          discount: "0",
+          items: await quoted([{ productId: part.id, quantity: 999 }]),
         }),
       ).rejects.toMatchObject({ code: "CONFLICT" });
 
@@ -1890,8 +1860,7 @@ describe("orders that cannot be edited", () => {
     await expect(
       updateOrder(order.id, {
         customerId: customer.id,
-        items: [{ productId: part.id, quantity: 9 }],
-        discount: "0",
+        items: await quoted([{ productId: part.id, quantity: 9 }]),
       }),
     ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 
@@ -1920,11 +1889,10 @@ describe("editing rejects the same bad input as creating", () => {
     await expect(
       updateOrder(order.id, {
         customerId: customer.id,
-        items: [
+        items: await quoted([
           { productId: part.id, quantity: 1 },
           { productId: part.id, quantity: 2 },
-        ],
-        discount: "0",
+        ]),
       }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
 
@@ -1943,8 +1911,7 @@ describe("editing rejects the same bad input as creating", () => {
       await expect(
         updateOrder(order.id, {
           customerId: customer.id,
-          items: [{ productId: part.id, quantity }],
-          discount: "0",
+          items: await quoted([{ productId: part.id, quantity }]),
         }),
       ).rejects.toMatchObject({ code: "BAD_REQUEST" });
     }
@@ -1963,8 +1930,7 @@ describe("editing rejects the same bad input as creating", () => {
     await expect(
       updateOrder(order.id, {
         customerId: customer.id,
-        items: [],
-        discount: "0",
+        items: await quoted([]),
       }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
 
@@ -1973,35 +1939,6 @@ describe("editing rejects the same bad input as creating", () => {
       include: { items: true },
     });
     expect(row.items).toHaveLength(1);
-  });
-
-  it("rejects a discount larger than the subtotal", async () => {
-    await signInWithRole("STAFF");
-    const { order, part, customer } = await editableOrder("D-4", "10.00");
-
-    await expect(
-      updateOrder(order.id, {
-        customerId: customer.id,
-        items: [{ productId: part.id, quantity: 1 }],
-        discount: "500",
-      }),
-    ).rejects.toMatchObject({
-      code: "BAD_REQUEST",
-      details: { field: "discount" },
-    });
-  });
-
-  it("rejects a negative discount", async () => {
-    await signInWithRole("STAFF");
-    const { order, part, customer } = await editableOrder("D-5");
-
-    await expect(
-      updateOrder(order.id, {
-        customerId: customer.id,
-        items: [{ productId: part.id, quantity: 1 }],
-        discount: "-10",
-      }),
-    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
   it("rejects a product that is no longer active", async () => {
@@ -2027,11 +1964,10 @@ describe("editing rejects the same bad input as creating", () => {
     await expect(
       updateOrder(order.id, {
         customerId: customer.id,
-        items: [
+        items: await quoted([
           { productId: active.id, quantity: 1 },
           { productId: retired.id, quantity: 1 },
-        ],
-        discount: "0",
+        ]),
       }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
 
@@ -2049,12 +1985,410 @@ describe("editing rejects the same bad input as creating", () => {
     await expect(
       updateOrder(order.id, {
         customerId: customer.id,
-        items: [
+        items: await quoted([
           { productId: part.id, quantity: 1 },
           { productId: "no-such-product", quantity: 1 },
-        ],
-        discount: "0",
+        ]),
       }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+});
+
+describe("the quoted price is historical, not catalogue-derived", () => {
+  /*
+   * The invariant this whole workstream exists to hold:
+   *
+   *   reference ₹15,000  →  quoted ₹12,500  →  reference moves to ₹16,000
+   *                      →  the order still says ₹12,500
+   *
+   * The same product is quoted differently to different customers, so the
+   * price on a line is a commercial fact about that order and nothing else.
+   * `Product.sellingPrice` is a default someone may accept, never the history.
+   */
+
+  it("stores the quoted price rather than the reference price", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("Q-1", 100, "15000.00");
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 2, unitPrice: "12500.00" }],
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    expect(row.items[0]!.unitPrice.toString()).toBe("12500");
+    expect(row.items[0]!.total.toString()).toBe("25000");
+    expect(row.subtotal.toString()).toBe("25000");
+    expect(row.total.toString()).toBe("25000");
+  });
+
+  it("quotes one product at three prices to three customers", async () => {
+    await signInWithRole("STAFF");
+    const a = await createCustomer("Customer A");
+    const b = await createCustomer("Customer B");
+    const c = await createCustomer("Customer C");
+    const part = await product("Q-2", 100, "15000.00");
+
+    const quotes = [
+      [a.id, "12000.00"],
+      [b.id, "13500.00"],
+      [c.id, "11800.00"],
+    ] as const;
+
+    for (const [customerId, unitPrice] of quotes) {
+      await createOrder({
+        customerId,
+        items: [{ productId: part.id, quantity: 1, unitPrice }],
+      });
+    }
+
+    const lines = await prisma.orderItem.findMany({
+      where: { productId: part.id },
+      orderBy: { unitPrice: "asc" },
+    });
+
+    expect(lines.map((line) => line.unitPrice.toString())).toEqual([
+      "11800",
+      "12000",
+      "13500",
+    ]);
+  });
+
+  it("keeps the quoted price when only the quantity is edited", async () => {
+    /*
+     * The defect. `updateOrder` replaced every line at the *current* catalogue
+     * price, so changing a quantity silently re-priced a quote that had
+     * already been agreed — and the order was still a draft, so nothing said
+     * it had happened.
+     */
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("Q-3", 100, "15000.00");
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 2, unitPrice: "12500.00" }],
+    });
+
+    // The reference price moves after the quote was agreed.
+    await prisma.product.update({
+      where: { id: part.id },
+      data: { sellingPrice: "16000.00" },
+    });
+
+    // Only the quantity changes; the quote travels back untouched.
+    await updateOrder(order.id, {
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 5, unitPrice: "12500.00" }],
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    expect(row.items[0]!.quantity).toBe(5);
+    expect(row.items[0]!.unitPrice.toString()).toBe("12500");
+    expect(row.items[0]!.total.toString()).toBe("62500");
+    expect(row.total.toString()).toBe("62500");
+  });
+
+  it("keeps the quoted price when another permitted field is edited", async () => {
+    await signInWithRole("STAFF");
+    const first = await createCustomer("First");
+    const second = await createCustomer("Second");
+    const part = await product("Q-4", 100, "15000.00");
+
+    const order = await createOrder({
+      customerId: first.id,
+      items: [{ productId: part.id, quantity: 3, unitPrice: "11800.00" }],
+    });
+
+    await prisma.product.update({
+      where: { id: part.id },
+      data: { sellingPrice: "16000.00" },
+    });
+
+    await updateOrder(order.id, {
+      customerId: second.id,
+      items: [{ productId: part.id, quantity: 3, unitPrice: "11800.00" }],
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    expect(row.customerId).toBe(second.id);
+    expect(row.items[0]!.unitPrice.toString()).toBe("11800");
+  });
+
+  it("stores a deliberate re-quote", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("Q-5", 100, "15000.00");
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 2, unitPrice: "12500.00" }],
+    });
+
+    await updateOrder(order.id, {
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 2, unitPrice: "13250.00" }],
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    expect(row.items[0]!.unitPrice.toString()).toBe("13250");
+    expect(row.items[0]!.total.toString()).toBe("26500");
+  });
+
+  it("leaves a confirmed order's price alone when the reference moves", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("Q-6", 100, "15000.00");
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 2, unitPrice: "12500.00" }],
+    });
+    await confirmOrder(order.id);
+
+    await prisma.product.update({
+      where: { id: part.id },
+      data: { sellingPrice: "16000.00" },
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    expect(row.items[0]!.unitPrice.toString()).toBe("12500");
+
+    // And a confirmed order cannot be edited at all, so there is no route back.
+    await expect(
+      updateOrder(order.id, {
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 2, unitPrice: "1.00" }],
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("keeps the quoted price through partial fulfilment", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    // Two on the shelf against an order for five.
+    const part = await product("Q-7", 2, "15000.00");
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 5, unitPrice: "12500.00" }],
+    });
+    await confirmOrder(order.id);
+
+    const afterConfirm = await prisma.orderItem.findFirstOrThrow({
+      where: { orderId: order.id },
+    });
+    expect(afterConfirm.fulfilledQuantity).toBe(2);
+    expect(afterConfirm.unitPrice.toString()).toBe("12500");
+
+    // The line's value is still the whole order, not the shipped part.
+    expect(afterConfirm.total.toString()).toBe("62500");
+  });
+
+  it("keeps the quoted price through cancellation", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("Q-8", 100, "15000.00");
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 2, unitPrice: "12500.00" }],
+    });
+    await confirmOrder(order.id);
+    await cancelOrder(order.id);
+
+    const line = await prisma.orderItem.findFirstOrThrow({
+      where: { orderId: order.id },
+    });
+
+    // Cost is cleared because the sale did not happen; the price is not, because
+    // it records what was quoted rather than what was earned.
+    expect(line.costTotal).toBeNull();
+    expect(line.costedQuantity).toBe(0);
+    expect(line.unitPrice.toString()).toBe("12500");
+  });
+
+  it("allows a manual quote for a product with no reference price", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await seedProduct({
+      sku: "Q-9",
+      stockQuantity: 100,
+      sellingPrice: null,
+    });
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 1, unitPrice: "9750.00" }],
+    });
+
+    const line = await prisma.orderItem.findFirstOrThrow({
+      where: { orderId: order.id },
+    });
+    expect(line.unitPrice.toString()).toBe("9750");
+  });
+});
+
+describe("quoted price validation", () => {
+  async function quoting(sku: string) {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product(sku, 100, "15000.00");
+    return { customer, part };
+  }
+
+  it("requires a price on every line", async () => {
+    const { customer, part } = await quoting("V-Q1");
+
+    await expect(
+      createOrder({
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 1 }],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("refuses a negative price", async () => {
+    const { customer, part } = await quoting("V-Q2");
+
+    await expect(
+      createOrder({
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 1, unitPrice: "-1.00" }],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("refuses a price that is not a number", async () => {
+    const { customer, part } = await quoting("V-Q3");
+
+    await expect(
+      createOrder({
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 1, unitPrice: "nine" }],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("refuses a blank price rather than reading it as free", async () => {
+    const { customer, part } = await quoting("V-Q4");
+
+    await expect(
+      createOrder({
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 1, unitPrice: "" }],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("refuses more than two decimal places", async () => {
+    const { customer, part } = await quoting("V-Q5");
+
+    await expect(
+      createOrder({
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 1, unitPrice: "12.345" }],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("refuses a price beyond what the column can hold", async () => {
+    const { customer, part } = await quoting("V-Q6");
+
+    await expect(
+      createOrder({
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 1, unitPrice: "99999999999.00" }],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("accepts zero, which is a real commercial decision", async () => {
+    const { customer, part } = await quoting("V-Q7");
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 1, unitPrice: "0.00" }],
+    });
+
+    const line = await prisma.orderItem.findFirstOrThrow({
+      where: { orderId: order.id },
+    });
+    expect(line.unitPrice.toString()).toBe("0");
+  });
+
+  it("still computes the totals itself, whatever the client sends", async () => {
+    const { customer, part } = await quoting("V-Q8");
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [
+        // A believable price, and line/order totals of the client's choosing.
+        { productId: part.id, quantity: 4, unitPrice: "100.00", total: "1.00" },
+      ],
+      subtotal: "1.00",
+      total: "1.00",
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: { items: true },
+    });
+
+    // The quote is honoured; every figure derived from it is recomputed.
+    expect(row.items[0]!.unitPrice.toString()).toBe("100");
+    expect(row.items[0]!.total.toString()).toBe("400");
+    expect(row.subtotal.toString()).toBe("400");
+    expect(row.total.toString()).toBe("400");
+  });
+
+  it("refuses an unauthenticated quote", async () => {
+    await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("V-Q9", 100, "15000.00");
+    signOut();
+
+    await expect(
+      createOrder({
+        customerId: customer.id,
+        items: [{ productId: part.id, quantity: 1, unitPrice: "12500.00" }],
+      }),
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("attributes the quote to the signed-in user, not to whoever the client names", async () => {
+    const actor = await signInWithRole("STAFF");
+    const customer = await createCustomer();
+    const part = await product("V-Q10", 100, "15000.00");
+
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 1, unitPrice: "12500.00" }],
+      createdBy: "somebody-else",
+    });
+
+    const row = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(row.createdBy).toBe(actor.id);
   });
 });

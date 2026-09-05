@@ -299,16 +299,9 @@ export default async function OrderDetailPage({
                   {formatCurrency(order.subtotal)}
                 </dd>
               </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-muted-foreground">Discount</dt>
-                <dd className="tabular font-medium text-destructive">
-                  {Number(order.discount) > 0 ? "−" : ""}
-                  {formatCurrency(order.discount)}
-                </dd>
-              </div>
               {/*
-                No tax row. The grand total is the discounted subtotal, and the
-                database's check constraint refuses anything else.
+                No tax row and no discount row. The grand total is the subtotal,
+                and the database's check constraint refuses anything else.
               */}
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <dt className="font-semibold">Grand total</dt>

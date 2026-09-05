@@ -275,7 +275,11 @@ export async function seedProduct(overrides: {
   name?: string;
   category?: string;
   standardCost?: string | null;
-  sellingPrice?: string;
+  /**
+   * The catalogue's reference price. Pass `null` for a part that is only ever
+   * quoted per order — the state the business actually has for some items.
+   */
+  sellingPrice?: string | null;
   stockQuantity?: number;
   status?: "ACTIVE" | "INACTIVE" | "DISCONTINUED";
   supplierId?: string | null;
@@ -295,7 +299,8 @@ export async function seedProduct(overrides: {
       category: overrides.category ?? "General",
       standardCost:
         overrides.standardCost === undefined ? "5.00" : overrides.standardCost,
-      sellingPrice: overrides.sellingPrice ?? "12.50",
+      sellingPrice:
+        overrides.sellingPrice === undefined ? "12.50" : overrides.sellingPrice,
       stockQuantity,
       status: overrides.status ?? "ACTIVE",
       supplierId: overrides.supplierId ?? null,
@@ -410,4 +415,36 @@ export async function signInWithRole(role: "ADMIN" | "STAFF") {
 
   signInAs(fakeClerkUser(local.clerkId, local.email));
   return local;
+}
+
+/**
+ * Order lines with a quoted price filled in from each product's reference.
+ *
+ * `OrderItem.unitPrice` is the price this customer was quoted, and it is a
+ * required input — the server no longer derives it from the catalogue, which is
+ * the whole point of the change. Most tests have no opinion about the number
+ * and only care that an order exists, so this supplies the product's reference
+ * price and keeps them reading the way they did before.
+ *
+ * A test that *does* care passes `unitPrice` explicitly and this leaves it
+ * alone. Products with no reference price fall back to "0", which is a valid
+ * quote and keeps a fixture from silently depending on one.
+ */
+export async function quoted(
+  items: readonly { productId: string; quantity: number; unitPrice?: string }[],
+): Promise<{ productId: string; quantity: number; unitPrice: string }[]> {
+  const products = await prisma.product.findMany({
+    where: { id: { in: [...new Set(items.map((item) => item.productId))] } },
+    select: { id: true, sellingPrice: true },
+  });
+
+  const reference = new Map(
+    products.map((row) => [row.id, row.sellingPrice?.toString() ?? "0"] as const),
+  );
+
+  return items.map((item) => ({
+    productId: item.productId,
+    quantity: item.quantity,
+    unitPrice: item.unitPrice ?? reference.get(item.productId) ?? "0",
+  }));
 }

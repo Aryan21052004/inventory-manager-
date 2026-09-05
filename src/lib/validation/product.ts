@@ -38,16 +38,12 @@ const requiredWholeNumber = (label: string) =>
     `${label} must be a whole number`,
   );
 
-/**
- * Money, bounded to what the column can hold. `Decimal(12, 2)` is ten digits
- * before the point; a larger number would be a typo on the way to a Postgres
- * numeric-overflow error nobody can read.
+/*
+ * A required-money helper stood here. Its last caller was `sellingPrice`, which
+ * became an optional reference when pricing moved to the order line — a product
+ * may have no list price at all now, so nothing on this form requires money.
+ * `optionalPrice` below carries the same bounds.
  */
-const price = (label: string) =>
-  requiredNumber(label).refine(
-    (value) => value <= 9_999_999_999.99,
-    `${label} is too large`,
-  );
 
 /**
  * Money that may legitimately be absent.
@@ -143,7 +139,15 @@ const productFields = {
    * on StockLot; see the note on `Product.standardCost` in the schema.
    */
   standardCost: optionalPrice("Standard cost"),
-  sellingPrice: price("Selling price"),
+  /**
+   * A reference price, and optional for the same reason `standardCost` is.
+   *
+   * The business quotes per customer, so a part may have no list price at all —
+   * requiring one would manufacture a number nobody stands behind. What the
+   * customer actually pays is captured on `OrderItem.unitPrice` when the line
+   * is quoted.
+   */
+  sellingPrice: optionalPrice("Selling price"),
   supplierId,
   status: productStatus,
 };

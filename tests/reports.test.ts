@@ -19,6 +19,7 @@ import { cancelPurchase, createPurchase, receivePurchase } from "@/server/purcha
 import { signOut } from "./clerk-mock";
 import {
   createSupplier,
+  quoted,
   resetDatabase,
   seedProduct,
   signInWithRole,
@@ -36,8 +37,7 @@ import {
  *
  *   drafts and cancellations are never counted as revenue or spend;
  *
- *   the two sales bases are never conflated, and the discount-allocation
- *   problem is answered with null rather than an invented split;
+ *   revenue is one basis and is reportable at every grouping;
  *
  *   and every figure agrees with the dashboard for an equivalent range,
  *   because two answers to one question is the failure this whole shared
@@ -100,9 +100,8 @@ async function receive(
 async function sell(
   customerId: string,
   items: { productId: string; quantity: number }[],
-  discount = "0",
 ) {
-  const order = await createOrder({ customerId, items, discount });
+  const order = await createOrder({ customerId, items: await quoted(items) });
   await confirmOrder(order.id);
   return order;
 }
@@ -270,7 +269,7 @@ describe("sales report", () => {
     const report = unwrap(await loadSalesReport(params()));
     expect(report.totals.orders).toBe(2);
     expect(report.totals.units).toBe(5);
-    expect(Number(report.totals.salesAtListPrice)).toBe(500);
+    expect(Number(report.totals.revenue)).toBe(500);
   });
 
   it("excludes drafts, pending and cancelled orders", async () => {
@@ -283,8 +282,7 @@ describe("sales report", () => {
     // A draft.
     await createOrder({
       customerId: buyer.id,
-      items: [{ productId: a.id, quantity: 4 }],
-      discount: "0",
+      items: await quoted([{ productId: a.id, quantity: 4 }]),
     });
     // A cancelled order that was confirmed first.
     const cancelled = await sell(buyer.id, [{ productId: a.id, quantity: 7 }]);
@@ -295,14 +293,16 @@ describe("sales report", () => {
     const report = unwrap(await loadSalesReport(params()));
     expect(report.totals.orders).toBe(1);
     expect(report.totals.units).toBe(3);
-    expect(Number(report.totals.salesAtListPrice)).toBe(300);
+    expect(Number(report.totals.revenue)).toBe(300);
   });
 
-  it("separates realised revenue from sales at list price", async () => {
+  it("reports one revenue basis, equal to the order totals", async () => {
     /*
-     * The two bases, and the gap between them. An order-level discount is not a
-     * price change on the lines, so the line total and the order total differ
-     * and the report says by how much.
+     * There used to be two bases here — line prices, and order totals net of an
+     * order-level discount — plus the gap between them. With the discount
+     * feature gone (§20) the check constraint makes `orders.total` the sum of
+     * its lines, so the report carries one figure and it reconciles with the
+     * order rows by construction.
      */
     await signInWithRole("STAFF");
     const supplier = await createSupplier();
@@ -310,31 +310,37 @@ describe("sales report", () => {
     const a = await part("A-1", "100.00");
     await receive(supplier.id, a.id, 100, "10.00");
 
-    await sell(buyer.id, [{ productId: a.id, quantity: 10 }], "150");
+    await sell(buyer.id, [{ productId: a.id, quantity: 10 }]);
 
     const report = unwrap(await loadSalesReport(params()));
-    expect(Number(report.totals.salesAtListPrice)).toBe(1_000);
-    expect(Number(report.totals.realisedRevenue)).toBe(850);
-    expect(Number(report.totals.discounts)).toBe(150);
+    expect(Number(report.totals.revenue)).toBe(1_000);
+
+    const order = await prisma.order.findFirstOrThrow({
+      where: { status: "CONFIRMED" },
+    });
+    expect(Number(order.total)).toBe(1_000);
+    expect(Number(order.subtotal)).toBe(1_000);
   });
 
-  it("declines to apportion an order discount across product rows", async () => {
-    // Answered with null rather than an invented allocation.
+  it("reports revenue at every grouping, including product and category", async () => {
+    /*
+     * The grouping restriction this replaces was a direct consequence of the
+     * discount: an order-level figure could not be split across lines without
+     * inventing an allocation rule, so product and category rows returned null.
+     * Summing line totals has no such problem.
+     */
     await signInWithRole("STAFF");
     const supplier = await createSupplier();
     const buyer = await customer();
     const a = await part("A-1", "100.00");
     await receive(supplier.id, a.id, 100, "10.00");
-    await sell(buyer.id, [{ productId: a.id, quantity: 5 }], "50");
+    await sell(buyer.id, [{ productId: a.id, quantity: 5 }]);
 
-    const byProduct = unwrap(
-      await loadSalesReport(params({ grouping: "product" })),
-    );
-    expect(byProduct.rows[0]!.realisedRevenue).toBeNull();
-    expect(Number(byProduct.rows[0]!.salesAtListPrice)).toBe(500);
-
-    const byPeriod = unwrap(await loadSalesReport(params({ grouping: "period" })));
-    expect(byPeriod.rows[0]!.realisedRevenue).not.toBeNull();
+    for (const grouping of ["product", "category", "customer", "period"] as const) {
+      const report = unwrap(await loadSalesReport(params({ grouping })));
+      expect(Number(report.rows[0]!.revenue)).toBe(500);
+      expect(Number(report.totals.revenue)).toBe(500);
+    }
   });
 
   it("counts an order's revenue once when it spans several lines", async () => {
@@ -353,7 +359,7 @@ describe("sales report", () => {
 
     const report = unwrap(await loadSalesReport(params()));
     // 2×100 + 2×50 = 300, counted once, not once per line.
-    expect(Number(report.totals.realisedRevenue)).toBe(300);
+    expect(Number(report.totals.revenue)).toBe(300);
     expect(report.totals.orders).toBe(1);
   });
 
@@ -585,7 +591,7 @@ describe("reports agree with the dashboard", () => {
 
     await receive(supplier.id, a.id, 30, "40.00");
     await receive(supplier.id, b.id, 10, "20.00");
-    await sell(buyer.id, [{ productId: a.id, quantity: 5 }], "25");
+    await sell(buyer.id, [{ productId: a.id, quantity: 5 }]);
     const done = await sell(buyer.id, [{ productId: b.id, quantity: 2 }]);
     await completeOrder(done.id);
 
@@ -597,16 +603,23 @@ describe("reports agree with the dashboard", () => {
     expect(valuation.totals.uncostedUnits).toBe(inventory.uncostedUnits);
     expect(valuation.totals.units).toBe(inventory.totalUnits);
 
+    /*
+     * One revenue basis now, so the report, the dashboard's Sales section and
+     * its Costing section all have to agree on the same number. They could not
+     * before: an order-level discount made the Sales figure net and the Costing
+     * figure gross, and the two were reconciled by a paragraph rather than by
+     * arithmetic.
+     */
     const sales = unwrap(await loadSalesReport(params()));
     const dashSales = unwrap(await loadSales());
-    expect(Number(sales.totals.realisedRevenue)).toBeCloseTo(
+    expect(Number(sales.totals.revenue)).toBeCloseTo(
       Number(dashSales.realisedRevenue),
       2,
     );
 
     const costing = unwrap(await loadCosting());
-    expect(Number(sales.totals.salesAtListPrice)).toBeCloseTo(
-      Number(costing.allSalesAtListPrice),
+    expect(Number(sales.totals.revenue)).toBeCloseTo(
+      Number(costing.allRevenue),
       2,
     );
 
@@ -658,8 +671,7 @@ describe("an empty database", () => {
     expect(Number(valuation.totals.valueAtCost)).toBe(0);
     expect(valuation.totals.coverage).toBe(0);
     expect(sales.rows).toHaveLength(0);
-    expect(Number(sales.totals.realisedRevenue)).toBe(0);
-    expect(Number(sales.totals.discounts)).toBe(0);
+    expect(Number(sales.totals.revenue)).toBe(0);
     expect(spend.rows).toHaveLength(0);
     expect(Number(spend.totals.receivedSpend)).toBe(0);
   });

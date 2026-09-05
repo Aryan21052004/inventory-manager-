@@ -22,6 +22,7 @@ import { confirmOrder, createOrder } from "@/server/orders";
 import { signOut } from "./clerk-mock";
 import {
   createSupplier,
+  quoted,
   resetDatabase,
   seedProduct,
   signInWithRole,
@@ -388,8 +389,7 @@ describe("cancelling a received purchase", () => {
     // Everything that arrived is sold and gone.
     const order = await createOrder({
       customerId: customer.id,
-      items: [{ productId: part.id, quantity: 100 }],
-      discount: "0",
+      items: await quoted([{ productId: part.id, quantity: 100 }]),
     });
     await confirmOrder(order.id);
     expect(await stockOf(part.id)).toBe(0);
@@ -865,7 +865,7 @@ describe("validation", () => {
     const supplier = await createSupplier();
 
     await expect(
-      createPurchase({ supplierId: supplier.id, items: [] }),
+      createPurchase({ supplierId: supplier.id, items: await quoted([]) }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 

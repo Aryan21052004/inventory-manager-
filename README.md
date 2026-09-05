@@ -10,8 +10,10 @@ production-shaped Next.js application.
 
 This is an aviation-parts inventory system, which shapes two decisions you will
 meet early: every part can carry airworthiness paperwork with its own expiry and
-audit trail, and **the system calculates no tax** — an order's grand total is
-`subtotal - discount`, enforced by a check constraint.
+audit trail, and **the system calculates no tax and applies no discounts** — an
+order's grand total is `subtotal`, enforced by a check constraint. Prices are
+quoted per customer: `Product.sellingPrice` is an optional reference that
+prefills a line, and `OrderItem.unitPrice` is what was actually charged.
 
 ## Stack
 
@@ -183,17 +185,17 @@ expired, missing — is computed from the expiry date rather than persisted,
 because it changes on its own as dates pass: a stored column would be wrong
 every morning until something remembered to recalculate it.
 
-**No tax, anywhere.** An order's grand total is `subtotal - discount` and there
-is no tax column to reintroduce one. The column was dropped rather than left
-defaulting to zero — a zero column is a field the UI eventually renders and a
-value a report eventually sums. The check constraint `total = subtotal -
-discount` means the database refuses a total that implies tax, whatever wrote
+**No tax and no discount, anywhere.** An order's grand total is `subtotal`, and
+there is no column for either term to come back through. Both were dropped
+rather than left defaulting to zero — a zero column is a field the UI eventually
+renders and a value a report eventually sums. The check constraint `total =
+subtotal` means the database refuses a total that implies either, whatever wrote
 it.
 
 **The database refuses invalid rows, not just invalid relationships.** Alongside
 the foreign keys, the migration adds check constraints: money is never negative,
-a line always moves at least one unit, `total = subtotal - discount` on every
-order, a line total always equals quantity times price, and a stock
+a line always moves at least one unit, `total = subtotal` on every order, a
+line total always equals quantity times price, and a stock
 transaction's `previousStock`, `quantity` and `newStock` have to add up. Prisma's
 schema language cannot express these, so they live in the migration SQL.
 

@@ -65,7 +65,7 @@ export interface ProductFormValues {
   category: string;
   /** Planning reference only, and null when nobody has set one. */
   standardCost: string | null;
-  sellingPrice: string;
+  sellingPrice: string | null;
   stockQuantity: number;
   status: string;
   supplierId: string | null;
@@ -290,9 +290,9 @@ function ProductFormDialog({
             </Field>
 
             <Field
-              label="Selling price"
+              label="Reference price"
               htmlFor={id("sellingPrice")}
-              hint="What you charge per unit."
+              hint="Optional. Prefills a new order line — the price actually quoted is set on the order."
               error={errors.sellingPrice}
             >
               <Input
@@ -301,7 +301,7 @@ function ProductFormDialog({
                 type="number"
                 step="0.01"
                 min="0"
-                defaultValue={product?.sellingPrice ?? "0.00"}
+                defaultValue={product?.sellingPrice ?? ""}
                 aria-invalid={Boolean(errors.sellingPrice)}
                 className="tabular"
               />

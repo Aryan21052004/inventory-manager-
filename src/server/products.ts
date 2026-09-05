@@ -62,7 +62,7 @@ export interface ProductListItem {
   category: string;
   /** Planning reference only — never what the stock cost. Null when unset. */
   standardCost: string | null;
-  sellingPrice: string;
+  sellingPrice: string | null;
   stockQuantity: number;
   status: ProductStatus;
   supplierId: string | null;
@@ -173,7 +173,7 @@ export interface ProductDetail {
   category: string;
   /** Planning reference only — never what the stock cost. Null when unset. */
   standardCost: string | null;
-  sellingPrice: string;
+  sellingPrice: string | null;
   stockQuantity: number;
   status: ProductStatus;
   supplierId: string | null;
@@ -319,7 +319,7 @@ export async function listProducts(
           description: row.description,
           category: row.category,
           standardCost: row.standardCost?.toString() ?? null,
-          sellingPrice: row.sellingPrice.toString(),
+          sellingPrice: row.sellingPrice?.toString() ?? null,
           stockQuantity: row.stockQuantity,
           status: row.status,
           supplierId: row.supplierId,
@@ -582,7 +582,7 @@ export async function getProductDetail(
         description: product.description,
         category: product.category,
         standardCost: product.standardCost?.toString() ?? null,
-        sellingPrice: product.sellingPrice.toString(),
+        sellingPrice: product.sellingPrice?.toString() ?? null,
         stockQuantity: product.stockQuantity,
         status: product.status,
         supplierId: product.supplier?.id ?? null,
@@ -786,7 +786,7 @@ export async function createProduct(
           description: data.description,
           category: data.category,
           standardCost: data.standardCost?.toFixed(2) ?? null,
-          sellingPrice: data.sellingPrice.toFixed(2),
+          sellingPrice: data.sellingPrice?.toFixed(2) ?? null,
           // Zero, then moved by the ledger — never written straight from input.
           stockQuantity: 0,
           status: data.status,
@@ -897,7 +897,7 @@ export async function updateProduct(
           description: data.description,
           category: data.category,
           standardCost: data.standardCost?.toFixed(2) ?? null,
-          sellingPrice: data.sellingPrice.toFixed(2),
+          sellingPrice: data.sellingPrice?.toFixed(2) ?? null,
           status: data.status,
           supplierId: data.supplierId,
         },
