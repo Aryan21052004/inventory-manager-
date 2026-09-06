@@ -692,6 +692,27 @@ model StockLot {
   /// the way to the screen ("5 units of unknown cost") is worth more than a
   /// plausible number nobody can source.
   unitCost   Decimal?      @map("unit_cost") @db.Decimal(12, 2)
+
+  /// Where the cost came from, and — through check constraints the migrations
+  /// add, because Prisma's schema language cannot express them — a claim about
+  /// whether `unitCost` is present:
+  ///
+  ///     PURCHASE   => unit_cost IS NOT NULL   (a supplier invoice line)
+  ///     OPENING    => unit_cost IS NOT NULL   (an operator said what it cost)
+  ///     ADJUSTMENT => unit_cost IS NOT NULL   (an operator said what it cost)
+  ///     UNKNOWN    => unit_cost IS NULL       (nobody could say)
+  ///
+  /// The three inbound routes each pair a declared basis with a recorded cost;
+  /// UNKNOWN is the one value that carries no cost, and it must carry none, so
+  /// "we do not know" can never be stored as a number. That pairing is the
+  /// whole costing model in four lines, and it is enforced by the database
+  /// rather than only by the forms, because a lot written by a script, a fixture
+  /// or a future migration is subject to the same rule as one written by an
+  /// operator.
+  ///
+  /// An UNKNOWN lot created by an operator also carries their reason — in the
+  /// note on its originating StockTransaction, which is the only place an
+  /// explanation can outlive the form that collected it.
   costSource LotCostSource @map("cost_source")
 
   /// How many units arrived. Immutable once written.

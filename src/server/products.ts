@@ -16,8 +16,7 @@ import {
 import {
   createProductSchema,
   firstIssueMessage,
-  openingStockNote,
-  openingStockUnitCostCents,
+  openingStockCost,
   toFieldErrors,
   updateProductSchema,
   type ProductFieldErrors,
@@ -790,20 +789,25 @@ export async function createProduct(
         select: { id: true, name: true, sku: true },
       });
 
-      await recordOpeningStock(tx, {
-        productId: product.id,
-        quantity: data.stockQuantity,
-        userId: user.id,
-        /*
-         * Only what the operator declared, and they had to declare something:
-         * the schema refuses an opening quantity that does not say whether its
-         * cost is known. An UNKNOWN declaration produces a null here and takes
-         * its reason into the ledger note, so the resulting uncosted lot is a
-         * decision somebody made rather than a field somebody skipped.
-         */
-        unitCostCents: openingStockUnitCostCents(data),
-        note: openingStockNote(data),
-      });
+      /*
+       * Only what the operator declared, and they had to declare something:
+       * the schema refuses an opening quantity that does not say whether its
+       * cost is known. An UNKNOWN declaration carries its reason into the
+       * ledger note, so the resulting uncosted lot is a decision somebody made
+       * rather than a field somebody skipped.
+       *
+       * Guarded on quantity because a product that opens holding nothing has no
+       * batch to cost, and therefore nothing to declare — `openingStockCost`
+       * would have no legal shape to return.
+       */
+      if (data.stockQuantity > 0) {
+        await recordOpeningStock(tx, {
+          productId: product.id,
+          quantity: data.stockQuantity,
+          userId: user.id,
+          cost: openingStockCost(data),
+        });
+      }
 
       return product;
     });

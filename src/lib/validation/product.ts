@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+import {
+  COST_BASES,
+  costBasisUnitCostCents,
+  optionalCost,
+  refineCostBasis,
+  unknownCostReason,
+  type CostBasis,
+} from "@/lib/validation/cost-basis";
+
 /**
  * Validation for product input.
  *
@@ -53,27 +62,13 @@ const requiredWholeNumber = (label: string) =>
  * cost, which for stock that predates this system is usually the truth. The
  * whole costing layer is built to carry that distinction all the way to the
  * screen, and it would be undone here if an empty input quietly became 0.00.
+ *
+ * The parser is the one the cost-basis module owns, because this file's copy
+ * and the adjustment form's copy were the same bounds written twice. A price
+ * and a cost are different things, but "money that may be absent, and whose
+ * absence is not zero" is one rule.
  */
-const optionalPrice = (label: string) =>
-  z
-    .string()
-    .trim()
-    // A field the form did not render at all is as absent as one left blank.
-    .optional()
-    .transform((value) => (value === undefined || value === "" ? null : value))
-    .refine(
-      (value) => value === null || Number.isFinite(Number(value)),
-      `${label} must be a number`,
-    )
-    .transform((value) => (value === null ? null : Number(value)))
-    .refine(
-      (value) => value === null || value >= 0,
-      `${label} cannot be negative`,
-    )
-    .refine(
-      (value) => value === null || value <= 9_999_999_999.99,
-      `${label} is too large`,
-    );
+const optionalPrice = optionalCost;
 
 /**
  * A quantity, bounded to a 32-bit integer because the column is an `Int`. Past
@@ -167,20 +162,19 @@ const productFields = {
  * uncosted opening units in this system came from: not from operators
  * declaring a cost unrecoverable, but from a form that never asked.
  *
- * There is no default here, and that is the whole mechanism. UNKNOWN stays
- * fully available, because stock that predates the paperwork genuinely has no
- * provable cost and demanding a number would guarantee an invented one. What
- * changes is that unknown becomes something the operator *said*.
+ * The question and the rule joining its answers are shared with the adjustment
+ * form — see validation/cost-basis.ts. These aliases are kept so this module
+ * still reads in its own vocabulary.
  */
-export const OPENING_STOCK_COST_BASES = ["KNOWN", "UNKNOWN"] as const;
+export const OPENING_STOCK_COST_BASES = COST_BASES;
 
-export type OpeningStockCostBasis = (typeof OPENING_STOCK_COST_BASES)[number];
+export type OpeningStockCostBasis = CostBasis;
 
-/** The longest an unknown-cost explanation may be, on its own. */
-const UNKNOWN_COST_REASON_MAX = 200;
-
-/** What the ledger says about an opening movement before any explanation. */
-const OPENING_STOCK_NOTE = "Opening stock recorded when the product was created";
+/*
+ * The note's wording used to live here. It moved to src/server/stock.ts, beside
+ * the code that writes it to the ledger: this module decides what a valid
+ * declaration *is*, and the stock engine decides how the ledger records it.
+ */
 
 /**
  * Creating a product is the one time a stock quantity may be set directly, and
@@ -207,117 +201,94 @@ export const createProductSchema = z
      * cost no later reader can tell apart from a real one.
      */
     openingStockUnitCost: optionalPrice("Opening stock unit cost"),
-    openingStockUnknownReason: z
-      .string()
-      .trim()
-      .optional()
-      .transform((value) => (value === undefined || value === "" ? null : value)),
+    openingStockUnknownReason: unknownCostReason,
   })
   .superRefine((input, ctx) => {
     // No units, no batch, nothing to cost.
     if (input.stockQuantity <= 0) return;
 
-    if (!input.openingStockCostBasis) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["openingStockCostBasis"],
-        message:
-          "Say whether the acquisition cost of the opening stock is known. Leaving it unanswered is what used to record a cost as unknown by accident.",
-      });
-      return;
-    }
-
-    if (input.openingStockCostBasis === "KNOWN") {
-      if (input.openingStockUnitCost === null) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["openingStockUnitCost"],
-          message:
-            "Enter what one unit cost, or say the cost is unknown — never a placeholder.",
-        });
-      }
-      return;
-    }
-
     /*
-     * Unknown, and it has to be justified.
+     * The same rule the adjustment form applies, from the same module.
      *
-     * The same asymmetry the adjustment form rests on. A known cost is
-     * evidenced by the number itself; an unknown one leaves a permanent hole in
-     * the valuation of every sale that later draws on this batch, and the only
-     * thing that will ever explain that hole is what the operator writes here.
+     * No `extraReasonCheck` here, unlike the adjustment: this note is a fixed
+     * 50-character prefix plus an explanation capped at 200, so it cannot
+     * approach the 500 the ledger allows. It is bounded by construction rather
+     * than by a check.
      */
-    const explanation = input.openingStockUnknownReason ?? "";
-
-    if (explanation.length < 3) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["openingStockUnknownReason"],
-        message:
-          "Say why the cost is unknown — these units will report as uncosted for as long as they last.",
-      });
-      return;
-    }
-
-    if (explanation.length > UNKNOWN_COST_REASON_MAX) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["openingStockUnknownReason"],
-        message: `That explanation must be ${UNKNOWN_COST_REASON_MAX} characters or fewer.`,
-      });
-    }
+    refineCostBasis(
+      ctx,
+      {
+        basis: input.openingStockCostBasis,
+        unitCost: input.openingStockUnitCost,
+        reason: input.openingStockUnknownReason,
+      },
+      {
+        paths: {
+          basis: "openingStockCostBasis",
+          unitCost: "openingStockUnitCost",
+          reason: "openingStockUnknownReason",
+        },
+        subject: "the opening stock",
+      },
+    );
   });
 
 /**
- * What the ledger records as the reason for the opening movement.
+ * The operator's declaration, in the shape the stock engine accepts.
  *
- * An opening balance whose cost is unknown carries both halves: that these
- * units are the product's opening stock, and why nobody can price them. The
- * second explains every uncosted sale that batch will produce, and this note is
- * the only durable place it can live.
+ * The form speaks in three loose fields — a basis, a maybe-cost, a maybe-reason
+ * — because that is what a `<form>` can produce. The ledger accepts only the
+ * two shapes that are actually legal. This is the one place the first becomes
+ * the second, and it exists so that neither side has to know about the other's
+ * vocabulary: nothing downstream reads a field called `openingStockUnitCost`,
+ * and nothing on the form has to know a `LotCostSource` exists.
  *
- * Bounded by construction rather than by a check: a 50-character prefix and an
- * explanation capped at 200 cannot approach the 500 the ledger allows.
+ * It throws rather than returning a fallback. Every branch here is already
+ * guaranteed by `createProductSchema`, so reaching one of these means the
+ * schema was bypassed — and the correct response to that is to stop, not to
+ * invent the missing half. A fallback here would quietly re-open exactly the
+ * hole this workstream closed.
+ *
+ * Only call it for a product that opens with stock; one that opens at zero has
+ * no batch and therefore nothing to declare.
  */
-export function openingStockNote(input: {
-  stockQuantity: number;
-  openingStockCostBasis?: OpeningStockCostBasis | undefined;
-  openingStockUnknownReason?: string | null | undefined;
-}): string {
-  const declaresUnknown =
-    input.stockQuantity > 0 && input.openingStockCostBasis === "UNKNOWN";
-
-  const explanation = declaresUnknown
-    ? (input.openingStockUnknownReason ?? null)
-    : null;
-
-  return explanation === null
-    ? OPENING_STOCK_NOTE
-    : `${OPENING_STOCK_NOTE} (Acquisition cost unknown: ${explanation})`;
-}
-
-/**
- * What the opening units cost, in cents, or null when nobody knows.
- *
- * There is no branch here that reaches for a catalogue figure, and there is no
- * longer a catalogue figure to reach for. A guessed acquisition cost is
- * indistinguishable from a real one the moment it is written.
- */
-export function openingStockUnitCostCents(input: {
-  stockQuantity: number;
+export function openingStockCost(input: {
   openingStockCostBasis?: OpeningStockCostBasis | undefined;
   openingStockUnitCost?: number | null | undefined;
-}): number | null {
-  if (input.stockQuantity <= 0) return null;
-  if (input.openingStockCostBasis !== "KNOWN") return null;
-  if (
-    input.openingStockUnitCost === null ||
-    input.openingStockUnitCost === undefined
-  ) {
-    return null;
+  openingStockUnknownReason?: string | null | undefined;
+}):
+  | { basis: "KNOWN"; unitCostCents: number }
+  | { basis: "UNKNOWN"; reason: string } {
+  if (input.openingStockCostBasis === "KNOWN") {
+    const cents = costBasisUnitCostCents({
+      basis: "KNOWN",
+      unitCost: input.openingStockUnitCost,
+    });
+
+    if (cents === null) {
+      throw new Error(
+        "Opening stock declared a known cost with no unit cost to record.",
+      );
+    }
+
+    return { basis: "KNOWN", unitCostCents: cents };
   }
 
-  return Math.round(input.openingStockUnitCost * 100);
+  if (input.openingStockCostBasis === "UNKNOWN") {
+    const reason = input.openingStockUnknownReason ?? "";
+
+    if (reason.trim().length < 3) {
+      throw new Error(
+        "Opening stock declared an unknown cost with no reason to record.",
+      );
+    }
+
+    return { basis: "UNKNOWN", reason };
+  }
+
+  throw new Error(
+    "Opening stock must declare whether its acquisition cost is known.",
+  );
 }
 
 /** Editing deliberately cannot touch stock. See the note at the top. */

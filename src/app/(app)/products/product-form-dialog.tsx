@@ -10,6 +10,7 @@ import {
   updateProductAction,
 } from "@/app/(app)/products/actions";
 import { Button } from "@/components/ui/button";
+import { CostBasisOption } from "@/components/ui/cost-basis-option";
 import {
   Dialog,
   DialogClose,
@@ -29,7 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatNumber } from "@/lib/format";
-import { cn } from "@/lib/utils";
+import { basisForQuantity } from "@/lib/validation/cost-basis";
 import {
   createProductSchema,
   updateProductSchema,
@@ -115,6 +116,24 @@ function ProductFormDialog({
     useState<OpeningStockCostBasis | null>(null);
 
   const opensWithStock = Number(openingQuantity) > 0;
+
+  /**
+   * Typing the quantity down to zero withdraws the cost question entirely.
+   *
+   * The block unmounts either way, so the reason textarea and the hidden basis
+   * input leave the form and nothing stale is submitted. What used to survive
+   * was the *selection*: come back to a positive quantity and UNKNOWN would
+   * still be highlighted, next to an empty reason box the operator had already
+   * filled in once. That reads as an answer that is still on record when it is
+   * not, which is the one impression this control must never give.
+   *
+   * Cleared here rather than in an effect, because it is a consequence of the
+   * edit rather than of the render.
+   */
+  function changeOpeningQuantity(next: string) {
+    setOpeningQuantity(next);
+    setOpeningCostBasis((current) => basisForQuantity(Number(next), current));
+  }
 
   // Ids are generated rather than hardcoded: two of these dialogs can be
   // mounted at once — one per table row — and duplicate ids would point every
@@ -331,7 +350,7 @@ function ProductFormDialog({
                 min="0"
                 step="1"
                 value={openingQuantity}
-                onChange={(event) => setOpeningQuantity(event.target.value)}
+                onChange={(event) => changeOpeningQuantity(event.target.value)}
                 aria-invalid={Boolean(errors.stockQuantity)}
                 className="tabular"
               />
@@ -514,51 +533,6 @@ function ReadOnlyStock({ quantity }: { quantity: number }) {
         Changed through a stock adjustment, so the ledger records who and why.
       </p>
     </div>
-  );
-}
-
-/**
- * One of the two answers about what the opening stock cost.
- *
- * The same control the stock adjustment dialog uses, and the same reasoning:
- * neither option is styled as the safe or expected one. "Cost is unknown" is a
- * legitimate answer this business genuinely needs for stock that predates its
- * paperwork, not a failure state to be discouraged into a made-up number. The
- * subtitle on each says what it will actually do, because the consequence of
- * the unknown option outlives the form by as long as the units do.
- */
-function CostBasisOption({
-  value,
-  current,
-  onSelect,
-  label,
-  detail,
-}: {
-  value: OpeningStockCostBasis;
-  current: OpeningStockCostBasis | null;
-  onSelect: (value: OpeningStockCostBasis) => void;
-  label: string;
-  detail: string;
-}) {
-  const selected = current === value;
-
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      onClick={() => onSelect(value)}
-      className={cn(
-        "flex flex-col items-start gap-0.5 rounded-md border px-3 py-2 text-left transition-colors",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-        selected
-          ? "border-primary/40 bg-primary/10 text-foreground"
-          : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-      )}
-    >
-      <span className="text-sm font-medium">{label}</span>
-      <span className="text-xs text-muted-foreground">{detail}</span>
-    </button>
   );
 }
 

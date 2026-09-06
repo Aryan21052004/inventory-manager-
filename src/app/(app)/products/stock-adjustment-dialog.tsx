@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { adjustStockAction } from "@/app/(app)/products/actions";
 import { Button } from "@/components/ui/button";
+import { CostBasisOption } from "@/components/ui/cost-basis-option";
 import {
   Dialog,
   DialogClose,
@@ -413,51 +414,6 @@ function DirectionOption({
     >
       <Icon className="size-4" aria-hidden />
       {label}
-    </button>
-  );
-}
-
-/**
- * One of the two answers about acquisition cost.
- *
- * Neither is styled as the safe or expected choice, which is the point:
- * "cost unknown" is a legitimate answer this business genuinely needs, not a
- * failure state to be discouraged, and a known cost is not a burden to be
- * dismissed. The subtitle on each says what it will actually do, because the
- * consequence of the unknown option outlives the adjustment by as long as the
- * units do.
- */
-function CostBasisOption({
-  value,
-  current,
-  onSelect,
-  label,
-  detail,
-}: {
-  value: AdjustmentCostBasis;
-  current: AdjustmentCostBasis | null;
-  onSelect: (value: AdjustmentCostBasis) => void;
-  label: string;
-  detail: string;
-}) {
-  const selected = current === value;
-
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      onClick={() => onSelect(value)}
-      className={cn(
-        "flex flex-col items-start gap-0.5 rounded-md border px-3 py-2 text-left transition-colors",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-        selected
-          ? "border-primary/40 bg-primary/10 text-foreground"
-          : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-      )}
-    >
-      <span className="text-sm font-medium">{label}</span>
-      <span className="text-xs text-muted-foreground">{detail}</span>
     </button>
   );
 }

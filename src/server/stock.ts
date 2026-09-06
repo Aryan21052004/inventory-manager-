@@ -7,6 +7,7 @@ import type {
 } from "@/generated/prisma/enums";
 import { AppError, InsufficientStockError, NotFoundError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
+import { withUnknownCostReason } from "@/lib/validation/cost-basis";
 import {
   stockDelta,
   stockMovementSchema,
@@ -258,6 +259,27 @@ export async function recordStockMovement(
 }
 
 /**
+ * What an operator declared about what the opening stock cost.
+ *
+ * The two answers the form offers, as the two shapes this module accepts. A
+ * known cost carries a number and no explanation, because the number *is* the
+ * evidence; an unknown one carries an explanation and no number, because the
+ * explanation is the only thing that will ever account for the uncosted sales
+ * that batch produces.
+ *
+ * Modelled as a union so the combinations in between cannot be written down.
+ * The parameter used to be a nullable `unitCostCents` beside a free-text note,
+ * which made "no cost, no reason" — the precise defect this hardening pass
+ * closes — a well-typed call.
+ */
+export type OpeningStockCost =
+  | { basis: "KNOWN"; unitCostCents: number }
+  | { basis: "UNKNOWN"; reason: string };
+
+/** What the ledger says about an opening movement before any explanation. */
+const OPENING_STOCK_NOTE = "Opening stock recorded when the product was created";
+
+/**
  * The opening balance of a product that has just been created.
  *
  * This is the one stock write that does not lock the product row, and it is
@@ -282,35 +304,63 @@ export async function recordOpeningStock(
     quantity: number;
     userId: string;
     /**
-     * What the opening stock actually cost, in cents, if anybody knows.
+     * What the operator declared about the acquisition cost.
      *
-     * Null is a real answer, not a missing one. Stock that arrived before this
-     * system was watching often cannot be priced, and a null here creates an
-     * UNKNOWN lot that reports as uncosted for as long as those units survive.
+     * A union rather than a nullable number and a loose note, because the two
+     * illegal combinations were previously expressible and one of them was the
+     * exact bug this workstream exists to close: `{ unitCostCents: null }` with
+     * a note that explains nothing produces an uncosted batch nobody chose.
+     * There is now no way to spell that. KNOWN carries a cost and cannot carry
+     * a reason; UNKNOWN carries a reason and cannot carry a cost.
      *
-     * What changed is upstream: the caller now has to have *asked*. Passing
-     * null used to be what happened when a form field was left blank, so
-     * "unknown" was a default nobody chose; `createProductSchema` now requires
-     * the operator to declare KNOWN or UNKNOWN, and an UNKNOWN declaration to
-     * carry a reason that arrives in `note`.
-     *
-     * It is emphatically not defaulted from anything on the catalogue row —
-     * which no longer holds a cost at all. A guess written here would be
-     * indistinguishable from a real acquisition cost afterwards.
+     * Neither branch is defaulted from anything on the catalogue row — which
+     * holds no cost at all since `standardCost` was removed. A guess written
+     * here would be indistinguishable from a real acquisition cost afterwards.
      */
-    unitCostCents?: number | null;
-    /**
-     * The ledger's explanation for the movement.
-     *
-     * Composed by `openingStockNote`, and carrying the operator's reason when
-     * they declared the cost unknown — that reason is the only thing that will
-     * ever explain the uncosted sales this batch goes on to produce, and the
-     * note is the only durable place it can live.
-     */
-    note: string;
+    cost: OpeningStockCost;
   },
 ): Promise<void> {
   if (params.quantity <= 0) return;
+
+  /*
+   * The union is the guarantee for TypeScript callers; this is the guarantee
+   * for everyone else.
+   *
+   * A `JSON.parse`, an `as any`, or a future caller compiled against an older
+   * signature can still hand this function `{ basis: "UNKNOWN" }` with no
+   * reason, or a KNOWN with no number — which is exactly the uncosted-batch
+   * -nobody-chose defect the type is here to prevent. Failing loudly costs one
+   * comparison and keeps the invariant true at runtime as well as at build
+   * time.
+   */
+  if (params.cost.basis === "KNOWN") {
+    if (!Number.isInteger(params.cost.unitCostCents)) {
+      throw new AppError(
+        "BAD_REQUEST",
+        "Opening stock declared a known cost without a whole number of cents to record.",
+      );
+    }
+    if (params.cost.unitCostCents < 0) {
+      throw new AppError(
+        "BAD_REQUEST",
+        "Opening stock cannot have a negative acquisition cost.",
+      );
+    }
+  } else if (params.cost.basis === "UNKNOWN") {
+    if (params.cost.reason.trim().length < 3) {
+      throw new AppError(
+        "BAD_REQUEST",
+        "Opening stock declared an unknown cost without saying why. These units would report as uncosted with nothing to explain them.",
+      );
+    }
+  } else {
+    throw new AppError(
+      "BAD_REQUEST",
+      "Opening stock must declare whether its acquisition cost is known.",
+    );
+  }
+
+  const cost = params.cost;
 
   const transaction = await tx.stockTransaction.create({
     data: {
@@ -321,7 +371,15 @@ export async function recordOpeningStock(
       newStock: params.quantity,
       referenceType: "MANUAL",
       referenceId: null,
-      note: params.note,
+      /*
+       * An unknown cost takes its reason into the ledger, which is the only
+       * place it can outlive the form. It is the sole explanation the uncosted
+       * sales this batch goes on to produce will ever have.
+       */
+      note:
+        cost.basis === "KNOWN"
+          ? OPENING_STOCK_NOTE
+          : withUnknownCostReason(OPENING_STOCK_NOTE, cost.reason),
       createdBy: params.userId,
     },
   });
@@ -331,15 +389,18 @@ export async function recordOpeningStock(
     data: { stockQuantity: params.quantity },
   });
 
-  const costed =
-    params.unitCostCents !== null && params.unitCostCents !== undefined;
-
   await createLot(tx, {
     productId: params.productId,
     stockTransactionId: transaction.id,
     quantity: params.quantity,
-    unitCostCents: costed ? params.unitCostCents! : null,
-    costSource: costed ? "OPENING" : "UNKNOWN",
+    /*
+     * Derived from what was declared, not from whether a number happened to
+     * arrive. The database enforces the same pairing from the other side:
+     * `stock_lots_opening_cost_known` refuses an OPENING lot without a cost,
+     * and `stock_lots_unknown_cost_is_null` refuses an UNKNOWN lot with one.
+     */
+    unitCostCents: cost.basis === "KNOWN" ? cost.unitCostCents : null,
+    costSource: cost.basis === "KNOWN" ? "OPENING" : "UNKNOWN",
     reference: { type: "MANUAL" },
     receivedAt: transaction.createdAt,
     userId: params.userId,

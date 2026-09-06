@@ -1,5 +1,15 @@
 import { z } from "zod";
 
+import {
+  COST_BASES,
+  optionalCost,
+  refineCostBasis,
+  unknownCostReason,
+  withUnknownCostReason,
+  costBasisUnitCostCents,
+  type CostBasis,
+} from "@/lib/validation/cost-basis";
+
 /**
  * Validation for a manual stock adjustment.
  *
@@ -32,16 +42,13 @@ export type AdjustmentDirection = (typeof ADJUSTMENT_DIRECTIONS)[number];
  * knew perfectly well was discarded by the shape of the form, and
  * `LotCostSource.ADJUSTMENT` was a value nothing could produce.
  *
- * There is no default, and that is the whole mechanism. UNKNOWN remains fully
- * available — units found in a corner with no paperwork genuinely have no
- * acquisition cost, and demanding a number there would guarantee an invented
- * one, which is the single thing this costing model exists to prevent. What
- * changes is that unknown becomes something the operator *said* rather than
- * something the form *assumed*.
+ * The question, its two answers and the rule joining them are shared with the
+ * opening-stock form — see validation/cost-basis.ts, which explains why. These
+ * aliases are kept so this module still reads in its own vocabulary.
  */
-export const ADJUSTMENT_COST_BASES = ["KNOWN", "UNKNOWN"] as const;
+export const ADJUSTMENT_COST_BASES = COST_BASES;
 
-export type AdjustmentCostBasis = (typeof ADJUSTMENT_COST_BASES)[number];
+export type AdjustmentCostBasis = CostBasis;
 
 /**
  * The quantity arrives from FormData as a string. Same reasoning as the product
@@ -58,33 +65,7 @@ const adjustmentQuantity = z
   .refine((value) => value > 0, "Quantity must be at least 1")
   .refine((value) => value <= 2_147_483_647, "Quantity is too large");
 
-/**
- * A price that may be absent, checked as a string before it is converted.
- *
- * The same reasoning as the product schema's version, kept local rather than
- * shared because the two modules own their own field vocabulary: `Number("")`
- * is 0, so coercing first would read a cleared field as "these units were
- * free" — a cost, and a wrong one — instead of as an empty field.
- */
-const optionalUnitCost = z
-  .string()
-  .trim()
-  // A field the form did not render at all is as absent as one left blank.
-  .optional()
-  .transform((value) => (value === undefined || value === "" ? null : value))
-  .refine(
-    (value) => value === null || Number.isFinite(Number(value)),
-    "Unit cost must be a number",
-  )
-  .transform((value) => (value === null ? null : Number(value)))
-  .refine((value) => value === null || value >= 0, "Unit cost cannot be negative")
-  .refine(
-    (value) => value === null || value <= 9_999_999_999.99,
-    "Unit cost is too large",
-  );
-
-/** The longest an unknown-cost explanation may be, on its own. */
-const UNKNOWN_COST_REASON_MAX = 200;
+const optionalUnitCost = optionalCost("Unit cost");
 
 /**
  * The most the composed ledger note may run to.
@@ -122,75 +103,43 @@ export const stockAdjustmentSchema = z
      */
     costBasis: z.enum(ADJUSTMENT_COST_BASES).optional(),
     unitCost: optionalUnitCost,
-    unknownCostReason: z
-      .string()
-      .trim()
-      .optional()
-      .transform((value) => (value === undefined || value === "" ? null : value)),
+    unknownCostReason,
   })
   .superRefine((input, ctx) => {
+    /*
+     * Only an increase creates a batch, so only an increase has an acquisition
+     * cost to state. A decrease draws from the lots already on the shelf and is
+     * costed from them — there is nothing to supply and nothing to ask.
+     */
     if (input.direction !== "INCREASE") return;
 
-    if (!input.costBasis) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["costBasis"],
-        message:
-          "Say whether the acquisition cost of these units is known. Leaving it unanswered is what used to record a cost as unknown by accident.",
-      });
-      return;
-    }
-
-    if (input.costBasis === "KNOWN") {
-      if (input.unitCost === null) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["unitCost"],
-          message:
-            "Enter what one unit cost, or say the cost is unknown — never a placeholder.",
-        });
-      }
-      return;
-    }
-
-    /*
-     * Unknown, and it has to be justified.
-     *
-     * This is the asymmetry the whole option rests on. A known cost is
-     * evidenced by the number itself; an unknown one leaves a permanent hole
-     * in the valuation of every sale that later draws on this batch, and the
-     * only thing that will ever explain that hole is what the operator writes
-     * here. Requiring it is not busywork — it is the difference between "we
-     * do not know" and "nobody asked".
-     */
-    const explanation = input.unknownCostReason ?? "";
-
-    if (explanation.length < 3) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["unknownCostReason"],
-        message:
-          "Say why the cost is unknown — these units will report as uncosted for as long as they last.",
-      });
-      return;
-    }
-
-    if (explanation.length > UNKNOWN_COST_REASON_MAX) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["unknownCostReason"],
-        message: `That explanation must be ${UNKNOWN_COST_REASON_MAX} characters or fewer.`,
-      });
-      return;
-    }
-
-    if (composeAdjustmentNote(input.reason, explanation).length > NOTE_MAX) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["unknownCostReason"],
-        message: `The reason and this explanation are written to the ledger together, and must come to ${NOTE_MAX} characters or fewer between them.`,
-      });
-    }
+    refineCostBasis(
+      ctx,
+      {
+        basis: input.costBasis,
+        unitCost: input.unitCost,
+        reason: input.unknownCostReason,
+      },
+      {
+        paths: {
+          basis: "costBasis",
+          unitCost: "unitCost",
+          reason: "unknownCostReason",
+        },
+        subject: "these units",
+        /*
+         * The one rule genuinely local to adjustments. Both explanations — why
+         * stock changed, and why nobody can price it — are written into the
+         * single note the ledger stores, so the pair is bounded here, where the
+         * message can name both fields, rather than downstream where it would
+         * surface as a movement-level error the operator cannot act on.
+         */
+        extraReasonCheck: (explanation) =>
+          composeAdjustmentNote(input.reason, explanation).length > NOTE_MAX
+            ? `The reason and this explanation are written to the ledger together, and must come to ${NOTE_MAX} characters or fewer between them.`
+            : null,
+      },
+    );
   });
 
 export type StockAdjustmentInput = z.infer<typeof stockAdjustmentSchema>;
@@ -214,10 +163,10 @@ export function adjustmentDelta(input: {
  * length the schema validates and the length the ledger receives are the same
  * string built by the same function.
  */
-function composeAdjustmentNote(reason: string, unknownCostReason: string | null): string {
-  return unknownCostReason === null
+function composeAdjustmentNote(reason: string, explanation: string | null): string {
+  return explanation === null
     ? reason
-    : `${reason} (Acquisition cost unknown: ${unknownCostReason})`;
+    : withUnknownCostReason(reason, explanation);
 }
 
 /**
@@ -263,10 +212,11 @@ export function adjustmentUnitCostCents(input: {
   unitCost?: number | null | undefined;
 }): number | null {
   if (input.direction !== "INCREASE") return null;
-  if (input.costBasis !== "KNOWN") return null;
-  if (input.unitCost === null || input.unitCost === undefined) return null;
 
-  return Math.round(input.unitCost * 100);
+  return costBasisUnitCostCents({
+    basis: input.costBasis,
+    unitCost: input.unitCost,
+  });
 }
 
 export function toAdjustmentFieldErrors(
