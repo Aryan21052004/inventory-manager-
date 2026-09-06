@@ -255,3 +255,83 @@ export function costBasisUnitCostCents(answer: {
 
   return Math.round(answer.unitCost * 100);
 }
+
+/**
+ * A cost declaration as the stock engine accepts it, once a form has been
+ * parsed and the money has become whole cents.
+ *
+ * This is the same question `refineCostBasis` asks a form, at the other end of
+ * the journey: the form decides whether the operator answered it, and this
+ * decides what the engine is allowed to be told. Both inbound routes an
+ * operator drives — an opening balance and an upward stock adjustment — now
+ * take this one shape, so there is one vocabulary for a declared cost rather
+ * than one per entry point.
+ *
+ * The union is the whole point. Both engine APIs previously took a nullable
+ * number, which made the two illegal combinations well-typed calls, and one of
+ * them — a null cost carrying no explanation — is precisely the uncosted batch
+ * nobody chose that this costing model exists to prevent. There is now no way
+ * to spell it: KNOWN carries a cost and cannot carry a reason, UNKNOWN carries
+ * a reason and cannot carry a cost.
+ */
+export type DeclaredCost =
+  | { basis: "KNOWN"; unitCostCents: number }
+  | { basis: "UNKNOWN"; reason: string };
+
+/**
+ * Checks a declaration that has already left the type system's protection.
+ *
+ * The union is the guarantee for TypeScript callers; this is the guarantee for
+ * everyone else. A `JSON.parse`, an `as any`, or a caller compiled against an
+ * older signature can still produce `{ basis: "UNKNOWN" }` with no reason or a
+ * KNOWN with no number, and those are the states the union exists to forbid.
+ *
+ * Returns the message rather than throwing, so the engine can raise its own
+ * error type and this module stays free of server imports. `subject` names what
+ * is being costed, because the same fault reads differently depending on which
+ * route produced it.
+ */
+export function declaredCostError(
+  cost: DeclaredCost,
+  subject: string,
+): string | null {
+  if (cost.basis === "KNOWN") {
+    if (!Number.isInteger(cost.unitCostCents)) {
+      return `${subject} declared a known cost without a whole number of cents to record.`;
+    }
+    if (cost.unitCostCents < 0) {
+      return `${subject} cannot have a negative acquisition cost.`;
+    }
+    return null;
+  }
+
+  if (cost.basis === "UNKNOWN") {
+    // Checked as a string before it is trimmed. A caller the type system did
+    // not see can omit the field entirely, and reaching straight for `.trim()`
+    // would turn a declaration this function exists to reject into a
+    // TypeError — the right outcome reported as the wrong kind of fault.
+    const reason = typeof cost.reason === "string" ? cost.reason.trim() : "";
+
+    if (reason.length < 3) {
+      return `${subject} declared an unknown cost without saying why. These units would report as uncosted with nothing to explain them.`;
+    }
+    if (reason.length > UNKNOWN_COST_REASON_MAX) {
+      return `${subject} gave an explanation longer than ${UNKNOWN_COST_REASON_MAX} characters.`;
+    }
+    return null;
+  }
+
+  return `${subject} must declare whether its acquisition cost is known.`;
+}
+
+/**
+ * What a declaration means for the two columns a lot actually stores.
+ *
+ * Derived from what was declared, never from whether a number happened to
+ * arrive — and never from a catalogue figure, which no longer exists. The
+ * database asserts the same pairing from the other side through the
+ * `stock_lots_*_cost_known` check constraints.
+ */
+export function declaredCostUnitCents(cost: DeclaredCost): number | null {
+  return cost.basis === "KNOWN" ? cost.unitCostCents : null;
+}

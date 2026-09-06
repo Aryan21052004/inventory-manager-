@@ -32,17 +32,32 @@ async function signInWithRole(role: "ADMIN" | "STAFF") {
   return local;
 }
 
+/**
+ * These tests exercise the ledger — attribution, balances, locking — not the
+ * costing model. An inbound movement now has to declare a cost basis before it
+ * will be accepted, so they state the one they previously got by omission.
+ * Declaring it explicitly leaves the lots they produce exactly as they were:
+ * UNKNOWN, with a null cost.
+ */
+const UNKNOWN_COST = {
+  basis: "UNKNOWN",
+  reason: "Ledger fixture — what these units cost is not what this test is about.",
+} as const;
+
 describe("attribution", () => {
   it("records the local database id of the signed-in user", async () => {
     const user = await signInWithRole("STAFF");
     const product = await createProduct(100);
 
-    const { transaction } = await recordStockMovement({
-      productId: product.id,
-      type: "STOCK_IN",
-      quantity: 25,
-      reference: { type: "MANUAL" },
-    });
+    const { transaction } = await recordStockMovement(
+      {
+        productId: product.id,
+        type: "STOCK_IN",
+        quantity: 25,
+        reference: { type: "MANUAL" },
+      },
+      UNKNOWN_COST,
+    );
 
     // Not the Clerk id — the foreign key points at our users table.
     expect(transaction.createdBy).toBe(user.id);
@@ -63,12 +78,15 @@ describe("attribution", () => {
     signInAs(fakeClerkUser("user_firsttimer", "firsttimer@example.com"));
     const product = await createProduct(10);
 
-    const { transaction } = await recordStockMovement({
-      productId: product.id,
-      type: "STOCK_IN",
-      quantity: 5,
-      reference: { type: "MANUAL" },
-    });
+    const { transaction } = await recordStockMovement(
+      {
+        productId: product.id,
+        type: "STOCK_IN",
+        quantity: 5,
+        reference: { type: "MANUAL" },
+      },
+      UNKNOWN_COST,
+    );
 
     const created = await prisma.user.findUniqueOrThrow({
       where: { clerkId: "user_firsttimer" },
@@ -201,12 +219,15 @@ describe("the ledger itself", () => {
     await signInWithRole("STAFF");
     const product = await createProduct(0);
 
-    await recordStockMovement({
-      productId: product.id,
-      type: "STOCK_IN",
-      quantity: 60,
-      reference: { type: "MANUAL" },
-    });
+    await recordStockMovement(
+      {
+        productId: product.id,
+        type: "STOCK_IN",
+        quantity: 60,
+        reference: { type: "MANUAL" },
+      },
+      UNKNOWN_COST,
+    );
     await recordStockMovement({
       productId: product.id,
       type: "STOCK_OUT",
@@ -282,12 +303,15 @@ describe("the ledger itself", () => {
     await signInWithRole("STAFF");
 
     await expect(
-      recordStockMovement({
-        productId: "does-not-exist",
-        type: "STOCK_IN",
-        quantity: 1,
-        reference: { type: "MANUAL" },
-      }),
+      recordStockMovement(
+        {
+          productId: "does-not-exist",
+          type: "STOCK_IN",
+          quantity: 1,
+          reference: { type: "MANUAL" },
+        },
+        UNKNOWN_COST,
+      ),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });

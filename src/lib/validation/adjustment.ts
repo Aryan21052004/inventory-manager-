@@ -8,6 +8,7 @@ import {
   withUnknownCostReason,
   costBasisUnitCostCents,
   type CostBasis,
+  type DeclaredCost,
 } from "@/lib/validation/cost-basis";
 
 /**
@@ -194,29 +195,50 @@ export function adjustmentNote(input: {
 }
 
 /**
- * What the incoming units cost, in cents, or null when nobody knows.
+ * The declaration the stock engine receives, or nothing when there is no batch
+ * to cost.
  *
- * Null for a decrease as well as for a declared unknown, and the two nulls
- * mean different things that happen to travel the same way: a decrease draws
- * from lots that already carry their own cost, so it has nothing to supply.
- * `recordStockMovement` ignores the value on outbound movements for exactly
- * that reason.
+ * `undefined` and a declared unknown used to travel as the same `null`, which
+ * is what let two different facts — "this movement creates no batch" and "this
+ * batch has no knowable cost" — arrive at the engine indistinguishable. A
+ * decrease now says nothing because it has nothing to say, and an increase
+ * always says one of the two real things.
+ *
+ * Only reached once `stockAdjustmentSchema` has accepted the input, so an
+ * increase here has a basis and its matching half. The fallbacks below exist
+ * for the type system rather than for real inputs, and each is shaped so that
+ * the engine's own re-check produces the message that actually fits: an
+ * undeclared basis passes nothing, so the engine says the basis is missing
+ * rather than complaining about a half-declaration invented here.
  *
  * There is no branch here that reaches for a catalogue figure, and there must
  * never be one. A guessed acquisition cost is indistinguishable from a real
  * one the moment it is written.
  */
-export function adjustmentUnitCostCents(input: {
+export function adjustmentCost(input: {
   direction: AdjustmentDirection;
   costBasis?: AdjustmentCostBasis | undefined;
   unitCost?: number | null | undefined;
-}): number | null {
-  if (input.direction !== "INCREASE") return null;
+  unknownCostReason?: string | null | undefined;
+}): DeclaredCost | undefined {
+  if (input.direction !== "INCREASE") return undefined;
 
-  return costBasisUnitCostCents({
-    basis: input.costBasis,
-    unitCost: input.unitCost,
-  });
+  if (input.costBasis === "UNKNOWN") {
+    return { basis: "UNKNOWN", reason: input.unknownCostReason ?? "" };
+  }
+
+  if (input.costBasis === "KNOWN") {
+    const cents = costBasisUnitCostCents({
+      basis: "KNOWN",
+      unitCost: input.unitCost,
+    });
+
+    // NaN rather than a zero: a missing cost must fail the engine's check, and
+    // zero is a real price somebody could legitimately have paid.
+    return { basis: "KNOWN", unitCostCents: cents ?? Number.NaN };
+  }
+
+  return undefined;
 }
 
 export function toAdjustmentFieldErrors(

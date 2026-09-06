@@ -13,13 +13,17 @@ import {
   costBasisUnitCostCents,
   withUnknownCostReason,
 } from "@/lib/validation/cost-basis";
-import { stockAdjustmentSchema } from "@/lib/validation/adjustment";
+import {
+  adjustmentCost,
+  stockAdjustmentSchema,
+} from "@/lib/validation/adjustment";
 import {
   createProductSchema,
   openingStockCost,
   OPENING_STOCK_COST_BASES,
 } from "@/lib/validation/product";
-import { recordOpeningStock } from "@/server/stock";
+import { adjustStock } from "@/server/products";
+import { recordOpeningStock, recordStockMovement } from "@/server/stock";
 
 import { signOut } from "./clerk-mock";
 import { resetDatabase, seedProduct, signInWithRole } from "./database";
@@ -424,3 +428,345 @@ function issueFor(
 ): string | undefined {
   return result.error?.issues.find((issue) => issue.path[0] === field)?.message;
 }
+
+/**
+ * The adjustment movement API, held to the same standard as the opening one.
+ *
+ * `recordStockMovement` used to take a nullable number and read omission as
+ * UNKNOWN. Nothing reachable from the UI could exercise that — the schema has
+ * required a declaration for some time, and the check constraints refuse a
+ * costed source carrying no cost — but the *API* still spelled the defect the
+ * rest of this workstream removed, and an API is a thing future callers read.
+ * These tests are about the shape of that contract rather than about a bug
+ * anybody could trigger today.
+ *
+ * What must not change is the behaviour, and most of what follows asserts
+ * exactly that: the same lots, the same costs, the same notes as before.
+ */
+describe("the adjustment movement API", () => {
+  /** A valid adjustment form, as strings, the way FormData delivers it. */
+  function adjustmentForm(overrides: Record<string, string> = {}) {
+    return {
+      productId: "replaced-by-caller",
+      quantity: "5",
+      direction: "INCREASE",
+      reason: "Found extra units during a shelf count",
+      ...overrides,
+    };
+  }
+
+  async function lotsFor(productId: string) {
+    return prisma.stockLot.findMany({
+      where: { productId },
+      orderBy: { createdAt: "asc" },
+      include: { stockTransaction: true },
+    });
+  }
+
+  it("records the stated cost on a known-cost increase", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({
+      sku: "ADJ-KNOWN",
+      stockQuantity: 0,
+      // Deliberately unlike the declared cost below, so a substituted figure
+      // would be visible rather than coincidentally right.
+      sellingPrice: "999.00",
+    });
+
+    await adjustStock(
+      adjustmentForm({
+        productId: product.id,
+        costBasis: "KNOWN",
+        unitCost: "77.77",
+      }),
+    );
+
+    const lots = await lotsFor(product.id);
+    expect(lots).toHaveLength(1);
+    expect(lots[0]!.costSource).toBe("ADJUSTMENT");
+    expect(Number(lots[0]!.unitCost)).toBe(77.77);
+    expect(lots[0]!.quantityReceived).toBe(5);
+  });
+
+  it("records no cost, and the reason, on a declared-unknown increase", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({ sku: "ADJ-UNKNOWN", stockQuantity: 0 });
+
+    await adjustStock(
+      adjustmentForm({
+        productId: product.id,
+        costBasis: "UNKNOWN",
+        unknownCostReason: "Found loose on the shelf, no paperwork survives",
+      }),
+    );
+
+    const lots = await lotsFor(product.id);
+    expect(lots).toHaveLength(1);
+    expect(lots[0]!.costSource).toBe("UNKNOWN");
+    expect(lots[0]!.unitCost).toBeNull();
+
+    /*
+     * The explanation has to outlive the form, and the ledger note is the only
+     * place it can. Both halves travel together: why the stock changed, and
+     * why nobody can price it.
+     */
+    expect(lots[0]!.stockTransaction!.note).toBe(
+      withUnknownCostReason(
+        "Found extra units during a shelf count",
+        "Found loose on the shelf, no paperwork survives",
+      ),
+    );
+  });
+
+  it("substitutes no catalogue, reference or existing-lot cost", async () => {
+    await signInWithRole("ADMIN");
+    /*
+     * A product carrying both a reference price and an already-costed lot —
+     * the two figures a substitution bug would most plausibly reach for.
+     */
+    const product = await seedProduct({
+      sku: "ADJ-NOSUB",
+      stockQuantity: 10,
+      sellingPrice: "500.00",
+      lotUnitCost: "12.34",
+    });
+
+    await adjustStock(
+      adjustmentForm({
+        productId: product.id,
+        quantity: "3",
+        costBasis: "UNKNOWN",
+        unknownCostReason: "No paperwork for these three",
+      }),
+    );
+
+    const unknown = (await lotsFor(product.id)).find(
+      (lot) => lot.costSource === "UNKNOWN",
+    );
+
+    expect(unknown).toBeDefined();
+    expect(unknown!.unitCost).toBeNull();
+    // The costed lot beside it is untouched, so "null" is a decision about
+    // these units rather than a wipe of everything on the product.
+    const costed = (await lotsFor(product.id)).find(
+      (lot) => lot.costSource !== "UNKNOWN",
+    );
+    expect(Number(costed!.unitCost)).toBe(12.34);
+  });
+
+  it("refuses an inbound movement that declares nothing", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({ sku: "ADJ-OMIT", stockQuantity: 0 });
+
+    await expect(
+      recordStockMovement({
+        productId: product.id,
+        type: "ADJUSTMENT",
+        quantity: 4,
+        reference: { type: "MANUAL" },
+        note: "No declaration at all",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    // Refused before anything was written, so no half-movement is left behind.
+    expect(
+      await prisma.stockTransaction.count({ where: { productId: product.id } }),
+    ).toBe(0);
+    expect(
+      await prisma.stockLot.count({ where: { productId: product.id } }),
+    ).toBe(0);
+    expect(
+      (await prisma.product.findUniqueOrThrow({ where: { id: product.id } }))
+        .stockQuantity,
+    ).toBe(0);
+  });
+
+  it("refuses declarations that are malformed rather than merely absent", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({ sku: "ADJ-BAD", stockQuantity: 0 });
+
+    const movement = {
+      productId: product.id,
+      type: "ADJUSTMENT" as const,
+      quantity: 4,
+      reference: { type: "MANUAL" as const },
+      note: "Malformed declaration",
+    };
+
+    /*
+     * The union forbids every one of these at compile time. The casts are what
+     * a JSON payload, an `as any`, or a caller compiled against the older
+     * signature would produce, and the runtime guard is what keeps the
+     * invariant true for them too.
+     */
+    for (const bad of [
+      { basis: "KNOWN" },
+      { basis: "KNOWN", unitCostCents: -1 },
+      { basis: "KNOWN", unitCostCents: 12.5 },
+      { basis: "UNKNOWN" },
+      { basis: "UNKNOWN", reason: "  " },
+      { basis: "PROBABLY" },
+    ]) {
+      await expect(
+        recordStockMovement(movement, bad as never),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    }
+
+    expect(
+      await prisma.stockLot.count({ where: { productId: product.id } }),
+    ).toBe(0);
+  });
+
+  it("refuses a cost on a movement that removes stock", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({
+      sku: "ADJ-OUT",
+      stockQuantity: 10,
+      lotUnitCost: "5.00",
+    });
+
+    await expect(
+      recordStockMovement(
+        {
+          productId: product.id,
+          type: "ADJUSTMENT",
+          quantity: -2,
+          reference: { type: "MANUAL" },
+          note: "Cost supplied for an outbound movement",
+        },
+        { basis: "KNOWN", unitCostCents: 100 },
+      ),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    expect(
+      (await prisma.product.findUniqueOrThrow({ where: { id: product.id } }))
+        .stockQuantity,
+    ).toBe(10);
+  });
+
+  it("leaves a decrease working exactly as before", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({
+      sku: "ADJ-DEC",
+      stockQuantity: 10,
+      lotUnitCost: "5.00",
+    });
+
+    await adjustStock(
+      adjustmentForm({
+        productId: product.id,
+        quantity: "4",
+        direction: "DECREASE",
+        reason: "Four units damaged in handling",
+      }),
+    );
+
+    const after = await prisma.product.findUniqueOrThrow({
+      where: { id: product.id },
+    });
+    expect(after.stockQuantity).toBe(6);
+
+    // Drawn from the lot already on the shelf rather than creating one.
+    const lots = await lotsFor(product.id);
+    expect(lots).toHaveLength(1);
+    expect(lots[0]!.quantityRemaining).toBe(6);
+  });
+
+  it("keeps I-1 and I-3 true across a mixed run of adjustments", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({
+      sku: "ADJ-INV",
+      stockQuantity: 10,
+      lotUnitCost: "5.00",
+    });
+
+    await adjustStock(
+      adjustmentForm({
+        productId: product.id,
+        quantity: "6",
+        costBasis: "KNOWN",
+        unitCost: "9.00",
+      }),
+    );
+    await adjustStock(
+      adjustmentForm({
+        productId: product.id,
+        quantity: "4",
+        costBasis: "UNKNOWN",
+        unknownCostReason: "Origin of these four is unrecorded",
+      }),
+    );
+    await adjustStock(
+      adjustmentForm({
+        productId: product.id,
+        quantity: "12",
+        direction: "DECREASE",
+        reason: "Shipped against a manual pick",
+      }),
+    );
+
+    const after = await prisma.product.findUniqueOrThrow({
+      where: { id: product.id },
+    });
+    const lots = await lotsFor(product.id);
+
+    // I-1: the lots sum to the balance.
+    expect(lots.reduce((sum, lot) => sum + lot.quantityRemaining, 0)).toBe(
+      after.stockQuantity,
+    );
+    expect(after.stockQuantity).toBe(8);
+    expect(after.stockQuantity).toBeGreaterThanOrEqual(0);
+
+    // I-3: every lot's remainder is what it received less what was drawn.
+    for (const lot of lots) {
+      const consumed = await prisma.stockLotConsumption.aggregate({
+        where: { lotId: lot.id },
+        _sum: { quantity: true },
+      });
+      expect(lot.quantityRemaining).toBe(
+        lot.quantityReceived - (consumed._sum.quantity ?? 0),
+      );
+    }
+
+    // And the pairing the database enforces holds for every lot written here.
+    for (const lot of lots) {
+      if (lot.costSource === "UNKNOWN") expect(lot.unitCost).toBeNull();
+      else expect(lot.unitCost).not.toBeNull();
+    }
+  });
+
+  it("builds a declaration only when there is a batch to cost", () => {
+    /*
+     * A decrease has nothing to say and says nothing. That distinction used to
+     * be lost: "no batch to cost" and "no knowable cost" both travelled as
+     * null, which is what let the engine read silence as UNKNOWN.
+     */
+    expect(
+      adjustmentCost({
+        direction: "DECREASE",
+        costBasis: "KNOWN",
+        unitCost: 5,
+      }),
+    ).toBeUndefined();
+
+    expect(
+      adjustmentCost({
+        direction: "INCREASE",
+        costBasis: "KNOWN",
+        unitCost: 12.34,
+      }),
+    ).toEqual({ basis: "KNOWN", unitCostCents: 1234 });
+
+    expect(
+      adjustmentCost({
+        direction: "INCREASE",
+        costBasis: "UNKNOWN",
+        unknownCostReason: "Nobody can price these",
+      }),
+    ).toEqual({ basis: "UNKNOWN", reason: "Nobody can price these" });
+
+    // An undeclared basis produces nothing, so the engine reports the missing
+    // declaration rather than a half-built one invented here.
+    expect(adjustmentCost({ direction: "INCREASE" })).toBeUndefined();
+  });
+});

@@ -8,8 +8,8 @@ import { prisma } from "@/lib/prisma";
 import type { ProductListParams, ProductSortKey } from "@/lib/product-query";
 import {
   adjustmentDelta,
+  adjustmentCost,
   adjustmentNote,
-  adjustmentUnitCostCents,
   stockAdjustmentSchema,
   type StockAdjustmentInput,
 } from "@/lib/validation/adjustment";
@@ -1046,7 +1046,7 @@ export async function adjustStock(
    * cost becomes an ADJUSTMENT lot at that price, a declared unknown becomes
    * an UNKNOWN lot at no price, and a decrease supplies nothing because it
    * draws from lots that already carry their own. Nothing is defaulted from
-   * the catalogue row or from anywhere else — see `adjustmentUnitCostCents`.
+   * the catalogue row or from anywhere else — see `adjustmentCost`.
    */
   const { transaction, previousStock, newStock } = await recordStockMovement(
     {
@@ -1056,7 +1056,7 @@ export async function adjustStock(
       reference: { type: "MANUAL" },
       note: adjustmentNote(adjustment),
     },
-    adjustmentUnitCostCents(adjustment),
+    adjustmentCost(adjustment),
   );
 
   const product = await prisma.product.findUnique({

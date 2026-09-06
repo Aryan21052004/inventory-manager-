@@ -7,7 +7,12 @@ import type {
 } from "@/generated/prisma/enums";
 import { AppError, InsufficientStockError, NotFoundError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
-import { withUnknownCostReason } from "@/lib/validation/cost-basis";
+import {
+  declaredCostError,
+  declaredCostUnitCents,
+  withUnknownCostReason,
+  type DeclaredCost,
+} from "@/lib/validation/cost-basis";
 import {
   stockDelta,
   stockMovementSchema,
@@ -187,15 +192,25 @@ export async function applyStockMovement(
 export async function recordStockMovement(
   input: StockMovementInput,
   /**
-   * What the incoming units cost, in cents, for a movement that adds stock.
+   * What the operator declared about the cost of the units this movement
+   * brings in. Required for a movement that adds stock, and refused on one
+   * that removes it.
    *
-   * Optional, and ignored for outbound movements — those are costed from the
-   * lots they draw against, not from anything a caller supplies. Omitting it on
-   * an inbound movement creates an UNKNOWN lot: an operator counting extra
-   * units onto a shelf usually cannot say what they cost, and recording that
-   * honestly is better than attaching a number nobody can source.
+   * This used to be a nullable number, and omitting it created an UNKNOWN lot.
+   * That made "unknown" the answer a caller gave by saying nothing, which is
+   * the same defect the two forms had before they were fixed — an uncosted
+   * batch that nobody chose and that no reason explains. Absence is no longer
+   * an answer here: an inbound movement states a cost or states why there
+   * isn't one, and `DeclaredCost` is the only way to say either.
+   *
+   * Outbound movements must pass nothing. They are costed from the lots they
+   * draw against, so a cost supplied here could only be a caller misreading
+   * what this parameter is for — previously ignored in silence, now refused.
+   *
+   * Nothing is ever defaulted from the catalogue row, which holds no cost at
+   * all since `standardCost` was removed.
    */
-  unitCostCents?: number | null,
+  cost?: DeclaredCost,
 ): Promise<RecordedMovement> {
   const parsed = stockMovementSchema.safeParse(input);
 
@@ -212,6 +227,34 @@ export async function recordStockMovement(
     : await requireUser();
 
   const delta = stockDelta(movement);
+
+  /*
+   * The declaration is checked before anything is written, so a malformed one
+   * fails without a ledger row to roll back.
+   *
+   * Both directions are checked, because both have an illegal state. An
+   * inbound movement creates a batch, and a batch whose cost nobody declared
+   * is the uncosted-batch-nobody-chose defect this parameter exists to
+   * prevent. An outbound movement creates none, so a cost handed to it was
+   * never going to be stored anywhere — saying so is more useful than
+   * discarding it quietly.
+   */
+  if (delta > 0) {
+    if (cost === undefined) {
+      throw new AppError(
+        "BAD_REQUEST",
+        "A stock movement that adds stock must declare whether the acquisition cost of those units is known. Leaving it unsaid is what used to record a cost as unknown by accident.",
+      );
+    }
+
+    const problem = declaredCostError(cost, "An inbound stock movement");
+    if (problem) throw new AppError("BAD_REQUEST", problem);
+  } else if (cost !== undefined) {
+    throw new AppError(
+      "BAD_REQUEST",
+      "A stock movement that removes stock cannot declare an acquisition cost — those units are costed from the lots they draw against.",
+    );
+  }
 
   return prisma.$transaction(async (tx) => {
     const product = await lockProduct(tx, movement.productId);
@@ -234,14 +277,24 @@ export async function recordStockMovement(
      * quantity the moment anybody adjusted a count.
      */
     if (delta > 0) {
-      const costed = unitCostCents !== null && unitCostCents !== undefined;
+      /*
+       * Guarded above, and narrowed here for the compiler's benefit.
+       *
+       * Both columns come from what was declared rather than from whether a
+       * number happened to arrive, which is the difference this pass exists to
+       * make. The database asserts the same pairing from the other side:
+       * `stock_lots_adjustment_cost_known` refuses an ADJUSTMENT lot with no
+       * cost, and `stock_lots_unknown_cost_is_null` refuses an UNKNOWN lot
+       * that carries one.
+       */
+      const declared = cost!;
 
       await createLot(tx, {
         productId: product.id,
         stockTransactionId: recorded.transaction.id,
         quantity: delta,
-        unitCostCents: costed ? unitCostCents! : null,
-        costSource: costed ? "ADJUSTMENT" : "UNKNOWN",
+        unitCostCents: declaredCostUnitCents(declared),
+        costSource: declared.basis === "KNOWN" ? "ADJUSTMENT" : "UNKNOWN",
         reference: movement.reference,
         receivedAt: recorded.transaction.createdAt,
         userId: user.id,
@@ -261,20 +314,12 @@ export async function recordStockMovement(
 /**
  * What an operator declared about what the opening stock cost.
  *
- * The two answers the form offers, as the two shapes this module accepts. A
- * known cost carries a number and no explanation, because the number *is* the
- * evidence; an unknown one carries an explanation and no number, because the
- * explanation is the only thing that will ever account for the uncosted sales
- * that batch produces.
- *
- * Modelled as a union so the combinations in between cannot be written down.
- * The parameter used to be a nullable `unitCostCents` beside a free-text note,
- * which made "no cost, no reason" — the precise defect this hardening pass
- * closes — a well-typed call.
+ * Kept as a name this module can read itself by, but no longer a type of its
+ * own: an opening balance and an upward adjustment ask one question and now
+ * answer it in one shape. Two structurally identical unions would be two
+ * places for the same rule to drift.
  */
-export type OpeningStockCost =
-  | { basis: "KNOWN"; unitCostCents: number }
-  | { basis: "UNKNOWN"; reason: string };
+export type OpeningStockCost = DeclaredCost;
 
 /** What the ledger says about an opening movement before any explanation. */
 const OPENING_STOCK_NOTE = "Opening stock recorded when the product was created";
@@ -324,7 +369,7 @@ export async function recordOpeningStock(
 
   /*
    * The union is the guarantee for TypeScript callers; this is the guarantee
-   * for everyone else.
+   * for everyone else, and it is the same check the adjustment path runs.
    *
    * A `JSON.parse`, an `as any`, or a future caller compiled against an older
    * signature can still hand this function `{ basis: "UNKNOWN" }` with no
@@ -333,32 +378,8 @@ export async function recordOpeningStock(
    * comparison and keeps the invariant true at runtime as well as at build
    * time.
    */
-  if (params.cost.basis === "KNOWN") {
-    if (!Number.isInteger(params.cost.unitCostCents)) {
-      throw new AppError(
-        "BAD_REQUEST",
-        "Opening stock declared a known cost without a whole number of cents to record.",
-      );
-    }
-    if (params.cost.unitCostCents < 0) {
-      throw new AppError(
-        "BAD_REQUEST",
-        "Opening stock cannot have a negative acquisition cost.",
-      );
-    }
-  } else if (params.cost.basis === "UNKNOWN") {
-    if (params.cost.reason.trim().length < 3) {
-      throw new AppError(
-        "BAD_REQUEST",
-        "Opening stock declared an unknown cost without saying why. These units would report as uncosted with nothing to explain them.",
-      );
-    }
-  } else {
-    throw new AppError(
-      "BAD_REQUEST",
-      "Opening stock must declare whether its acquisition cost is known.",
-    );
-  }
+  const problem = declaredCostError(params.cost, "Opening stock");
+  if (problem) throw new AppError("BAD_REQUEST", problem);
 
   const cost = params.cost;
 
@@ -399,7 +420,7 @@ export async function recordOpeningStock(
      * `stock_lots_opening_cost_known` refuses an OPENING lot without a cost,
      * and `stock_lots_unknown_cost_is_null` refuses an UNKNOWN lot with one.
      */
-    unitCostCents: cost.basis === "KNOWN" ? cost.unitCostCents : null,
+    unitCostCents: declaredCostUnitCents(cost),
     costSource: cost.basis === "KNOWN" ? "OPENING" : "UNKNOWN",
     reference: { type: "MANUAL" },
     receivedAt: transaction.createdAt,
