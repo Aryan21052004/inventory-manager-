@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { toSafeError } from "@/lib/errors";
 import type { OrderStatus } from "@/lib/order-status";
 import type { OrderFieldErrors } from "@/lib/validation/order";
+import { recordSalesReturn } from "@/server/returns";
 import {
   cancelOrder,
   completeOrder,
@@ -259,6 +260,55 @@ export async function fulfilOrderAction(
     };
   } catch (error) {
     return { ok: false, message: toSafeError(error, "fulfilOrderAction").message };
+  }
+}
+
+/** One line's worth of "this many units came back". */
+export interface ReturnSubmission {
+  orderItemId: string;
+  quantity: number;
+}
+
+/**
+ * Records goods a customer has sent back.
+ *
+ * Revalidates the product and movement pages alongside the order, because a
+ * return moves stock — the same set a fulfilment invalidates, for the same
+ * reason. The returned units land quarantined, so the product's saleable
+ * figure does not move even though its physical one does.
+ *
+ * Quantities are strings here because the schema parses them as strings: a
+ * blank field must read as absent rather than as a deliberate zero, which is
+ * the same reasoning every other quantity input in this system uses.
+ */
+export async function recordReturnAction(
+  orderId: string,
+  reason: string,
+  lines: ReturnSubmission[],
+): Promise<{ ok: true; message: string } | { ok: false; message: string }> {
+  try {
+    const outcome = await recordSalesReturn({
+      orderId,
+      reason,
+      lines: lines.map((line) => ({
+        orderItemId: line.orderItemId,
+        quantity: String(line.quantity),
+      })),
+    });
+
+    revalidateOrder(orderId, true);
+
+    const units = outcome.lines.reduce((sum, line) => sum + line.quantity, 0);
+    const batches = outcome.lines.reduce((sum, line) => sum + line.lots.length, 0);
+
+    return {
+      ok: true,
+      message:
+        `Return ${outcome.returnNumber} recorded — ${units} ${units === 1 ? "unit" : "units"} ` +
+        `booked into ${batches} quarantined ${batches === 1 ? "batch" : "batches"}, awaiting inspection.`,
+    };
+  } catch (error) {
+    return { ok: false, message: toSafeError(error, "recordReturnAction").message };
   }
 }
 

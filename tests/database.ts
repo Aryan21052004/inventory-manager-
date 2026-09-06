@@ -12,8 +12,19 @@ export async function resetDatabase(): Promise<void> {
   // points at both a lot and a transaction, and a lot points at a transaction
   // and a product. Restrict makes a wrong order fail loudly.
   await prisma.stockLotConsumption.deleteMany();
+  /*
+   * Return lots first, and separately.
+   *
+   * A returned batch points at the batch it came from through `originLotId`,
+   * which is Restrict like everything else here — so a single bulk delete could
+   * try to remove a source lot while its returned child still references it.
+   * Clearing the children first makes the remaining delete a flat one.
+   */
+  await prisma.stockLot.deleteMany({ where: { originLotId: { not: null } } });
   await prisma.stockLot.deleteMany();
   await prisma.stockTransaction.deleteMany();
+  // Returns point at orders with Restrict, so they go before the orders do.
+  await prisma.return.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.order.deleteMany();
   await prisma.purchaseItem.deleteMany();

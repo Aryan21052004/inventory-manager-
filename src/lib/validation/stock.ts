@@ -25,6 +25,17 @@ import { z } from "zod";
 export const stockReferenceSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("ORDER"), id: z.string().min(1) }),
   z.strictObject({ type: z.literal("PURCHASE"), id: z.string().min(1) }),
+  /**
+   * Goods a customer sent back, pointing at the Return that received them —
+   * never at the order, even though a return always concerns one.
+   *
+   * `cancelOrder` gathers a document's movements with
+   * `referenceType = 'ORDER' AND referenceId = orderId` and nets them to decide
+   * what to restore. A return carrying that reference would be swept into the
+   * netting and the lots would be mis-restored, so keeping the two references
+   * apart is what makes the documents disjoint by construction.
+   */
+  z.strictObject({ type: z.literal("SALES_RETURN"), id: z.string().min(1) }),
   z.strictObject({
     type: z.literal("STOCK_TRANSACTION"),
     id: z.string().min(1),

@@ -122,6 +122,19 @@ enum StockReferenceType {
   ORDER
   PURCHASE
   STOCK_TRANSACTION
+  /// Goods a customer sent back, pointing at the Return that received them.
+  ///
+  /// Deliberately distinct from ORDER even though a return always concerns one.
+  /// `cancelOrder` gathers a document's movements with
+  /// `referenceType = 'ORDER' AND referenceId = orderId` and nets them to decide
+  /// what to restore; a return carrying that reference would be swept into that
+  /// netting and mis-restore the lots. Separating the reference makes the two
+  /// documents' movements disjoint by construction rather than by remembering.
+  ///
+  /// The movement type stays STOCK_IN — the units genuinely arrive. A
+  /// cancellation is REVERSAL against ORDER, so the two differ in both columns
+  /// and no new StockTransactionType was needed for either.
+  SALES_RETURN
   MANUAL
 }
 
@@ -141,7 +154,48 @@ enum LotCostSource {
   PURCHASE
   OPENING
   ADJUSTMENT
+  /// Units a customer sent back, re-entering stock at the cost they left at.
+  ///
+  /// Costed by construction, and never by a fresh judgement: the rate is copied
+  /// from the `StockLotConsumption` row being reversed, which froze it when the
+  /// units were drawn. A return whose original draw was uncosted produces an
+  /// UNKNOWN lot instead — unknown stays unknown, in both directions.
+  ///
+  /// A return spanning several source lots produces several RETURN lots, one
+  /// per cost layer. Averaging them would invent a rate no unit ever had.
+  RETURN
   UNKNOWN
+}
+
+/// Whether a batch may be sold.
+///
+/// Lot-level rather than product-level, because it has to be: the same part
+/// routinely holds saleable stock beside a returned batch awaiting inspection,
+/// and a product-level flag would have to lie about one of them.
+///
+/// **Status never changes a quantity.** A quarantined lot's units are on the
+/// shelf, inside `Product.stockQuantity`, and inside the invariant
+/// `SUM(quantityRemaining) = stockQuantity`. What status decides is whether
+/// FIFO may draw them, which is why saleable stock is derived from this column
+/// rather than stored as a rival total.
+///
+/// There is no duration, no expiry and no scheduled transition. Different parts
+/// warrant different inspections, so nothing here computes when quarantine
+/// ends — a lot leaves QUARANTINED only when a person says so, and says why.
+enum LotStatus {
+  /// Ordinary stock. Every lot that is not a customer return is born here.
+  SALEABLE
+
+  /// Received back from a customer and not yet inspected. Excluded from FIFO.
+  QUARANTINED
+
+  /// Failed inspection. Still physically present and still carrying its cost —
+  /// marking a lot rejected is a judgement, not a disposal, and value leaves
+  /// only when the units do. Excluded from FIFO, and removable only by a
+  /// targeted write-off against this specific lot: a normal decrease would go
+  /// through FIFO, which skips this lot and would consume saleable stock in its
+  /// place while the rejected units stayed on the books.
+  REJECTED
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +236,8 @@ model User {
   ordersCreated     Order[]            @relation("OrderCreatedBy")
   purchasesCreated  Purchase[]         @relation("PurchaseCreatedBy")
   stockLots         StockLot[]
+  returnsCreated    Return[]           @relation("ReturnCreatedBy")
+  lotsStatusChanged StockLot[]         @relation("LotStatusChangedBy")
 
   @@index([role])
   @@map("users")
@@ -424,6 +480,10 @@ model Order {
 
   items OrderItem[]
 
+  /// Goods sent back against this order. Any number over its life, each one a
+  /// separate physical receipt — see `Return`.
+  returns Return[]
+
   @@index([status])
   @@index([customerId])
   @@index([createdAt])
@@ -513,8 +573,38 @@ model OrderItem {
   /// two numbers that will eventually disagree.
   fulfilledQuantity Int @default(0) @map("fulfilled_quantity")
 
+  /// How many shipped units the customer has sent back.
+  ///
+  /// A fourth quantity, and it does not disturb the three above.
+  /// `fulfilledQuantity` is deliberately **not** decremented by a return: it
+  /// records a physical event that genuinely happened, and reducing it would
+  /// contradict a shipment the ledger still carries. It would also drag
+  /// `costedQuantity` down to preserve `costedQuantity <= fulfilledQuantity`,
+  /// which would report a return as a *costing* gap — the confidently wrong
+  /// number src/lib/cost-coverage.ts exists to prevent.
+  ///
+  ///     costedQuantity                        shipped, cost known
+  ///     fulfilledQuantity - costedQuantity    shipped, cost unknown
+  ///     quantity - fulfilledQuantity          never shipped, no cost exists
+  ///     returnedQuantity                      shipped, then came back
+  ///
+  /// Units still with the customer are `fulfilledQuantity - returnedQuantity`,
+  /// and are deliberately not a column for the same reason the outstanding
+  /// quantity is not one.
+  ///
+  /// `0 <= returnedQuantity <= fulfilledQuantity` is enforced by a check
+  /// constraint in the migration, which is what makes over-return and repeated
+  /// return of the same units unrepresentable rather than merely refused by a
+  /// code path. It is derivable by summing the return lots that name this line,
+  /// and is stored anyway because a row-level check cannot read an aggregate —
+  /// the same justification `costedQuantity` carries.
+  returnedQuantity Int @default(0) @map("returned_quantity")
+
   orderId String @map("order_id")
   order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  /// The batches created by returns against this line. One per cost layer.
+  returnedLots StockLot[] @relation("ReturnedFromOrderItem")
 
   productId String  @map("product_id")
   product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
@@ -727,8 +817,57 @@ model StockLot {
 
   /// What put these units on the shelf. Same polymorphic pair the ledger uses,
   /// and null exactly when the type is MANUAL.
+  ///
+  /// A customer return is SALES_RETURN with the Return's id, which is how a
+  /// return lot is found — the same shape purchase lots use, and the reason
+  /// there is no separate `returnId` foreign key here. Two representations of
+  /// one fact is the duplication this schema argues against elsewhere.
   sourceType StockReferenceType @map("source_type")
   sourceId   String?            @map("source_id")
+
+  /// Whether this batch may be sold. See `LotStatus`.
+  ///
+  /// Every existing lot is SALEABLE, and every lot that is not a customer
+  /// return is created SALEABLE. Only FIFO and the saleable-stock derivation
+  /// read this; nothing about quantity, cost or valuation depends on it.
+  status LotStatus @default(SALEABLE) @map("status")
+
+  /// The order line these units were sold on, before they came back.
+  ///
+  /// Set only on a return lot, and the reason there is no ReturnLine table: a
+  /// return's per-line quantity is `SUM(quantityReceived)` over the lots naming
+  /// that line, so storing it again would be a second number to keep in step.
+  ///
+  /// Restrict, because a line with returned stock against it is history.
+  orderItemId String?    @map("order_item_id")
+  orderItem   OrderItem? @relation("ReturnedFromOrderItem", fields: [orderItemId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  /// The batch these units originally shipped from.
+  ///
+  /// The lineage pointer, and the only link between a returned batch and where
+  /// it came from. It reaches the original cost, the original certificate and —
+  /// one hop further — the supplier, all as *history* rather than as claims
+  /// about these units now. Nothing is copied across it: the return lot's own
+  /// certificate slot starts empty, and its supplier is nobody, because a
+  /// customer is not a source of supply.
+  originLotId String?   @map("origin_lot_id")
+  originLot   StockLot? @relation("LotLineage", fields: [originLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  returnedAs  StockLot[] @relation("LotLineage")
+
+  /// Who moved this lot out of quarantine, when, and what they found.
+  ///
+  /// Written together by a release or a rejection and never afterwards — a
+  /// second release attempt reports the lot already settled rather than
+  /// overwriting the first inspector's name. Null on every lot that was never
+  /// quarantined, which is every lot that is not a customer return.
+  ///
+  /// `statusNote` is the inspection finding and is mandatory when the other two
+  /// are set: it is the only durable record of why these units were judged
+  /// saleable or scrapped, and it cannot be reconstructed later.
+  statusChangedBy   String?   @map("status_changed_by")
+  statusChangedUser User?     @relation("LotStatusChangedBy", fields: [statusChangedBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  statusChangedAt   DateTime? @map("status_changed_at")
+  statusNote        String?   @map("status_note")
 
   /// When the batch arrived — the FIFO sort key, and the reason it is stored
   /// rather than read from `createdAt`: a backfilled lot is created today but
@@ -773,8 +912,17 @@ model StockLot {
   /// be consumed in a deterministic sequence, or two concurrent orders could
   /// disagree about which came first.
   @@index([productId, receivedAt, id])
-  /// Finding the lots a purchase created, for the cancellation guard.
+  /// Finding the lots a purchase created, for the cancellation guard. Also
+  /// finding the lots a return created, which uses the same pair.
   @@index([sourceType, sourceId])
+  /// How much of an order line has come back, and in which batches.
+  @@index([orderItemId])
+  /// Walking lineage from a source batch to what was returned out of it.
+  @@index([originLotId])
+  @@index([statusChangedBy])
+  /// The FIFO scan and the quarantine queue are served by partial indexes on
+  /// `status`, which Prisma's schema language cannot express — they live in the
+  /// migration SQL beside the check constraints.
   @@map("stock_lots")
 }
 
@@ -816,6 +964,74 @@ model StockLotConsumption {
   @@index([stockTransactionId])
   @@index([lotId])
   @@map("stock_lot_consumptions")
+}
+
+// ---------------------------------------------------------------------------
+// Sales returns
+// ---------------------------------------------------------------------------
+
+/// Goods a customer received and sent back.
+///
+/// **A return is not a cancellation, and the distinction is the whole reason
+/// this table exists.** A cancellation says the sale never happened: the units
+/// never really left, so they go back into the batches they came from at the
+/// prices those batches cost, and the order's revenue and cost are erased. A
+/// return says the sale did happen and is being partly unwound: the units left,
+/// spent time in somebody else's custody, and have come back as a new physical
+/// receipt whose airworthiness is no longer self-evident.
+///
+/// Returned units therefore never re-enter their original lot. They arrive as
+/// new StockLots — one per original cost layer, so a shipment drawn from two
+/// batches at two prices comes back as two batches at those same two prices,
+/// never one at the average. Each is QUARANTINED until somebody inspects it,
+/// carries no certificate until somebody files one, and is dated by the day it
+/// arrived rather than the day the original batch did.
+///
+/// This row is the receipt event: what came back, when, and who booked it in.
+/// There is deliberately no ReturnLine table — a return's per-line quantity is
+/// the sum of the lots naming that line, and a stored copy would be a second
+/// number to keep in step. See `StockLot.orderItemId`.
+///
+/// Revenue is untouched here. `OrderItem.quantity`, `unitPrice`, `total` and
+/// `costTotal` all keep describing the sale that was made; a return is
+/// presented as its own economic event and netted in reporting, so gross sales,
+/// returns and net sales are three readable figures rather than one restated
+/// one.
+model Return {
+  id String @id @default(cuid())
+
+  /// Human reference, in the same shape as `Order.orderNumber`.
+  returnNumber String @unique @map("return_number")
+
+  /// When the goods physically arrived back.
+  ///
+  /// Distinct from `createdAt`, which is when somebody typed it in. This is the
+  /// economic event, and it becomes the `receivedAt` of every lot this return
+  /// creates — so returned stock sits in FIFO where it actually re-entered the
+  /// building, behind anything received while it was away.
+  receivedAt DateTime @map("received_at")
+
+  /// Why the customer sent them back, in their words. The only durable record
+  /// of the reason, and it cannot be reconstructed afterwards.
+  note String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// The sale being partly unwound. Restrict: an order with returned goods
+  /// against it is history, and history is not something a delete should take.
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  /// Who booked it in, resolved from the Clerk session on the server. Nulled
+  /// rather than cascaded if the user is later removed — the goods still came
+  /// back.
+  createdBy     String? @map("created_by")
+  createdByUser User?   @relation("ReturnCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([orderId])
+  @@index([receivedAt])
+  @@index([createdBy])
+  @@map("returns")
 }
 
 // ---------------------------------------------------------------------------

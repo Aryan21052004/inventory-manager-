@@ -141,6 +141,8 @@ export default async function OrderDetailPage({
                   productName: line.productName,
                   quantity: line.quantity,
                   fulfilledQuantity: line.fulfilledQuantity,
+                  returnedQuantity: line.returnedQuantity,
+                  returnableQuantity: line.returnableQuantity,
                   currentStock: line.currentStock,
                 }))}
               />

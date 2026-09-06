@@ -1,0 +1,45 @@
+-- Enum values for sales returns, added on their own and ahead of everything
+-- that uses them.
+--
+-- ---------------------------------------------------------------------------
+-- Why this is a migration by itself
+-- ---------------------------------------------------------------------------
+--
+-- PostgreSQL permits `ALTER TYPE ... ADD VALUE` inside a transaction, but the
+-- new value cannot be *used* until that transaction commits. Prisma runs each
+-- migration in one transaction, and the next migration references both of
+-- these values by literal, in check constraints:
+--
+--     cost_source  = 'RETURN'
+--     source_type  = 'SALES_RETURN'
+--
+-- Together in one file those would fail with "unsafe use of new value of enum
+-- type". Splitting is the honest fix. The alternative — restating the
+-- constraints so they never name the new values — would work, but it would
+-- break the pattern the lot-cost constraints deliberately set, where each cost
+-- source states its own contract in terms a reader can check against the
+-- schema comment.
+--
+-- Nothing is read or written below. No row, quantity, cost or ledger entry
+-- changes; this file only widens two enums.
+
+-- The cost source of a batch that came back from a customer.
+--
+-- Costed by construction: the rate is copied from the consumption row being
+-- reversed, which froze it when the units were drawn. A return whose original
+-- draw was uncosted produces an UNKNOWN lot instead, so unknown stays unknown
+-- in both directions.
+ALTER TYPE "LotCostSource" ADD VALUE 'RETURN';
+
+-- What a return's ledger row and its lots point at.
+--
+-- Deliberately distinct from ORDER. `cancelOrder` collects a document's
+-- movements with `reference_type = 'ORDER' AND reference_id = <order>` and nets
+-- them to decide what to restore; a return carrying that reference would be
+-- swept into the netting and the lots would be mis-restored. A separate value
+-- makes the two documents' movements disjoint by construction.
+--
+-- No new StockTransactionType is needed. A return is a STOCK_IN — the units
+-- genuinely arrive — while a cancellation is a REVERSAL against ORDER, so the
+-- two already differ in both columns.
+ALTER TYPE "StockReferenceType" ADD VALUE 'SALES_RETURN';

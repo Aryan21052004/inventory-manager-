@@ -1,11 +1,17 @@
 import "server-only";
 
-import type { Prisma, StockTransaction } from "@/generated/prisma/client";
+import { Prisma, type StockTransaction } from "@/generated/prisma/client";
 import type {
   LotCostSource,
+  LotStatus,
   StockTransactionType,
 } from "@/generated/prisma/enums";
 import { AppError, InsufficientStockError, NotFoundError } from "@/lib/errors";
+import {
+  SALEABLE_LOT_SQL,
+  SALEABLE_LOT_STATUS,
+  blockedStockHint,
+} from "@/lib/lot-status";
 import { prisma } from "@/lib/prisma";
 import {
   declaredCostError,
@@ -58,7 +64,35 @@ export interface RecordedMovement {
 export interface LockedProduct {
   id: string;
   name: string;
+
+  /**
+   * Total physical stock on hand, including anything blocked.
+   *
+   * Unchanged in meaning, and the only figure physical accounting may use:
+   * `applyStockMovement` reads it for `previousStock`/`newStock`, so the ledger
+   * keeps describing the shelf rather than the saleable subset of it.
+   */
   stockQuantity: number;
+
+  /**
+   * Units sitting in lots that may not be sold — quarantined or rejected.
+   *
+   * Derived under the same row lock, never stored. A stored figure would be a
+   * third number that must agree with the other two, maintained by every path
+   * that creates, consumes or re-statuses a lot; this codebase already declines
+   * that trade for `OrderItem`'s outstanding quantity, and for the same reason.
+   */
+  blockedQuantity: number;
+
+  /**
+   * What an order may actually draw: `stockQuantity - blockedQuantity`.
+   *
+   * Computed once here so no call site has to remember the subtraction, and so
+   * the two figures cannot be mixed up at the point of use. Every guard that
+   * decides whether stock can be *sold* reads this; everything that records
+   * what physically *moved* reads `stockQuantity`.
+   */
+  saleableQuantity: number;
 }
 
 /**
@@ -92,10 +126,38 @@ export async function lockProduct(
   const product = rows[0];
   if (!product) throw new NotFoundError("Product");
 
+  /*
+   * Blocked stock, read as a second statement rather than a subquery.
+   *
+   * `FOR UPDATE` and aggregation do not combine in Postgres, and there is no
+   * need to force them together: the row lock taken above is what serialises
+   * this product's lots, so by the time this runs no other transaction can be
+   * changing them. One indexed aggregate on a path that already performs
+   * several writes.
+   *
+   * Every lot is saleable until the return workflow exists, so this is zero on
+   * every product today and the subtraction below changes nothing.
+   *
+   * The predicate is the negation of the same rule the FIFO scan applies, built
+   * from the same string rather than spelled again — "blocked" is defined as
+   * "not saleable" and must stay that way, or a status could end up excluded
+   * from sale while still counting as available.
+   */
+  const blocked = await tx.$queryRaw<{ blocked: bigint | number | null }[]>`
+    SELECT COALESCE(SUM(quantity_remaining), 0) AS blocked
+    FROM stock_lots
+    WHERE product_id = ${productId}
+      AND NOT (${Prisma.raw(SALEABLE_LOT_SQL)})
+  `;
+
+  const blockedQuantity = Number(blocked[0]?.blocked ?? 0);
+
   return {
     id: product.id,
     name: product.name,
     stockQuantity: product.stock_quantity,
+    blockedQuantity,
+    saleableQuantity: product.stock_quantity - blockedQuantity,
   };
 }
 
@@ -258,6 +320,53 @@ export async function recordStockMovement(
 
   return prisma.$transaction(async (tx) => {
     const product = await lockProduct(tx, movement.productId);
+
+    /*
+     * An outflow draws from saleable lots, so it has to be checked against
+     * saleable stock rather than physical stock.
+     *
+     * Every outbound movement reaches `allocateFifo` — a negative ADJUSTMENT
+     * exactly as much as a STOCK_OUT — while the non-negative check inside
+     * `applyStockMovement` looks at the physical balance. Without this, a
+     * product holding ten quarantined units and nothing else would pass that
+     * check and then fail inside the scan with "Stock lots do not cover this
+     * movement": an assertion whose whole job is to detect a broken invariant,
+     * fired by an ordinary warehouse situation.
+     *
+     * So the refusal happens here, before anything is written, and says what is
+     * actually wrong. `blockedStockHint` returns null when nothing is blocked,
+     * which is every product until the return workflow exists — so today this
+     * is the same InsufficientStockError, with the same message, as before.
+     */
+    if (delta < 0) {
+      const wanted = Math.abs(delta);
+
+      if (product.saleableQuantity < wanted) {
+        const hint = blockedStockHint(
+          product.stockQuantity,
+          product.blockedQuantity,
+        );
+
+        if (hint) {
+          throw new AppError(
+            "INSUFFICIENT_STOCK",
+            `Not enough saleable stock for ${product.name}: ${wanted} requested. ${hint}`,
+            {
+              productName: product.name,
+              requested: wanted,
+              available: product.saleableQuantity,
+              blocked: product.blockedQuantity,
+            },
+          );
+        }
+
+        throw new InsufficientStockError(
+          product.name,
+          wanted,
+          product.saleableQuantity,
+        );
+      }
+    }
 
     const recorded = await applyStockMovement(tx, {
       product,
@@ -466,6 +575,32 @@ export interface LotSpec {
   /** When the goods arrived — the FIFO sort key, not necessarily now. */
   receivedAt: Date;
   userId: string | null;
+
+  /**
+   * Whether the batch may be sold. Omitted for everything that arrives by
+   * purchase, opening balance or adjustment, which is saleable on arrival.
+   *
+   * A customer return passes QUARANTINED, because goods that have been in
+   * somebody else's custody are not saleable until an inspection says so.
+   */
+  status?: LotStatus | undefined;
+
+  /**
+   * The order line these units were sold on, before they came back.
+   *
+   * Return lots only. Paired with the reference by
+   * `stock_lots_return_provenance`, so a SALES_RETURN lot must carry one and
+   * nothing else may.
+   */
+  orderItemId?: string | null | undefined;
+
+  /**
+   * The batch these units originally shipped from.
+   *
+   * Return lots only. Carries lineage to the original cost, certificate and
+   * supplier as *history* — nothing is copied across it.
+   */
+  originLotId?: string | null | undefined;
 }
 
 /**
@@ -503,6 +638,10 @@ export async function createLot(
         spec.reference.type === "MANUAL" ? null : spec.reference.id,
       receivedAt: spec.receivedAt,
       createdBy: spec.userId,
+      // Saleable unless the caller says otherwise; only a return says otherwise.
+      status: spec.status ?? SALEABLE_LOT_STATUS,
+      orderItemId: spec.orderItemId ?? null,
+      originLotId: spec.originLotId ?? null,
     },
     select: { id: true },
   });
@@ -555,6 +694,24 @@ export async function allocateFifo(
     stockTransactionId: string;
   },
 ): Promise<AllocationResult> {
+  /*
+   * Only saleable batches, and the ordering is untouched.
+   *
+   * Quarantined and rejected units are physically present and counted
+   * everywhere else — in `stockQuantity`, in I-1, in the valuation — but they
+   * are not available to sell, so they are invisible to this scan alone.
+   *
+   * The clause comes from `SALEABLE_LOT_SQL` rather than being typed here, so
+   * this scan and the blocked-quantity aggregate above cannot come to disagree
+   * about what "saleable" means. It is also the literal the partial index
+   * `stock_lots_fifo_saleable_idx` is defined on, which is what lets Postgres
+   * match it.
+   *
+   * The callers are what keep the assertion below meaningful: each one checks
+   * *saleable* stock before asking for units, so lots that fail to cover a draw
+   * still mean the invariant is broken rather than that somebody tried to sell
+   * quarantined stock.
+   */
   const lots = await tx.$queryRaw<
     { id: string; quantity_remaining: number; unit_cost: string | null }[]
   >`
@@ -562,6 +719,7 @@ export async function allocateFifo(
     FROM stock_lots
     WHERE product_id = ${params.productId}
       AND quantity_remaining > 0
+      AND ${Prisma.raw(SALEABLE_LOT_SQL)}
     ORDER BY received_at ASC, id ASC
     FOR UPDATE
   `;

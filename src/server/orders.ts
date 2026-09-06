@@ -10,6 +10,8 @@ import {
   toSafeError,
   type SafeError,
 } from "@/lib/errors";
+import { blockedStockHint } from "@/lib/lot-status";
+import { returnableQuantity } from "@/lib/validation/return";
 import type { OrderListParams, OrderSortKey } from "@/lib/order-query";
 import {
   canFulfilOutstanding,
@@ -138,6 +140,15 @@ export interface OrderDetailLine {
    * stored — see the note on `OrderItem.fulfilledQuantity` in the schema.
    */
   fulfilledQuantity: number;
+  /**
+   * How many shipped units the customer has sent back.
+   *
+   * Never reduces `fulfilledQuantity` — the shipment happened and the ledger
+   * still says so. Units still with the customer are the difference.
+   */
+  returnedQuantity: number;
+  /** What may still be sent back: `fulfilledQuantity - returnedQuantity`. */
+  returnableQuantity: number;
   /** Stock on hand now, for context — not what was deducted. */
   currentStock: number;
   /**
@@ -758,6 +769,25 @@ export async function getOrderDetail(
           costTotal: item.costTotal?.toString() ?? null,
           costedQuantity: item.costedQuantity,
           fulfilledQuantity: item.fulfilledQuantity,
+          returnedQuantity: item.returnedQuantity,
+          returnableQuantity: returnableQuantity(item),
+          /*
+           * Total physical stock, which is deliberately *not* what fulfilment
+           * now checks against.
+           *
+           * `fulfilOrder` refuses on saleable stock — physical less anything
+           * quarantined or rejected — so a product holding blocked units will
+           * let this dialog offer a quantity the server then declines. The
+           * dialog's own guard reads this figure and says "the server refuses
+           * such a request outright, so the dialog says so first"; that promise
+           * is currently kept only while nothing is blocked, which is every
+           * product until the return workflow exists.
+           *
+           * Left as physical on purpose rather than overlooked. Changing it
+           * means adding a saleable figure to this payload and reworking the
+           * dialog's message, which belongs with the rest of the returns UI —
+           * see the quarantine phase. The divergence is unreachable until then.
+           */
           currentStock: item.product.stockQuantity,
           lotCertificates: consumedLots.get(item.product.id) ?? [],
         })),
@@ -1129,10 +1159,23 @@ export async function confirmOrder(
       /*
        * What the shelf can actually give, read from the locked balance.
        *
-       * Bounded below by zero as well as above: `stockQuantity` cannot be
-       * negative today and this does not rely on that staying true.
+       * `saleableQuantity`, not `stockQuantity`: units awaiting inspection or
+       * rejected are physically present but cannot be sold, and FIFO will not
+       * draw them. Taking the physical figure here would confirm against stock
+       * the allocation cannot reach, and the shortfall would surface deep
+       * inside `allocateFifo` as a broken-invariant assertion rather than as
+       * the ordinary outstanding-units path below.
+       *
+       * Nothing is blocked until the return workflow exists, so today this is
+       * the same number it has always been.
+       *
+       * Bounded below by zero as well as above: neither figure can be negative
+       * today and this does not rely on that staying true.
        */
-      const take = Math.max(0, Math.min(item.quantity, product.stockQuantity));
+      const take = Math.max(
+        0,
+        Math.min(item.quantity, product.saleableQuantity),
+      );
 
       unfulfilledUnits += item.quantity - take;
 
@@ -1374,17 +1417,43 @@ export async function fulfilOrder(
       items.map((item) => item.productId),
     );
 
-    // Stock checked for every line before any line moves, so a request that
-    // cannot be met in full does not half-ship and then fail.
+    /*
+     * Stock checked for every line before any line moves, so a request that
+     * cannot be met in full does not half-ship and then fail.
+     *
+     * Saleable rather than physical, for the same reason as confirmation: FIFO
+     * cannot draw quarantined or rejected units, so a shipment promised against
+     * them would fail inside the allocation instead of being refused here. When
+     * something is blocked the message says so — "not enough stock" against a
+     * shelf that is visibly full is how this feature would read as a bug.
+     */
     for (const item of items) {
       const product = locked.get(item.productId)!;
       const want = requested.get(item.id)!;
 
-      if (product.stockQuantity < want) {
+      if (product.saleableQuantity < want) {
+        const hint = blockedStockHint(
+          product.stockQuantity,
+          product.blockedQuantity,
+        );
+
+        if (hint) {
+          throw new AppError(
+            "INSUFFICIENT_STOCK",
+            `Not enough saleable stock for ${product.name}: ${want} requested. ${hint}`,
+            {
+              productName: product.name,
+              requested: want,
+              available: product.saleableQuantity,
+              blocked: product.blockedQuantity,
+            },
+          );
+        }
+
         throw new InsufficientStockError(
           product.name,
           want,
-          product.stockQuantity,
+          product.saleableQuantity,
         );
       }
     }
@@ -1521,6 +1590,35 @@ export async function cancelOrder(
     }
 
     assertTransition(order.status, "CANCELLED");
+
+    /*
+     * An order with returned goods against it cannot be cancelled.
+     *
+     * Cancelling restores what the ledger says shipped, into the batches it
+     * came from. Returned units are already back — in different lots, at the
+     * same cost, quarantined — so a cancellation would put the same physical
+     * units on the shelf twice and leave `stockQuantity` above what ever left.
+     *
+     * It is also a contradiction in what the document claims. A cancellation
+     * says the sale never happened; a return is the record that it did and was
+     * partly unwound. Both against one order would make it tell two stories.
+     *
+     * Checked under the order lock, before anything is written, and in addition
+     * to the structural protection: a return's movements carry
+     * `referenceType = 'SALES_RETURN'`, so the netting below cannot see them
+     * even if this guard were somehow bypassed.
+     */
+    const returned = await tx.orderItem.aggregate({
+      where: { orderId },
+      _sum: { returnedQuantity: true },
+    });
+
+    if ((returned._sum.returnedQuantity ?? 0) > 0) {
+      throw new AppError(
+        "CONFLICT",
+        `Order ${order.orderNumber} has returned goods recorded against it, so it cannot be cancelled. A return is a physical event that already happened — return the remaining units instead.`,
+      );
+    }
 
     const movements: OrderTransitionOutcome["movements"] = [];
 

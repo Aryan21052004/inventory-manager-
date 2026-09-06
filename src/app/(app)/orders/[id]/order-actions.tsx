@@ -9,6 +9,7 @@ import {
   Info,
   Loader2,
   PackageCheck,
+  PackageOpen,
   Truck,
   Undo2,
   XCircle,
@@ -20,6 +21,7 @@ import {
   completeOrderAction,
   confirmOrderAction,
   fulfilOrderAction,
+  recordReturnAction,
   setOrderStatusAction,
 } from "@/app/(app)/orders/actions";
 import { Button } from "@/components/ui/button";
@@ -61,6 +63,10 @@ export interface OrderActionLine {
   quantity: number;
   /** How many of `quantity` have physically shipped. */
   fulfilledQuantity: number;
+  /** How many shipped units the customer has already sent back. */
+  returnedQuantity: number;
+  /** What may still come back: `fulfilledQuantity - returnedQuantity`. */
+  returnableQuantity: number;
   currentStock: number;
 }
 
@@ -78,6 +84,7 @@ function OrderActions({
   const [confirming, setConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [fulfilling, setFulfilling] = useState(false);
+  const [returning, setReturning] = useState(false);
 
   async function run(
     action: () => Promise<{ ok: boolean; message: string }>,
@@ -124,6 +131,19 @@ function OrderActions({
    * order-status.ts rather than being restated here.
    */
   const canFulfil = canFulfilOutstanding(status) && outstandingUnits > 0;
+
+  /*
+   * Only units that actually shipped can come back, and only ones that have
+   * not already been sent back. When nothing is returnable the action is not
+   * offered at all rather than offered and refused — the server enforces the
+   * same bound, so the button cannot promise something it will decline.
+   */
+  const returnableLines = lines.filter((line) => line.returnableQuantity > 0);
+  const returnableUnits = returnableLines.reduce(
+    (sum, line) => sum + line.returnableQuantity,
+    0,
+  );
+  const canReturn = returnableUnits > 0;
 
   return (
     <>
@@ -176,6 +196,17 @@ function OrderActions({
           <Truck />
           Fulfil {formatNumber(outstandingUnits)}{" "}
           {outstandingUnits === 1 ? "unit" : "units"}
+        </Button>
+      ) : null}
+
+      {canReturn ? (
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => setReturning(true)}
+        >
+          <PackageOpen />
+          Record return
         </Button>
       ) : null}
 
@@ -305,6 +336,23 @@ function OrderActions({
           run(
             () => fulfilOrderAction(orderId, payload),
             () => setFulfilling(false),
+          )
+        }
+      />
+
+      {/* --- Returns: goods the customer has sent back --- */}
+      <RecordReturnDialog
+        open={returning}
+        onOpenChange={(next) => {
+          if (busy) return;
+          setReturning(next);
+        }}
+        lines={returnableLines}
+        busy={busy}
+        onReturn={(reason, payload) =>
+          run(
+            () => recordReturnAction(orderId, reason, payload),
+            () => setReturning(false),
           )
         }
       />
@@ -570,3 +618,182 @@ function CancelOrderDialog({
 }
 
 export { OrderActions };
+
+/**
+ * Recording goods a customer has sent back.
+ *
+ * The four numbers are all shown deliberately. "Returned 2 of 5 shipped" is a
+ * sentence somebody can check against the boxes on the dock; a bare input with
+ * a maximum is not, and the difference matters because a return is irreversible
+ * from this screen — the units come back quarantined and only an inspection
+ * releases them.
+ *
+ * Nothing is prefilled. Unlike a fulfilment, where "send everything owed" is
+ * the overwhelmingly common case, a return is whatever physically turned up,
+ * and a default would be this dialog guessing at a delivery it cannot see.
+ *
+ * The reason is required and is not a formality: it is the only durable record
+ * of why a shipped sale was partly undone, and unlike a quantity it cannot be
+ * reconstructed from anything else afterwards.
+ */
+function RecordReturnDialog({
+  open,
+  onOpenChange,
+  lines,
+  busy,
+  onReturn,
+}: {
+  open: boolean;
+  onOpenChange: (next: boolean) => void;
+  lines: OrderActionLine[];
+  busy: boolean;
+  onReturn: (
+    reason: string,
+    lines: { orderItemId: string; quantity: number }[],
+  ) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <RecordReturnForm lines={lines} busy={busy} onReturn={onReturn} />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RecordReturnForm({
+  lines,
+  busy,
+  onReturn,
+}: {
+  lines: OrderActionLine[];
+  busy: boolean;
+  onReturn: (
+    reason: string,
+    lines: { orderItemId: string; quantity: number }[],
+  ) => void;
+}) {
+  const [quantities, setQuantities] = useState<Record<string, number>>({});
+  const [reason, setReason] = useState("");
+
+  const payload = lines
+    .map((line) => ({
+      orderItemId: line.orderItemId,
+      quantity: quantities[line.orderItemId] ?? 0,
+    }))
+    .filter((line) => line.quantity > 0);
+
+  const units = payload.reduce((sum, line) => sum + line.quantity, 0);
+
+  // Mirrors the server's per-line bound, so the dialog cannot offer a quantity
+  // the server will refuse.
+  const overReturned = lines.filter(
+    (line) => (quantities[line.orderItemId] ?? 0) > line.returnableQuantity,
+  );
+
+  const reasonTooShort = reason.trim().length < 3;
+  const blocked = busy || units === 0 || overReturned.length > 0 || reasonTooShort;
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2">
+          <PackageOpen className="size-4 text-primary" aria-hidden />
+          Record a return
+        </DialogTitle>
+        <DialogDescription>
+          Returned units come back as their own batches, at the cost they
+          shipped at, and stay quarantined until somebody inspects them. They do
+          not become saleable stock on arrival.
+        </DialogDescription>
+      </DialogHeader>
+
+      <div className="flex flex-col gap-4">
+        <ul className="flex flex-col gap-3">
+          {lines.map((line) => (
+            <li key={line.orderItemId} className="flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-3">
+                <span className="min-w-0 flex-1 truncate text-sm">
+                  {line.productName}
+                </span>
+                <Input
+                  type="number"
+                  min={0}
+                  max={line.returnableQuantity}
+                  step={1}
+                  value={quantities[line.orderItemId] ?? 0}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setQuantities((current) => ({
+                      ...current,
+                      [line.orderItemId]: Math.max(
+                        0,
+                        Math.floor(Number(event.target.value) || 0),
+                      ),
+                    }))
+                  }
+                  className="tabular w-24 shrink-0"
+                  aria-label={`Units of ${line.productName} returned`}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {formatNumber(line.quantity)} ordered ·{" "}
+                {formatNumber(line.fulfilledQuantity)} shipped ·{" "}
+                {formatNumber(line.returnedQuantity)} already returned ·{" "}
+                <span className="font-medium text-foreground">
+                  {formatNumber(line.returnableQuantity)} still returnable
+                </span>
+              </p>
+            </li>
+          ))}
+        </ul>
+
+        <div className="flex flex-col gap-1.5">
+          <label
+            htmlFor="return-reason"
+            className="text-sm font-medium leading-none"
+          >
+            Why did they come back?
+          </label>
+          <Textarea
+            id="return-reason"
+            rows={2}
+            value={reason}
+            disabled={busy}
+            placeholder="Customer over-ordered — units unused and still boxed."
+            onChange={(event) => setReason(event.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">
+            Required. This is the only record of why the sale was partly undone.
+          </p>
+        </div>
+
+        {overReturned.length > 0 ? (
+          <p className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs leading-relaxed text-destructive">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+            <span>
+              More units than were shipped, or than remain returnable. The
+              server refuses such a request outright.
+            </span>
+          </p>
+        ) : null}
+      </div>
+
+      <DialogFooter>
+        <DialogClose asChild>
+          <Button variant="outline" disabled={busy}>
+            Cancel
+          </Button>
+        </DialogClose>
+        <Button
+          disabled={blocked}
+          onClick={() => onReturn(reason.trim(), payload)}
+        >
+          {busy ? <Loader2 className="animate-spin" /> : <PackageOpen />}
+          Record return of {formatNumber(units)}{" "}
+          {units === 1 ? "unit" : "units"}
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
