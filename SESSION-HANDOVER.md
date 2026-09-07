@@ -1,16 +1,19 @@
-# Session handover — uncommitted checkpoint
+# Session handover — checkpoint, since committed
 
-**Date:** 2 September 2026
+**Written:** 2 September 2026, when the work below was uncommitted.
 **Branch:** `db/inventory-domain-model`
-**HEAD:** `93ce671` — *feat: attach certificates to the batch that arrived, not the part*
-**Working tree:** dirty, deliberately. One workstream sits on top of `93ce671`
-and has not been committed, pending review.
+**Checkpoint HEAD:** `93ce671` — *feat: attach certificates to the batch that arrived, not the part*
+**Status now:** the workstream this file describes was reviewed and committed as
+`884d431` — *feat: support partial order fulfilment*. The working tree is clean;
+current HEAD is `a8dc4f7`, six commits further on.
 
-This file covers **what is in the working tree and what to do with it**. For how
-the system works — the rules, the FIFO costing model, the money definitions, the
-things that will waste your afternoon — read `HANDOVER.md`, which is current as
-of this checkpoint. Nothing here repeats it; §18 there is the full account of
-this change.
+This file covers **the partial-fulfilment workstream and the decisions taken
+around it**. It is kept as the record of that change rather than as a live
+to-do list — §6 says where each of its next steps ended up. For how the system
+works — the rules, the FIFO costing model, the money definitions, the things
+that will waste your afternoon — read `HANDOVER.md`, which is current as of
+`a8dc4f7`. Nothing here repeats it; §18 there is the full account of this
+change.
 
 ---
 
@@ -28,9 +31,21 @@ Nothing at or below `93ce671` has been amended or rewritten. The certificate
 workstream that was uncommitted in the previous handover is now committed at
 HEAD; this is a separate change on top of it.
 
+**Since this checkpoint was written**, all of it and more has been committed:
+
+```
+a8dc4f7  feat: add sales return lot inspection workflow
+bc213eb  feat: add sales return workflow
+a500fca  refactor: make the adjustment cost API refuse silence too
+19aab14  refactor: ask the cost question once, and make the answer structural
+5621e52  refactor: remove Product.standardCost, require an opening cost basis
+077ca67  feat: price orders per customer, remove the discount feature
+884d431  feat: support partial order fulfilment   ← the workstream below
+```
+
 ---
 
-## 1. What is uncommitted
+## 1. What this checkpoint covered (committed as `884d431`)
 
 **Commercial order completion separated from physical fulfilment.** Approved as
 an architecture and then as a written implementation plan before any code was
@@ -239,13 +254,18 @@ whether outstanding quantities clear in days or sit open indefinitely.
 ordinary orders and a purchase, not synthetic paperwork, and can be left or
 cancelled as you prefer.
 
-**Returns are closed, not open.** Listed here only so nobody reads their absence
-as an oversight and reopens them. There is no sales-return workflow, none is
-planned, and the three questions a return design would have needed answered —
-quarantine versus straight back to sellable stock, credit versus replacement,
-and whether a return reduces revenue here — are moot rather than outstanding.
-Decided at the owner's direction, 4 September 2026. `HANDOVER.md` §8 carries the
-statement and the reason; §19 records what it means for the reversal-netting fix.
+**Returns were closed here, and have since been built.** The 4 September 2026
+decision that closed them was reversed by the owner the following day, and the
+workflow shipped in `bc213eb` (recording a return: the return document,
+`returnedQuantity`, cost layers read from the original consumption rows,
+quarantined return lots and their provenance) and `a8dc4f7` (inspecting one:
+ADMIN-only release, rejection, targeted partial write-off, the `/returns`
+quarantine queue and the audit fields behind each decision). Two of the three
+questions were answered by building it — a returned part is quarantined rather
+than going straight back to sellable stock, and revenue is unchanged because
+`fulfilledQuantity` is never reduced. Credit versus replacement is still settled
+commercially elsewhere. `HANDOVER.md` §8 is the current account; §19 and §22
+there record the reversal from where the original decisions were written.
 
 **The discount feature is removed outright**, superseding the "out of scope for
 margin" note that stood here earlier the same day. Column, constraint, form
@@ -257,10 +277,11 @@ the order page's "Gross margin" correct without changing any margin logic.
 applied to production** — see §7 below.
 
 **Where the costing review's findings now stand.** G1 (adjustment cost) and G2
-(reversal netting) are implemented and tested; returns are out of scope;
-discount-in-margin was resolved by removing the discount feature outright (§20);
-the seed's single-price data and `Product.standardCost` are live work; landed
-cost is a business question. `HANDOVER.md` §19 has the table.
+(reversal netting) are implemented and tested; returns are implemented
+(`bc213eb`, `a8dc4f7`); discount-in-margin was resolved by removing the discount
+feature outright (§20); the seed's single-price data and `Product.standardCost`
+are live work; landed cost is a business question. `HANDOVER.md` §19 has the
+table.
 
 ---
 
@@ -276,11 +297,15 @@ cost is a business question. `HANDOVER.md` §19 has the table.
   "units that do not exist". Nothing about outstanding quantity may borrow it.
 - **Threshold vocabulary.** Ordered / Fulfilled / Outstanding. Not low stock,
   out of stock, short, or reorder — §16 removed that at the owner's direction.
-- **Returns.** Out of scope by decision, not deferred. No return model, status,
-  quarantine logic, returned quantity, UI, migration, seed data or tests are to
-  be added, and `COMPLETED → CANCELLED` stays refused. `returnToLots` serves
-  **cancellation** — a sale that did not happen, rather than one undone — and
-  its name refers to the lots units go back into, not to a customer return.
+- **`COMPLETED → CANCELLED` stays refused**, and an order carrying a return
+  cannot be cancelled at all — the returned units are already back, and
+  cancelling would shelve them twice. The returns workflow built in `bc213eb`
+  and `a8dc4f7` does not change either rule; a return is a new physical event
+  with its own document, not a cancellation. `returnToLots` still serves
+  **cancellation** only — a sale that did not happen, rather than one undone —
+  and its name refers to the lots units go back into, not to a customer return.
+  (This bullet previously prohibited building returns at all. That decision was
+  reversed by the owner on 5 September 2026; see `HANDOVER.md` §8.)
 - **Product-level selling prices.** `Product.sellingPrice` is an optional
   *reference* that prefills a new order line. It is never historical revenue and
   must never overwrite an existing `OrderItem.unitPrice` — see `HANDOVER.md`
@@ -295,10 +320,21 @@ cost is a business question. `HANDOVER.md` §19 has the table.
 
 ## 6. Next development steps
 
-1. **Review and commit this workstream.** Nothing is committed; the diff is
-   sixteen modified files, two new ones, and one migration.
-2. **Answer the business question in §4.** It is the only thing here that could
-   change the shape of what has been built.
+1. ~~**Review and commit this workstream.**~~ **Done** — committed as
+   `884d431`.
+2. **Answer the business question in §4.** Still open. It is the only thing here
+   that could change the shape of what has been built, and it decides whether
+   outstanding quantities are expected to clear in days or to sit open
+   indefinitely. Unaffected by the sales-return work.
 3. **The ORDER↔PURCHASE link**, then an outstanding-orders screen on top of it.
+   Still unbuilt.
 4. **Certificate compliance register** — still the most valuable unbuilt report,
-   unchanged in scope by this workstream.
+   unchanged in scope by this workstream or by the sales-return work.
+
+Items 3 and 4 are both still open, and this file does not order them against
+each other; `HANDOVER.md` §9 lists them in the other order. Which goes first is
+an owner decision that has not been taken.
+
+**Built since this checkpoint, and not on the list above:** the sales-return
+workflow and its quarantine inspection (`bc213eb`, `a8dc4f7`), inserted ahead of
+these items at the owner's direction. See `HANDOVER.md` §8.

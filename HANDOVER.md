@@ -8,11 +8,13 @@ Written for whoever picks this up next — a new developer, or a new session. It
 covers what exists, the rules the code is built around, and the things that will
 waste your afternoon if nobody tells you.
 
-**Last updated:** 2 September 2026, after separating commercial order
-completion from physical fulfilment (§18), on top of moving airworthiness
-paperwork from the product to the batch it arrived on (§17), the stock movement
-summary (§13), the removal of threshold-based stock classification (§16), the
-dead-code audit and cleanup pass (§15) and the Dashboard rebuild (§12).
+**Last updated:** 7 September 2026, after building the sales-return workflow and
+its quarantine inspection (`bc213eb`, `a8dc4f7`; §8 and §22), on top of
+separating commercial order completion from physical fulfilment (§18), moving
+airworthiness paperwork from the product to the batch it arrived on (§17), the
+stock movement summary (§13),
+the removal of threshold-based stock classification (§16), the dead-code audit
+and cleanup pass (§15) and the Dashboard rebuild (§12).
 
 ---
 
@@ -28,6 +30,7 @@ dead-code audit and cleanup pass (§15) and the Dashboard rebuild (§12).
 | Orders | Done | `/orders`, `/orders/new`, `/orders/[id]`, `/orders/[id]/edit` |
 | Purchases | Done | `/purchases`, `/purchases/new`, `/purchases/[id]`, `/purchases/[id]/edit` |
 | Stock movements | Done | `/stock-movements` |
+| Sales returns & quarantine inspection | Done | `/returns`, and the batch table on `/products/[id]` |
 | Customers | Done | `/customers`, `/customers/[id]` |
 | Suppliers | Done | `/suppliers`, `/suppliers/[id]` |
 | Reports | Tier 1 done, plus stock movement summary | `/reports`, `/reports/[report]` |
@@ -55,8 +58,11 @@ Four older commits precede these: the Clerk work, the domain model, and the
 original scaffold, back to `03536e4`.
 
 **Current branch:** `db/inventory-domain-model`
-**Latest commit:** `403f811` — with the threshold-removal change set (§16)
-uncommitted in the working tree on top of it.
+**Latest commit:** `a8dc4f7` — *feat: add sales return lot inspection workflow*.
+The commit list above stops at `403f811`; everything from the threshold removal
+(§16) through the sales-return workstream has been committed since, most
+recently `bc213eb` (the return workflow) and `a8dc4f7` (quarantine inspection).
+`git log --oneline` is the authoritative history.
 
 There is **no git remote** — everything is local. `master` is still back at
 `03536e4`; all real work is on the branch.
@@ -382,26 +388,51 @@ quantity into an alert or a classification. The inventory reports that remain in
 scope are **stock valuation** (built), **stock movement summary**, **inventory
 ageing by lot** and **supplier provenance**.
 
-**Returns are out of scope, not unbuilt.** There is no sales-return workflow and
-none is planned. This is a scope decision taken at the owner's direction
-(4 September 2026), not a gap waiting on effort, and it should not be revived as
-"deferred work" in a future plan.
+**Sales returns are built.** The 4 September 2026 decision that put them out of
+scope was reversed by the owner, and the workflow was then built in two commits:
+`bc213eb` records returns, and `a8dc4f7` adds the inspection that follows one.
+Anything in this file that still reads as a prohibition on returns predates
+those commits; §22 carries the account, and §19 records the finding they close.
+
+**What `bc213eb` built.** A `Return` document against a confirmed or completed
+order, a `returnedQuantity` on the line kept distinct from `fulfilledQuantity`
+(which is never reduced — the units did ship), and returned units arriving as
+**new lots** rather than being written back into the batches they left. Each new
+lot carries the cost those units actually shipped at, read from the original
+`StockLotConsumption` rows, so a shipment drawn from two batches at two prices
+comes back as two batches at those two prices and never one at the average; an
+uncosted draw returns uncosted. Every return lot starts `QUARANTINED`, carries
+no certificate, and records its provenance — the order line it came back from
+and the batch it originally shipped on. The ledger row is a `STOCK_IN` against a
+`SALES_RETURN` reference, deliberately not `ORDER`, so a return's movements stay
+disjoint from the ones `cancelOrder` nets.
+
+**What `a8dc4f7` built.** The inspection a quarantined batch waits for. An ADMIN
+may **release** it to sale or **reject** it, and may then **write off** part or
+all of a rejected batch; the transitions are exactly `QUARANTINED → SALEABLE`
+and `QUARANTINED → REJECTED`, both terminal, with the table in
+`src/lib/lot-status.ts`. Release and rejection move no stock at all — the units
+were already counted, and what changes is whether FIFO may reach them. A
+write-off does move stock, against **one named batch** through `drainLot` rather
+than through FIFO, which would otherwise consume the saleable batches beside the
+condemned one. Every decision records actor, timestamp and reason, and none is
+reversible. `/returns` is the quarantine queue, ordered oldest first, and there
+is deliberately no quarantine expiry — which is exactly why the queue has to
+exist. Eligibility is `sourceType = SALES_RETURN`, never `costSource`: a return
+of an uncosted shipment is an `UNKNOWN`-cost batch and is still a return.
 
 The reason the codebase already carried is unchanged and remains the right one:
-`COMPLETED → CANCELLED` on an order is deliberately refused because the goods
-have shipped, and putting units back because a status changed would invent
-inventory that is physically somewhere else. What a return would additionally
-have required — a document with a receipt and an inspection, a decision about
-whether a returned part re-enters sellable stock or needs quarantine, and a
-returned-quantity concept distinct from fulfilled — is not modelled and is not
-to be added.
+`COMPLETED → CANCELLED` on an order is still deliberately refused, because the
+goods have shipped and putting units back because a status changed would invent
+inventory that is physically somewhere else. A return is the opposite event and
+now has its own document. An order carrying a return cannot be cancelled at all,
+because the returned units are already back and cancelling would shelve them
+twice.
 
-Nothing is to be built toward it: no return model, no return status, no
-quarantine logic, no returned quantity on a line, no return UI, no migration and
-no seed data. The one piece of machinery that would have served a return —
-`returnToLots`, which puts units back into their originating batch at that
-batch's cost — exists solely for **cancellation**, which is a different event:
-the sale did not happen, rather than happened and was undone. See §19.
+`returnToLots` is still **not** the returns feature. It puts units back into
+their originating batch at that batch's cost and serves **cancellation** — the
+sale did not happen, rather than happened and was undone. The returns workflow
+creates new lots instead, for the reasons above. See §19.
 
 **Discounts are removed, not merely out of scope.** An earlier note here
 recorded discount-aware *margin* as out of scope while `Order.discount` stayed
@@ -1419,19 +1450,18 @@ Where each of them stands:
 | --- | --- |
 | Upward adjustments created `UNKNOWN`-cost lots | **Implemented** — below |
 | Reversal netting in `returnToLots` | **Implemented** — below |
-| No sales-return workflow | **Reopened** — a real workflow, design pending, §22 |
+| No sales-return workflow | **Implemented** — `bc213eb` and `a8dc4f7`, §8 and §22 |
 | Order-level discount absent from margin | **Resolved** — the discount feature was removed, §20 |
 | Seed exercises one price per product | **Resolved** — §22 |
 | `Product.standardCost` still present | **Resolved** — removed, §22 |
 | No landed-cost model | **Deferred business decision** — §22 |
 
-One of those rows has since been reopened deliberately. Sales returns were
-closed here as an external credit-note process; the business decided on
-5 September 2026 that returned parts physically come back and must be tracked
-as inventory, so the row now carries a design obligation rather than a
-refusal. See §22, which also records what the eventual model has to look like
-and why none of it was built in the same pass. Nothing else in this table is
-backlog.
+One of those rows has since been reopened and then closed by building it. Sales
+returns were closed here as an external credit-note process; the business
+decided on 5 September 2026 that returned parts physically come back and must be
+tracked as inventory, and the workflow was built in `bc213eb` and `a8dc4f7`. See
+§8 for what those commits contain and §22 for the design constraints they were
+held to. Nothing else in this table is backlog.
 
 ### What was fixed
 
@@ -1465,10 +1495,12 @@ Three changes, all in `src/server/stock.ts` and the one caller in
   swallowed *after* the lots had already been incremented, which is precisely
   how the silent shape stayed silent.
 
-**Read this next part before touching the tests.** With returns out of scope
-(below), there is no longer any path that writes a second REVERSAL against one
-order — `cancelOrder` is the only writer and it runs once, on a status that
-becomes terminal. **The defect therefore has no reachable trigger.** The fix is
+**Read this next part before touching the tests.** No path writes a second
+REVERSAL against one order — `cancelOrder` is the only writer and it runs once,
+on a status that becomes terminal. The sales-return workflow does not change
+that: a return writes a `STOCK_IN` under a `SALES_RETURN` reference, which
+`cancelOrder`'s netting never gathers, and an order carrying a return cannot be
+cancelled at all. **The defect therefore has no reachable trigger.** The fix is
 kept because the netting is now correct by construction rather than correct by
 accident, and because the shortfall guard converts a class of silent corruption
 into a loud failure. `tests/stock-lot-reversal.test.ts` constructs the
@@ -1501,23 +1533,25 @@ Nothing is defaulted from `Product.standardCost` here or anywhere else, and
 existing `UNKNOWN` adjustment lots were left alone. Back-filling them would be
 the fabrication this fixes.
 
-### Returns: out of scope
+### Returns: closed here, then built
 
-Closed at the owner's direction (4 September 2026), and closed rather than
-deferred. §8 carries the full statement and the reason. In short: the goods have
-shipped, `COMPLETED → CANCELLED` is refused for that reason, and a real return
-is a document with a receipt and an inspection that this system does not model
-and is not to be given.
+This section closed returns on 4 September 2026 as an external credit-note
+process. The owner reversed that the following day, and the workflow was built
+in `bc213eb` and `a8dc4f7`. §8 is the current account; this note is kept only so
+the reversal is legible from where the original decision was recorded.
 
-Three questions were raised as blocking a return design and are now moot rather
-than open: whether a returned part re-enters sellable stock or needs quarantine,
-whether a return is a credit or a replacement, and whether it reduces the
-order's revenue here or is settled commercially elsewhere. They are recorded
-only so that nobody re-derives them and mistakes them for a backlog.
+Two of the three questions raised as blocking a return design were answered by
+building it: a returned part does **not** re-enter sellable stock — it arrives
+quarantined and waits for an inspection — and the order's revenue is unchanged,
+since `fulfilledQuantity` is never reduced and `returnedQuantity` is a separate
+counter. Whether a return is a credit or a replacement remains **settled
+commercially elsewhere**; this system records the physical event and no money
+moves on it.
 
-**`returnToLots` is not a returns feature.** It serves cancellation, which is a
-different event: the sale did not happen, rather than happened and was undone.
-The name is about the *lots* units go back to, not about a customer return.
+**`returnToLots` is still not the returns feature.** It serves cancellation,
+which is a different event: the sale did not happen, rather than happened and
+was undone. The name is about the *lots* units go back to, not about a customer
+return. The returns workflow creates new lots instead — see §8.
 
 ### Discounts in margin: resolved by removal
 
@@ -1905,17 +1939,20 @@ valuation rather than treated as period expense. The schema currently holds no
 evidence any of them are tracked separately, which is why the question is open
 rather than answered.
 
-**Sales returns — a real inventory workflow, design pending.** §19 closed this
-as an external credit-note process; that is reversed. Physical aviation parts
-come back, and they are inventory when they do. It was deliberately **not**
-built in this pass, because a return is not an order cancellation and giving it
-the cancellation's shape would be the expensive mistake. A cancellation undoes a
+**Sales returns — a real inventory workflow, now built.** §19 closed this as an
+external credit-note process; that was reversed. Physical aviation parts come
+back, and they are inventory when they do. It was deliberately not built in
+*this* pass, because a return is not an order cancellation and giving it the
+cancellation's shape would be the expensive mistake. A cancellation undoes a
 movement that should not have happened; a return is a *new physical event* for
 units that genuinely left and have genuinely come back, possibly damaged,
 possibly uncertified, possibly months later.
 
-The eventual model is already decided in outline, and these are constraints on
-the design rather than suggestions:
+It was built afterwards, in `bc213eb` and `a8dc4f7`; §8 is the account of what
+those commits contain. The constraints below were written before any of it
+existed and were followed, with one deliberate departure noted at the end. They
+are recorded here as the reasoning behind the implementation, not as outstanding
+design work:
 
 - a **new `RETURN` lot**, with `sourceType = ORDER` and `sourceId` the original
   order — never a write back into the lot the units originally left;
@@ -1937,6 +1974,16 @@ Customer return → Quarantine / returned lot → Inspection → Released to sal
   not a resurrection of an old one. If the business ever wants an exception, it
   has to be an explicit rule with its own reasoning — not a default inherited
   from how cancellation happens to work.
+
+**The one departure.** The outline above says the return lot should carry
+`sourceType = ORDER` with the original order as `sourceId`. The implementation
+uses a distinct `SALES_RETURN` reference type instead, because `cancelOrder`
+gathers a document's movements with `referenceType = 'ORDER' AND referenceId =
+orderId` and nets them to decide what to restore. A return carrying that
+reference would be swept into that netting and mis-restore the lots. Separating
+the reference makes the two documents' movements disjoint by construction rather
+than by remembering. The order line is still recorded on the lot — as
+`orderItemId`, which is what carries the provenance the outline was asking for.
 
 ### Migration
 
