@@ -5,14 +5,14 @@
 **Checkpoint HEAD:** `93ce671` — *feat: attach certificates to the batch that arrived, not the part*
 **Status now:** the workstream this file describes was reviewed and committed as
 `884d431` — *feat: support partial order fulfilment*. The working tree is clean;
-current HEAD is `a8dc4f7`, six commits further on.
+current HEAD is `0f60ebe`, eight commits further on.
 
 This file covers **the partial-fulfilment workstream and the decisions taken
 around it**. It is kept as the record of that change rather than as a live
 to-do list — §6 says where each of its next steps ended up. For how the system
 works — the rules, the FIFO costing model, the money definitions, the things
 that will waste your afternoon — read `HANDOVER.md`, which is current as of
-`a8dc4f7`. Nothing here repeats it; §18 there is the full account of this
+`0f60ebe`. Nothing here repeats it; §18 there is the full account of this
 change.
 
 ---
@@ -34,6 +34,8 @@ HEAD; this is a separate change on top of it.
 **Since this checkpoint was written**, all of it and more has been committed:
 
 ```
+0f60ebe  feat: link outstanding order lines to the deliveries meant for them
+0379a56  docs: update handover after sales returns
 a8dc4f7  feat: add sales return lot inspection workflow
 bc213eb  feat: add sales return workflow
 a500fca  refactor: make the adjustment cost API refuse silence too
@@ -234,14 +236,20 @@ UI and are still in the development database:
 
 ## 4. Open items and known gaps
 
-**No link from a purchase to the order waiting on it.** `StockReferenceType` has
-no ORDER↔PURCHASE pair, so "which delivery clears this backlog" is unanswerable
-from the data. The natural next workstream, and additive.
+**The link from a purchase to the order waiting on it is now built** (`0f60ebe`).
+`SupplyLink` joins `OrderItem` ↔ `PurchaseItem` many-to-many with an explicit
+positive quantity, so "which delivery is meant for this backlog" is answerable
+from the data. It is advisory only — no stock, no lot, no cost, no ledger row,
+and receiving a linked delivery still fulfils nothing. `StockReferenceType` was
+deliberately **not** given an ORDER↔PURCHASE value: that enum names the document
+that caused a stock movement, and a link causes none. `HANDOVER.md` §18 is the
+account.
 
 **No outstanding-orders screen.** Outstanding quantity is visible on an order
-and in the orders list; there is no "what do we owe" view across the book. This
-is also why the migration adds **no index** — such a screen would need an
-expression index on the difference, not one on the column.
+and in the orders list, and a link now says what is expected to cover it; there
+is still no "what do we owe" view across the book. This is also why the
+migration adds **no index** — such a screen would need an expression index on
+the difference, not one on the column.
 
 **A business question left open, and it matters.** If goods physically reach the
 customer while this system says nothing shipped, units left from a source it
@@ -326,14 +334,17 @@ table.
    that could change the shape of what has been built, and it decides whether
    outstanding quantities are expected to clear in days or to sit open
    indefinitely. Unaffected by the sales-return work.
-3. **The ORDER↔PURCHASE link**, then an outstanding-orders screen on top of it.
-   Still unbuilt.
+3. ~~**The ORDER↔PURCHASE link.**~~ **Done** — committed as `0f60ebe`; see
+   `HANDOVER.md` §18. The outstanding-orders screen that was to sit on top of it
+   is **not** built and is still a separate step, and it is the one that would
+   need the expression index described in §4.
 4. **Certificate compliance register** — still the most valuable unbuilt report,
-   unchanged in scope by this workstream or by the sales-return work.
+   unchanged in scope by this workstream, by the sales-return work or by the
+   supply links.
 
-Items 3 and 4 are both still open, and this file does not order them against
-each other; `HANDOVER.md` §9 lists them in the other order. Which goes first is
-an owner decision that has not been taken.
+Item 4 and the outstanding-orders screen are both still open, and this file does
+not order them against each other; `HANDOVER.md` §9 lists the register among its
+own priorities. Which goes first is an owner decision that has not been taken.
 
 **Built since this checkpoint, and not on the list above:** the sales-return
 workflow and its quarantine inspection (`bc213eb`, `a8dc4f7`), inserted ahead of

@@ -8,13 +8,13 @@ Written for whoever picks this up next — a new developer, or a new session. It
 covers what exists, the rules the code is built around, and the things that will
 waste your afternoon if nobody tells you.
 
-**Last updated:** 7 September 2026, after building the sales-return workflow and
-its quarantine inspection (`bc213eb`, `a8dc4f7`; §8 and §22), on top of
-separating commercial order completion from physical fulfilment (§18), moving
-airworthiness paperwork from the product to the batch it arrived on (§17), the
-stock movement summary (§13),
-the removal of threshold-based stock classification (§16), the dead-code audit
-and cleanup pass (§15) and the Dashboard rebuild (§12).
+**Last updated:** 8 September 2026, after linking outstanding order lines to the
+deliveries meant for them (`0f60ebe`; §18), on top of the sales-return workflow
+and its quarantine inspection (`bc213eb`, `a8dc4f7`; §8 and §22), separating
+commercial order completion from physical fulfilment (§18), moving airworthiness
+paperwork from the product to the batch it arrived on (§17), the stock movement
+summary (§13), the removal of threshold-based stock classification (§16), the
+dead-code audit and cleanup pass (§15) and the Dashboard rebuild (§12).
 
 ---
 
@@ -31,6 +31,7 @@ and cleanup pass (§15) and the Dashboard rebuild (§12).
 | Purchases | Done | `/purchases`, `/purchases/new`, `/purchases/[id]`, `/purchases/[id]/edit` |
 | Stock movements | Done | `/stock-movements` |
 | Sales returns & quarantine inspection | Done | `/returns`, and the batch table on `/products/[id]` |
+| Supply links (order ↔ purchase) | Done | on `/orders/[id]` and `/purchases/[id]` line rows |
 | Customers | Done | `/customers`, `/customers/[id]` |
 | Suppliers | Done | `/suppliers`, `/suppliers/[id]` |
 | Reports | Tier 1 done, plus stock movement summary | `/reports`, `/reports/[report]` |
@@ -58,11 +59,11 @@ Four older commits precede these: the Clerk work, the domain model, and the
 original scaffold, back to `03536e4`.
 
 **Current branch:** `db/inventory-domain-model`
-**Latest commit:** `a8dc4f7` — *feat: add sales return lot inspection workflow*.
-The commit list above stops at `403f811`; everything from the threshold removal
-(§16) through the sales-return workstream has been committed since, most
-recently `bc213eb` (the return workflow) and `a8dc4f7` (quarantine inspection).
-`git log --oneline` is the authoritative history.
+**Latest commit:** `0f60ebe` — *feat: link outstanding order lines to the
+deliveries meant for them*. The commit list above stops at `403f811`; everything
+from the threshold removal (§16) onward has been committed since, most recently
+`bc213eb` (the return workflow), `a8dc4f7` (quarantine inspection) and `0f60ebe`
+(supply links). `git log --oneline` is the authoritative history.
 
 There is **no git remote** — everything is local. `master` is still back at
 `03536e4`; all real work is on the branch.
@@ -1415,14 +1416,67 @@ stock", "short" or "reorder" — §16 removed threshold language at the owner's
 direction and this did not bring it back. "Outstanding" describes an obligation
 on an order, never a state of a product.
 
-### What is still not modelled
+### Which delivery is meant for which order
 
-**No link from a purchase to the order waiting on it.** `StockReferenceType` has
-no ORDER↔PURCHASE pair, so "which delivery will clear this backlog" is a question
-the data cannot answer. That is the natural next workstream, and it is additive.
+Built in `0f60ebe`, and additive: one new table, `supply_links`, and no change to
+anything above.
+
+The gap it closes follows from the model rather than from an oversight. An
+outstanding unit has, deliberately, no stock movement, no lot and no consumption
+row — nothing has moved — so there is nothing for a reference to point at, and
+the ledger cannot say which purchase will cover it. `SupplyLink` is the only
+place that answer lives. Note what it is *not*: `StockReferenceType` gains no
+value, because that enum names the document that **caused** a stock movement and
+a link causes none.
+
+**`OrderItem` ↔ `PurchaseItem`, many-to-many, with an explicit positive
+quantity.** Line to line because outstanding quantity is a property of a line
+and a delivery covering one line of a three-line order has to be able to say so.
+Many-to-many in both directions because one late line is routinely covered by
+two consecutive deliveries, and one bulk purchase line by several waiting
+orders. The quantity is what makes the row useful — without it, three orders
+pointing at one ten-unit delivery say only that they are all waiting on it, not
+whether it covers them.
+
+**Advisory, and that is the whole design.** A link creates no stock, consumes
+none, costs nothing, reaches no lot and writes no ledger row. **Receiving a
+linked delivery still fulfils nothing** — `receivePurchase` does not read the
+table, and `fulfilOrder` remains the only route from outstanding to shipped.
+That is the same decision recorded above under "No automatic allocation": which
+of several waiting orders gets a short delivery is a commercial judgement, and
+settling it by whoever's page refreshed first would bury that decision in a
+race.
+
+**Linkable only where editable is not.** Orders: CONFIRMED or COMPLETED, which
+is `canFulfilOutstanding` called rather than restated. Purchases: RECEIVED only.
+Both documents replace their lines wholesale while editable — `updateOrder` and
+`updatePurchase` each do a `deleteMany` then a `create` — and the link cascades
+from both sides, so a link on an editable document would be destroyed by any
+edit to it, including one that only changed the customer or the supplier, with
+no error and no trace. Keeping the two sets disjoint closes that by
+construction. It also narrows what a link can say: not "this incoming delivery
+will cover you", but "these arrived units are meant for you".
+
+**Over-allocation is refused in both directions.** The links against one order
+line may not exceed that line's outstanding quantity, and the links against one
+purchase line may not exceed what that line ordered. Both are aggregates, so
+neither can be a row-level CHECK — the table carries only
+`supply_links_quantity_positive` — and both are enforced in
+`src/server/supply-links.ts` under row locks, taken **order first, then
+purchase**, by every writer. That fixed sequence matters: this is the first
+thing in the system to hold both document locks at once.
+
+Cancelling either document removes its links. There is no link status and no
+history: an expectation that no longer applies is deleted, because nothing in
+this table is a financial record.
+
+**No partial purchase receipts.** Receipt stays all-or-nothing; this workstream
+links documents and did not redesign purchasing.
 
 **No outstanding-orders screen.** Outstanding quantity is visible on an order and
-in the orders list, but there is no "what do we owe" view across the book.
+in the orders list, and a link now says what is expected to cover it, but there
+is still no "what do we owe" view across the book. When one is built it will
+need the expression index described above rather than one on the column.
 
 **A business question left open.** If goods physically reach the customer while
 this system says nothing shipped, then units left the building from a source it
