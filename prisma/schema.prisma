@@ -606,6 +606,9 @@ model OrderItem {
   /// The batches created by returns against this line. One per cost layer.
   returnedLots StockLot[] @relation("ReturnedFromOrderItem")
 
+  /// Deliveries expected to cover this line's outstanding units. Advisory.
+  supplyLinks SupplyLink[]
+
   productId String  @map("product_id")
   product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
@@ -676,10 +679,81 @@ model PurchaseItem {
   productId String  @map("product_id")
   product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
+  /// Order lines this delivery is expected to cover. Advisory.
+  supplyLinks SupplyLink[]
+
   @@unique([purchaseId, productId])
   @@index([purchaseId])
   @@index([productId])
   @@map("purchase_items")
+}
+
+// ---------------------------------------------------------------------------
+// Supply expectation
+// ---------------------------------------------------------------------------
+
+/// Which delivery is expected to clear which outstanding order line.
+///
+/// The business sells parts it does not yet hold, so a confirmed order can owe
+/// units nobody has shipped (see `OrderItem.fulfilledQuantity`). Those units
+/// have no stock movement, no lot and no consumption row — deliberately, since
+/// nothing has moved — which means the ledger cannot say which purchase will
+/// cover them. This table is the only place that question has an answer.
+///
+/// **It is an expectation, and nothing else.** It creates no stock, consumes
+/// none, costs nothing, touches no lot and fulfils no order. Receiving a
+/// purchase that carries links still fulfils nothing: which of several waiting
+/// orders gets a short delivery is a commercial decision, and settling it by
+/// whoever's page refreshed first would bury that decision in a race.
+/// `fulfilOrder` remains the only route from outstanding to shipped.
+///
+/// **Line to line, not document to document.** Outstanding quantity is a
+/// property of an `OrderItem`, and a delivery covering one line of a three-line
+/// order has to be able to say so. Many-to-many in both directions: one late
+/// line is routinely covered by two consecutive deliveries, and one bulk
+/// purchase line by several waiting orders.
+///
+/// **The quantity is what makes it useful.** Without it, three orders pointing
+/// at one ten-unit purchase line say only that they are all waiting on it, not
+/// whether it covers them.
+///
+/// Deliberately *not* modelled here: no status column and no history. A link
+/// that no longer applies is deleted — by a cancellation, or by an operator —
+/// and a lifecycle for expectations would be a second document nobody asked
+/// for. Nothing in this table is a financial record.
+model SupplyLink {
+  id String @id @default(cuid())
+
+  /// How many units of the purchase line are earmarked for the order line.
+  ///
+  /// Bounded from both sides, and neither bound can be a row-level check
+  /// because both are aggregates: the links against one order line may not
+  /// exceed that line's outstanding quantity, and the links against one
+  /// purchase line may not exceed what that line ordered. `supply_links.ts`
+  /// enforces both under row locks, which is the same shape `costedQuantity`
+  /// and `returnedQuantity` use for the same reason.
+  ///
+  /// `quantity > 0` *is* a check constraint — that one is row-local.
+  quantity Int
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Cascade on both sides: a link cannot outlive either line it joins, and
+  /// deleting a line it points at leaves nothing for it to mean. This follows
+  /// the schema's ownership rule for line items rather than inventing one.
+  orderItemId String    @map("order_item_id")
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  purchaseItemId String       @map("purchase_item_id")
+  purchaseItem   PurchaseItem @relation(fields: [purchaseItemId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  /// One link per pair. A second row for the same two lines would be a second
+  /// place to record the same expectation; the quantity belongs on one row.
+  @@unique([orderItemId, purchaseItemId])
+  @@index([orderItemId])
+  @@index([purchaseItemId])
+  @@map("supply_links")
 }
 
 // ---------------------------------------------------------------------------

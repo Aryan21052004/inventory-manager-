@@ -7,6 +7,11 @@ import { fakeClerkUser, signInAs } from "./clerk-mock";
  * wrong order fails loudly rather than silently orphaning rows.
  */
 export async function resetDatabase(): Promise<void> {
+  // Supply links first. They cascade from both lines they join, so the deletes
+  // below would take them anyway — but clearing them explicitly keeps this
+  // function's "children first" shape readable rather than relying on a
+  // cascade two tables away.
+  await prisma.supplyLink.deleteMany();
   await prisma.certificate.deleteMany();
   // The valuation layer hangs off the ledger, so it goes first: a consumption
   // points at both a lot and a transaction, and a lot points at a transaction

@@ -44,11 +44,16 @@ import {
   type OrderStatus,
 } from "@/lib/order-status";
 import { coverageNote, marginOf, totalCoverage } from "@/lib/cost-coverage";
+import { SupplyLinkManager } from "@/app/(app)/supply-links/supply-link-manager";
 import {
   getOrderDetail,
   type OrderDetail,
   type OrderDetailLine,
 } from "@/server/orders";
+import {
+  listLinkablePurchaseLines,
+  listSupplyLinksForOrder,
+} from "@/server/supply-links";
 import { cn } from "@/lib/utils";
 
 /**
@@ -103,6 +108,35 @@ export default async function OrderDetailPage({
   if (!result.data) notFound();
 
   const order = result.data;
+
+  /*
+   * What is expected to cover each still-outstanding line, and what else could.
+   *
+   * Read here rather than inside `getOrderDetail` because a supply link is not
+   * part of the order: it is a note about somebody else's document, and folding
+   * it into the order loader would make every reader of that shape carry a
+   * field about a purchase. Only lines that still owe something can be covered,
+   * so the options are fetched for those alone.
+   */
+  const supplyLinks = await listSupplyLinksForOrder(order.id);
+
+  const linkableByLine = new Map<
+    string,
+    Awaited<ReturnType<typeof listLinkablePurchaseLines>>
+  >(
+    await Promise.all(
+      order.lines
+        .filter(
+          (line) =>
+            line.quantity > line.fulfilledQuantity &&
+            canFulfilOutstanding(order.status),
+        )
+        .map(
+          async (line) =>
+            [line.id, await listLinkablePurchaseLines(line.id)] as const,
+        ),
+    ),
+  );
 
   return (
     <div className="flex flex-col gap-6">
@@ -272,12 +306,29 @@ export default async function OrderDetailPage({
                       {formatNumber(line.fulfilledQuantity)}
                       {line.fulfilledQuantity < line.quantity &&
                       canFulfilOutstanding(order.status) ? (
-                        <span className="block text-xs text-muted-foreground">
-                          {formatNumber(
-                            line.quantity - line.fulfilledQuantity,
-                          )}{" "}
-                          outstanding
-                        </span>
+                        <>
+                          <span className="block text-xs text-muted-foreground">
+                            {formatNumber(
+                              line.quantity - line.fulfilledQuantity,
+                            )}{" "}
+                            outstanding
+                          </span>
+                          {/*
+                            Which delivery is expected to clear it. Advisory
+                            only: nothing here ships anything, and the Fulfil
+                            action stays the sole route from outstanding to
+                            shipped.
+                          */}
+                          <SupplyLinkManager
+                            orderItemId={line.id}
+                            productName={line.productName}
+                            outstandingQuantity={
+                              line.quantity - line.fulfilledQuantity
+                            }
+                            links={supplyLinks.get(line.id) ?? []}
+                            options={linkableByLine.get(line.id) ?? []}
+                          />
+                        </>
                       ) : null}
                     </TableCell>
                     <TableCell className="tabular text-right">

@@ -42,6 +42,7 @@ import {
 import { formatCurrency, formatDate, formatDateTime, formatNumber } from "@/lib/format";
 import { isEditable } from "@/lib/purchase-status";
 import { getPurchaseDetail, type PurchaseDetail } from "@/server/purchases";
+import { listSupplyLinksForPurchase } from "@/server/supply-links";
 import { cn } from "@/lib/utils";
 
 /**
@@ -94,6 +95,17 @@ export default async function PurchaseDetailPage({
   if (!result.data) notFound();
 
   const purchase = result.data;
+
+  /*
+   * Which order lines are waiting on each line of this delivery.
+   *
+   * Read-only here, and deliberately. A link is bounded by an order line's
+   * outstanding quantity, so it is created and edited where that quantity
+   * lives — the order page. This side answers the other half of the question,
+   * "what is this delivery for", which is what somebody looking at an incoming
+   * purchase actually wants to know.
+   */
+  const supplyLinks = await listSupplyLinksForPurchase(purchase.id);
 
   return (
     <div className="flex flex-col gap-6">
@@ -216,6 +228,23 @@ export default async function PurchaseDetailPage({
 
                     <TableCell className="tabular text-right font-medium">
                       {formatNumber(line.quantity)}
+                      {/*
+                        Who is waiting for these units. An expectation only —
+                        receiving this delivery fulfils none of these orders,
+                        because which of several waiting customers gets a short
+                        delivery is a commercial decision somebody makes on the
+                        order itself.
+                      */}
+                      {(supplyLinks.get(line.id) ?? []).map((link) => (
+                        <Link
+                          key={link.id}
+                          href={`/orders/${link.orderId}`}
+                          className="mt-1 block text-xs font-normal text-muted-foreground hover:text-primary hover:underline"
+                        >
+                          <span className="font-mono">{link.orderNumber}</span>{" "}
+                          ×{formatNumber(link.quantity)} · {link.customerName}
+                        </Link>
+                      ))}
                     </TableCell>
                     <TableCell className="tabular text-right">
                       {formatCurrency(line.unitCost)}

@@ -40,6 +40,7 @@ import {
   lockProducts,
   returnToLots,
 } from "@/server/stock";
+import { clearSupplyLinksForOrder } from "@/server/supply-links";
 
 /**
  * Everything the orders module does to the database.
@@ -1726,6 +1727,22 @@ export async function cancelOrder(
         data: { costTotal: null, costedQuantity: 0, fulfilledQuantity: 0 },
       });
     }
+
+    /*
+     * A cancelled order is waiting for nothing, so the deliveries somebody
+     * expected to cover it are no longer expected to cover anything.
+     *
+     * Outside the `mayHoldDeductedStock` branch above, deliberately: a draft or
+     * pending order never deducted stock but may well have been linked to an
+     * inbound purchase, and leaving those links behind would show a cancelled
+     * order still queued against a delivery. They are deleted rather than
+     * closed — a supply link is an expectation, not a record of something that
+     * happened, and there is nothing in one worth preserving.
+     *
+     * This changes no status, no quantity and no stock. It is the only thing
+     * cancellation does to the link table.
+     */
+    await clearSupplyLinksForOrder(tx, orderId);
 
     const updated = await tx.order.update({
       where: { id: orderId },

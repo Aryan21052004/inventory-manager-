@@ -29,6 +29,7 @@ import {
   drainPurchaseLots,
   lockProducts,
 } from "@/server/stock";
+import { clearSupplyLinksForPurchase } from "@/server/supply-links";
 
 /**
  * Everything the purchases module does to the database.
@@ -1269,6 +1270,21 @@ export async function cancelPurchase(
         });
       }
     }
+
+    /*
+     * A cancelled purchase is delivering nothing, so any order line waiting on
+     * it is waiting on something that will never arrive. Leaving the links
+     * would show an order queued against a delivery that has been called off,
+     * which is worse than showing it uncovered.
+     *
+     * Outside the `holdsAddedStock` branch above for the same reason the order
+     * side is: a pending purchase never added stock but is exactly the kind
+     * somebody links against, since it is the delivery in transit.
+     *
+     * Deleted, not closed — see `clearSupplyLinksForPurchase`. No status, no
+     * quantity and no stock changes here.
+     */
+    await clearSupplyLinksForPurchase(tx, purchaseId);
 
     const updated = await tx.purchase.update({
       where: { id: purchaseId },
