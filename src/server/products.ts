@@ -1,7 +1,11 @@
 import "server-only";
 
 import type { Prisma } from "@/generated/prisma/client";
-import type { LotCostSource, ProductStatus } from "@/generated/prisma/enums";
+import type {
+  LotCostSource,
+  LotStatus,
+  ProductStatus,
+} from "@/generated/prisma/enums";
 import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/errors";
 import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
 import { prisma } from "@/lib/prisma";
@@ -163,6 +167,24 @@ export interface ProductLot {
   certificate: CertificateView | null;
   /** Derived from that certificate's expiry date; never stored. */
   certificateStatus: CertificateStatus;
+
+  /**
+   * Whether this batch may be sold.
+   *
+   * Physical stock counts every status; only SALEABLE batches are reachable by
+   * FIFO. Per batch because a product routinely holds several at once in
+   * different states, and a product-level figure would have to lie about one.
+   */
+  status: LotStatus;
+  /** When an inspection released or condemned it, and what was found. */
+  statusChangedAt: Date | null;
+  statusNote: string | null;
+  /**
+   * True when a customer sent this batch back — the only kind an inspection
+   * may act on. Read from `sourceType`, not from the cost source: a return of
+   * an uncosted shipment is an UNKNOWN-cost batch and is still a return.
+   */
+  isReturn: boolean;
 }
 
 export interface ProductDetail {
@@ -519,6 +541,9 @@ export async function getProductDetail(
             receivedAt: true,
             sourceType: true,
             sourceId: true,
+            status: true,
+            statusChangedAt: true,
+            statusNote: true,
           },
         }),
       ]);
@@ -625,6 +650,10 @@ export async function getProductDetail(
             id: lot.id,
             unitCost: lot.unitCost?.toString() ?? null,
             costSource: lot.costSource,
+            status: lot.status,
+            statusChangedAt: lot.statusChangedAt,
+            statusNote: lot.statusNote,
+            isReturn: lot.sourceType === "SALES_RETURN",
             quantityReceived: lot.quantityReceived,
             quantityRemaining: lot.quantityRemaining,
             receivedAt: lot.receivedAt,

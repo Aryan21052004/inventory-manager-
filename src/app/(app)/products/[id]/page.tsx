@@ -42,6 +42,12 @@ import {
   formatDelta,
   formatNumber,
 } from "@/lib/format";
+import {
+  LOT_STATUS_LABELS,
+  QUARANTINED_LOT_STATUS,
+  SALEABLE_LOT_STATUS,
+} from "@/lib/lot-status";
+import { LotActions } from "@/app/(app)/lots/lot-actions";
 import { getCurrentUser } from "@/server/auth";
 import {
   getProductDetail,
@@ -321,6 +327,10 @@ export default async function ProductDetailPage({
                     <TableHead className="text-right">Unit cost</TableHead>
                     <TableHead className="text-right">Remaining</TableHead>
                     <TableHead className="text-right">Value</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="w-px text-right">
+                      <span className="sr-only">Batch actions</span>
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -339,11 +349,22 @@ export default async function ProductDetailPage({
                           </Link>
                         ) : (
                           <Badge variant="outline">
-                            {lot.costSource === "OPENING"
-                              ? "Opening stock"
-                              : lot.costSource === "ADJUSTMENT"
-                                ? "Adjustment"
-                                : "Pre-costing stock"}
+                            {/*
+                              A returned batch is tested first, and by
+                              provenance rather than by cost source: a return of
+                              an uncosted shipment is an UNKNOWN-cost lot, and
+                              the chain below would otherwise label it
+                              "Pre-costing stock" — the description of stock
+                              that predates the system, which is the opposite of
+                              what a customer just sent back.
+                            */}
+                            {lot.isReturn
+                              ? "Customer return"
+                              : lot.costSource === "OPENING"
+                                ? "Opening stock"
+                                : lot.costSource === "ADJUSTMENT"
+                                  ? "Adjustment"
+                                  : "Pre-costing stock"}
                           </Badge>
                         )}
                       </TableCell>
@@ -368,6 +389,48 @@ export default async function ProductDetailPage({
                             Number(lot.unitCost) * lot.quantityRemaining,
                           )
                         )}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            lot.status === SALEABLE_LOT_STATUS
+                              ? "muted"
+                              : lot.status === QUARANTINED_LOT_STATUS
+                                ? "outline"
+                                : "destructive"
+                          }
+                        >
+                          {LOT_STATUS_LABELS[lot.status]}
+                        </Badge>
+                        {lot.statusNote ? (
+                          <p className="mt-1 max-w-[22rem] text-xs text-muted-foreground">
+                            {lot.statusNote}
+                          </p>
+                        ) : null}
+                      </TableCell>
+                      {/*
+                        Everything else in this table stays visible to staff —
+                        the batch, its quantity, its cost, its provenance and
+                        its status are all ordinary warehouse information. Only
+                        the decisions are admin's, so only the buttons are
+                        gated. This is presentation: `releaseLot`, `rejectLot`
+                        and `writeOffLot` each re-check the role on the server,
+                        because a hidden button stops nobody who can call a
+                        server action directly.
+                      */}
+                      <TableCell className="text-right">
+                        {canManage ? (
+                          <LotActions
+                            lot={{
+                              lotId: lot.id,
+                              productName: product.name,
+                              status: lot.status,
+                              quantityRemaining: lot.quantityRemaining,
+                              unitCost: lot.unitCost,
+                              isReturn: lot.isReturn,
+                            }}
+                          />
+                        ) : null}
                       </TableCell>
                     </TableRow>
                   ))}

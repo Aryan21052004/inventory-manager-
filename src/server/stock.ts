@@ -1055,3 +1055,95 @@ export async function drainPurchaseLots(
     });
   }
 }
+
+/**
+ * Takes a stated number of units out of one named batch.
+ *
+ * The counterpart to `allocateFifo`, and deliberately not a variant of it.
+ * FIFO answers "which batches should this draw come from" — a question with a
+ * policy behind it. This answers nothing: the caller has already decided which
+ * batch, and the only correct behaviour is to take the units from that one and
+ * no other.
+ *
+ * That distinction is the whole reason this exists. A rejected batch is
+ * invisible to FIFO by design, so a generic decrease against a product holding
+ * one would consume *saleable* stock instead — destroying good units' cost
+ * basis while the condemned ones stayed on the books, with every invariant
+ * still reconciling and nothing to show anything had gone wrong.
+ *
+ * The shape is `drainPurchaseLots`': decrement the batch, write a positive
+ * consumption row against the movement that explains it, and never delete
+ * anything. The row freezes the rate at disposal, so what the destroyed units
+ * cost survives even after the batch reaches zero and drops out of valuation.
+ *
+ * **This function does not decide whether the draw is allowed.** It does not
+ * look at status, cost source or authorisation — callers establish all of that
+ * first, under the product lock. Keeping the eligibility rules out of here is
+ * what stops it becoming a way to take units out of any batch at all.
+ *
+ * The product row must already be locked by the caller, and the ledger row must
+ * already be written: this updates the valuation layer to match a movement that
+ * has happened, never the other way round.
+ */
+export async function drainLot(
+  tx: Prisma.TransactionClient,
+  params: {
+    /** The batch to take units from. Never resolved by a policy. */
+    lotId: string;
+    /** The movement these units left on. */
+    stockTransactionId: string;
+    quantity: number;
+  },
+): Promise<{ unitCostCents: number | null }> {
+  if (params.quantity <= 0) {
+    throw new AppError(
+      "INTERNAL",
+      "A lot drain must remove at least one unit.",
+    );
+  }
+
+  const lot = await tx.stockLot.findUnique({
+    where: { id: params.lotId },
+    select: { id: true, quantityRemaining: true, unitCost: true },
+  });
+
+  if (!lot) throw new NotFoundError("Stock lot");
+
+  /*
+   * Re-checked here as well as by the caller. `quantity_remaining >= 0` is a
+   * check constraint, so an over-draw would be refused by the database anyway —
+   * but it would arrive as a constraint violation rather than as a sentence
+   * naming the batch, and the two readers of that failure are an operator and
+   * a future maintainer.
+   */
+  if (params.quantity > lot.quantityRemaining) {
+    throw new AppError(
+      "CONFLICT",
+      `This batch has ${lot.quantityRemaining} ${lot.quantityRemaining === 1 ? "unit" : "units"} left, so ${params.quantity} cannot be taken from it.`,
+    );
+  }
+
+  const unitCostCents =
+    lot.unitCost === null ? null : Math.round(Number(lot.unitCost) * 100);
+
+  await tx.stockLot.update({
+    where: { id: lot.id },
+    data: { quantityRemaining: { decrement: params.quantity } },
+  });
+
+  await tx.stockLotConsumption.create({
+    data: {
+      lotId: lot.id,
+      stockTransactionId: params.stockTransactionId,
+      // Positive: units leaving the batch, exactly as a sale records them.
+      quantity: params.quantity,
+      unitCost: unitCostCents === null ? null : centsToDecimal(unitCostCents),
+      totalCost:
+        unitCostCents === null
+          ? null
+          : centsToDecimal(unitCostCents * params.quantity),
+    },
+  });
+
+  return { unitCostCents };
+}
