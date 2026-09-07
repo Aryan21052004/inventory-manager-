@@ -58,6 +58,7 @@ function params(overrides: Partial<ReportParams> = {}): ReportParams {
         defaultGrouping: "period",
         sortKeys: ["value", "units", "orders", "purchases", "label", "revenue"],
         defaultSort: "value",
+        defaultDirection: "desc",
       },
     ),
     ...overrides,

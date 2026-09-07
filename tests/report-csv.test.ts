@@ -55,6 +55,7 @@ function params(overrides: Partial<ReportParams> = {}): ReportParams {
         defaultGrouping: "period",
         sortKeys: ["value", "units", "orders", "purchases", "label"],
         defaultSort: "value",
+        defaultDirection: "desc",
       },
     ),
     ...overrides,
@@ -125,6 +126,84 @@ describe("escaping", () => {
 // ---------------------------------------------------------------------------
 // The route
 // ---------------------------------------------------------------------------
+
+describe("the certificate register export", () => {
+  /**
+   * The register is the report most likely to be forwarded outside the
+   * application — it is what somebody sends an auditor — so the export has to
+   * carry its caveats rather than leave them on the screen it came from.
+   */
+  it("matches the register's rows and order, and states its caveats", async () => {
+    await signInWithRole("STAFF");
+
+    const covered = await seedProduct({ sku: "X-COVERED", stockQuantity: 2 });
+    await seedProduct({ sku: "X-BARE", stockQuantity: 1 });
+
+    const lot = await prisma.stockLot.findFirstOrThrow({
+      where: { productId: covered.id },
+    });
+
+    await prisma.certificate.create({
+      data: {
+        certificateType: "Certificate of Conformity",
+        certificateNumber: "CSV-1",
+        issueDate: new Date("2026-01-01T00:00:00.000Z"),
+        // No expiry — the case the file must not render as a blank.
+        expiryDate: null,
+        fileName: "coc.pdf",
+        storageKey: "k-csv-1",
+        contentType: "application/pdf",
+        fileSize: 512,
+        productId: covered.id,
+        stockLotId: lot.id,
+      },
+    });
+
+    const response = await GET(
+      request("certificates", "range=all&sort=sku&dir=asc"),
+      routeParams("certificates"),
+    );
+    expect(response.status).toBe(200);
+
+    const csv = await response.text();
+    const rows = bodyRows(csv);
+
+    // Two batches and a totals row, in the screen's order.
+    expect(rows).toHaveLength(3);
+    expect(rows[0]!.startsWith("X-BARE,")).toBe(true);
+    expect(rows[1]!.startsWith("X-COVERED,")).toBe(true);
+    expect(rows[2]!.startsWith("TOTAL,")).toBe(true);
+
+    // A batch with nothing filed still exports, and says so.
+    expect(rows[0]).toContain("No certificate");
+    expect(rows[0]!.endsWith(",No")).toBe(true);
+
+    // A document with no expiry is stated, not blanked.
+    expect(rows[1]).toContain("No expiry");
+    expect(rows[1]).toContain("Valid");
+    expect(rows[1]!.endsWith(",Yes")).toBe(true);
+
+    // The caveats travel with the spreadsheet.
+    expect(csv).toContain("One row per batch, not per product");
+    expect(csv).toContain("Supplier is lot provenance");
+    expect(csv).toContain("Batch status is not compliance");
+  });
+
+  it("records the filters it was run under", async () => {
+    await signInWithRole("STAFF");
+    await seedProduct({ sku: "X-FILTER", stockQuantity: 1 });
+
+    const response = await GET(
+      request("certificates", "range=all&cstatus=MISSING&emptied=1&lstatus=SALEABLE"),
+      routeParams("certificates"),
+    );
+
+    const csv = await response.text();
+    expect(csv).toContain("Compliance: No certificate");
+    expect(csv).toContain("Batch status: SALEABLE");
+    expect(csv).toContain("Includes emptied batches");
+  });
+});
 
 describe("the CSV route", () => {
   it("refuses an unauthenticated request", async () => {

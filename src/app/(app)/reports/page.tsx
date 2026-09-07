@@ -4,6 +4,7 @@ import {
   ArrowLeftRight,
   BarChart3,
   Boxes,
+  ShieldCheck,
   ShoppingCart,
   Truck,
 } from "lucide-react";
@@ -33,6 +34,7 @@ const REPORTS = [
   { key: "sales", icon: ShoppingCart, href: "/reports/sales" },
   { key: "purchases", icon: Truck, href: "/reports/purchases" },
   { key: "movements", icon: ArrowLeftRight, href: "/reports/movements" },
+  { key: "certificates", icon: ShieldCheck, href: "/reports/certificates" },
 ] as const;
 
 export default function ReportsPage() {
@@ -40,7 +42,7 @@ export default function ReportsPage() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Reports"
-        description="Stock valuation, sales, procurement and stock movement, over any period, exportable as CSV."
+        description="Stock valuation, sales, procurement, stock movement and certificate compliance, exportable as CSV."
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

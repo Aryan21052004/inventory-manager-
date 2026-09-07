@@ -30,8 +30,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { CertificateStatusBadge } from "@/components/ui/certificate-status-badge";
+import { EXPIRING_SOON_DAYS } from "@/lib/certificate-status";
 import type { RawSearchParams } from "@/lib/date-range";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
+import { LOT_STATUS_LABELS } from "@/lib/lot-status";
+import type { LotStatus } from "@/generated/prisma/enums";
 import {
   describeRange,
   isReportKey,
@@ -46,10 +50,14 @@ import {
   toReportSearchParams,
   type ReportKey,
   type ReportParams,
+  type ReportDefaults,
 } from "@/lib/report-query";
 import { cn } from "@/lib/utils";
+import { loadCertificateTypes } from "@/server/certificates";
 import { loadCategories } from "@/server/products";
+import type { CertificateRegisterRow } from "@/server/reports";
 import {
+  loadCertificateRegisterReport,
   loadMovementSummaryReport,
   loadPurchaseSpendReport,
   loadSalesReport,
@@ -93,12 +101,24 @@ export default async function ReportPage({
 
   const config = REPORT_CONFIG[report];
   const reportParams = reportParamsFor(report, await searchParams);
-  const defaults = {
+  const defaults: Defaults = {
     grouping: config.defaultGrouping,
     sort: config.defaultSort,
+    direction: config.defaultDirection,
+    productStatus:
+      "defaultProductStatus" in config ? config.defaultProductStatus : null,
   };
 
-  const categories = await loadCategories();
+  /*
+   * Certificate types only for the report that filters by them. They are an
+   * open string set read from the data, so the list is whatever has actually
+   * been filed — and loading it for the other four reports would be a query
+   * nobody's screen uses.
+   */
+  const [categories, certificateTypes] = await Promise.all([
+    loadCategories(),
+    report === "certificates" ? loadCertificateTypes() : Promise.resolve([]),
+  ]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -136,6 +156,9 @@ export default async function ReportPage({
             categories={categories}
             /* Only the movement summary filters by ledger type. */
             movementTypes={report === "movements"}
+            /* And only the compliance register filters by paperwork. */
+            certificates={report === "certificates"}
+            certificateTypes={certificateTypes}
           />
 
           <Suspense
@@ -148,6 +171,11 @@ export default async function ReportPage({
               <SalesBody params={reportParams} defaults={defaults} />
             ) : report === "purchases" ? (
               <PurchaseBody params={reportParams} defaults={defaults} />
+            ) : report === "certificates" ? (
+              <CertificateRegisterBody
+                params={reportParams}
+                defaults={defaults}
+              />
             ) : (
               <MovementBody params={reportParams} defaults={defaults} />
             )}
@@ -158,7 +186,7 @@ export default async function ReportPage({
   );
 }
 
-type Defaults = { grouping: string; sort: string };
+type Defaults = ReportDefaults;
 
 // ---------------------------------------------------------------------------
 // R1 · Stock valuation
@@ -931,5 +959,302 @@ function SortHead({
         />
       </Link>
     </TableHead>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// R5 · Certificate compliance register
+// ---------------------------------------------------------------------------
+
+/**
+ * How each provenance reads on screen.
+ *
+ * The enum is `StockReferenceType`, whose values name the document that brought
+ * the batch in. `MANUAL` is the honest label for stock that arrived without
+ * one — an opening balance or a count correction — and is not dressed up as
+ * anything more specific.
+ */
+const PROVENANCE_LABELS: Record<string, string> = {
+  PURCHASE: "Purchase",
+  SALES_RETURN: "Customer return",
+  MANUAL: "Manual",
+  ORDER: "Order",
+  STOCK_TRANSACTION: "Adjustment",
+};
+
+async function CertificateRegisterBody({
+  params,
+  defaults,
+}: {
+  params: ReportParams;
+  defaults: Defaults;
+}) {
+  const result = await loadCertificateRegisterReport(params);
+
+  if (!result.ok) {
+    return (
+      <ErrorState
+        title="This report could not be loaded"
+        message={result.error.message}
+      />
+    );
+  }
+
+  const { rows, totals, total, page, pageCount, pageSize } = result.data;
+
+  if (rows.length === 0) {
+    return (
+      <EmptyState
+        icon={SearchX}
+        title="No batches to report"
+        description="Nothing matches the current filters. Emptied batches are excluded unless you ask for them."
+      />
+    );
+  }
+
+  return (
+    <>
+      <div className="grid gap-4 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Expired"
+          value={formatNumber(totals.expired)}
+          hint="Batches held under a certificate that has run out"
+          icon={ChevronsUpDown}
+          tone={totals.expired > 0 ? "warning" : "default"}
+        />
+        <StatCard
+          label="Expiring soon"
+          value={formatNumber(totals.expiringSoon)}
+          hint={`Within ${EXPIRING_SOON_DAYS} days`}
+          icon={ChevronsUpDown}
+          tone={totals.expiringSoon > 0 ? "warning" : "default"}
+        />
+        <StatCard
+          label="No certificate"
+          value={formatNumber(totals.missing)}
+          hint="Batches with nothing currently filed"
+          icon={ChevronsUpDown}
+          tone={totals.missing > 0 ? "warning" : "default"}
+        />
+        <StatCard
+          label="Batches covered"
+          value={formatNumber(totals.valid)}
+          hint={`of ${formatNumber(totals.batches)} batches, ${formatNumber(totals.units)} units`}
+          icon={ChevronsUpDown}
+          tone="success"
+        />
+      </div>
+
+      <BasisNote>
+        One row per <span className="font-medium text-foreground">batch</span>,
+        not per product: a part held in two batches, one released under a valid
+        form and one with nothing filed, is one problem and one clean batch.
+        Only the certificate currently in force is shown — superseded documents
+        remain on the product as history. A certificate with{" "}
+        <span className="font-medium text-foreground">no expiry date</span> is
+        valid; a Certificate of Conformity typically never expires.{" "}
+        <span className="font-medium text-foreground">Supplier</span> is lot
+        provenance — where the batch was acquired — and is not a statement about
+        who issued the certificate. Batches drawn to zero are excluded unless
+        included explicitly.
+      </BasisNote>
+
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <SortHead
+              report="certificates"
+              params={params}
+              defaults={defaults}
+              column="sku"
+            >
+              SKU
+            </SortHead>
+            <SortHead
+              report="certificates"
+              params={params}
+              defaults={defaults}
+              column="name"
+            >
+              Product
+            </SortHead>
+            <SortHead
+              report="certificates"
+              params={params}
+              defaults={defaults}
+              column="received"
+              className="hidden lg:table-cell"
+            >
+              Batch received
+            </SortHead>
+            <SortHead
+              report="certificates"
+              params={params}
+              defaults={defaults}
+              column="units"
+              className="text-right"
+              align="right"
+            >
+              Units
+            </SortHead>
+            <TableHead className="hidden md:table-cell">Batch</TableHead>
+            <SortHead
+              report="certificates"
+              params={params}
+              defaults={defaults}
+              column="supplier"
+              className="hidden xl:table-cell"
+            >
+              Supplier (lot provenance)
+            </SortHead>
+            <TableHead className="hidden lg:table-cell">Certificate</TableHead>
+            <SortHead
+              report="certificates"
+              params={params}
+              defaults={defaults}
+              column="expiry"
+              className="hidden sm:table-cell"
+            >
+              Expires
+            </SortHead>
+            <SortHead
+              report="certificates"
+              params={params}
+              defaults={defaults}
+              column="status"
+            >
+              Compliance
+            </SortHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row: CertificateRegisterRow) => (
+            <TableRow key={row.lotId}>
+              <TableCell className="font-mono text-xs">
+                <Link
+                  href={`/products/${row.productId}`}
+                  className="hover:text-primary hover:underline"
+                >
+                  {row.sku}
+                </Link>
+              </TableCell>
+
+              <TableCell className="max-w-[14rem]">
+                <span className="block truncate font-medium">
+                  {row.productName}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {row.category ?? "Uncategorised"}
+                  {row.productStatus === "ACTIVE"
+                    ? ""
+                    : ` · ${row.productStatus.toLowerCase()}`}
+                </span>
+              </TableCell>
+
+              <TableCell className="hidden whitespace-nowrap text-sm text-muted-foreground lg:table-cell">
+                {formatDate(row.receivedAt)}
+              </TableCell>
+
+              <TableCell className="tabular text-right">
+                {formatNumber(row.quantityRemaining)}
+              </TableCell>
+
+              {/*
+                Where the batch came from and whether it may be sold. Lot status
+                is deliberately its own column: a quarantined batch can hold a
+                perfectly valid certificate, and collapsing the two would answer
+                a question nobody asked.
+              */}
+              <TableCell className="hidden md:table-cell">
+                <div className="flex flex-col gap-1">
+                  <Badge variant="outline">
+                    {LOT_STATUS_LABELS[row.lotStatus as LotStatus]}
+                  </Badge>
+                  <span className="text-xs text-muted-foreground">
+                    {row.purchaseId && row.purchaseNumber ? (
+                      <Link
+                        href={`/purchases/${row.purchaseId}`}
+                        className="font-mono hover:text-primary hover:underline"
+                      >
+                        {row.purchaseNumber}
+                      </Link>
+                    ) : (
+                      (PROVENANCE_LABELS[row.provenance] ?? row.provenance)
+                    )}
+                  </span>
+                </div>
+              </TableCell>
+
+              <TableCell className="hidden text-sm xl:table-cell">
+                {row.supplierName ?? (
+                  <span className="text-muted-foreground">—</span>
+                )}
+              </TableCell>
+
+              <TableCell className="hidden text-sm lg:table-cell">
+                {row.certificateType ? (
+                  <>
+                    <span className="block">{row.certificateType}</span>
+                    <span className="font-mono text-xs text-muted-foreground">
+                      {row.certificateNumber}
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-muted-foreground">—</span>
+                )}
+              </TableCell>
+
+              {/*
+                "No expiry" rather than a dash. A blank would read as missing
+                information; the absence of an expiry date is a fact about the
+                document, and a complete answer.
+              */}
+              <TableCell className="hidden whitespace-nowrap text-sm sm:table-cell">
+                {row.certificateId === null ? (
+                  <span className="text-muted-foreground">—</span>
+                ) : row.expiryDate === null ? (
+                  <span className="text-muted-foreground">No expiry</span>
+                ) : (
+                  <>
+                    {formatDate(row.expiryDate)}
+                    {row.daysToExpiry !== null ? (
+                      <span className="block text-xs text-muted-foreground">
+                        {row.daysToExpiry < 0
+                          ? `${formatNumber(Math.abs(row.daysToExpiry))}d ago`
+                          : `in ${formatNumber(row.daysToExpiry)}d`}
+                      </span>
+                    ) : null}
+                  </>
+                )}
+              </TableCell>
+
+              <TableCell>
+                <div className="flex flex-col items-start gap-1">
+                  <CertificateStatusBadge status={row.status} />
+                  {row.fileUrl ? (
+                    <a
+                      href={row.fileUrl}
+                      className="text-xs text-muted-foreground hover:text-primary hover:underline"
+                    >
+                      View document
+                    </a>
+                  ) : null}
+                </div>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+
+      <Pagination
+        page={page}
+        pageCount={pageCount}
+        total={total}
+        pageSize={pageSize}
+        hrefFor={(next) =>
+          reportHref("certificates", { ...params, page: next }, defaults)
+        }
+      />
+    </>
   );
 }

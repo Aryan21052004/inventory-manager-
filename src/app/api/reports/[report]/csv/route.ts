@@ -11,11 +11,13 @@ import {
   type ReportParams,
 } from "@/lib/report-query";
 import {
+  loadCertificateRegisterReport,
   loadMovementSummaryReport,
   loadPurchaseSpendReport,
   loadSalesReport,
   loadValuationReport,
 } from "@/server/reports";
+import { certificateStatusLabel } from "@/lib/certificate-status";
 
 /**
  * CSV export for the reports.
@@ -79,6 +81,15 @@ function preamble(report: ReportKey, params: ReportParams): string[] {
   if (params.movementType) {
     lines.push(`Movement type: ${params.movementType}`);
   }
+  if (params.certificateStatus) {
+    lines.push(`Compliance: ${certificateStatusLabel(params.certificateStatus)}`);
+  }
+  if (params.certificateType) {
+    lines.push(`Certificate type: ${params.certificateType}`);
+  }
+  if (params.lotStatus) lines.push(`Batch status: ${params.lotStatus}`);
+  if (params.productStatus) lines.push(`Product status: ${params.productStatus}`);
+  if (params.includeEmptied) lines.push("Includes emptied batches");
 
   return lines;
 }
@@ -207,6 +218,97 @@ async function render(
         ...preamble(report, params),
         "Value at cost covers only units with a recorded acquisition cost. Uncosted units are excluded from it, never valued at zero.",
         "Value at retail is quantity x selling price — a different basis, not a second estimate of cost.",
+        ...truncated(rows.length),
+      ],
+    );
+  }
+
+  if (report === "certificates") {
+    const result = await loadCertificateRegisterReport(params);
+    if (!result.ok) rethrow(result.error);
+
+    const { rows, totals } = result.data;
+
+    /*
+     * The columns the screen shows, in the screen's order, and nothing the
+     * screen does not have. The file link is deliberately not exported as a
+     * URL: certificates are served through an authenticated route, and a
+     * spreadsheet that travels outside the application would carry a link
+     * nobody can open and imply the document is fetchable. Yes/No answers the
+     * only question the export can honestly answer — is a document on file.
+     */
+    return toCsv(
+      [
+        "SKU",
+        "Product",
+        "Category",
+        "Product status",
+        "Batch received",
+        "Units remaining",
+        "Batch status",
+        "Provenance",
+        "Purchase",
+        "Supplier (lot provenance)",
+        "Certificate type",
+        "Certificate number",
+        "Issue date",
+        "Expiry date",
+        "Days to expiry",
+        "Compliance",
+        "Document on file",
+      ],
+      [
+        ...rows.map((row) => [
+          row.sku,
+          row.productName,
+          row.category,
+          row.productStatus,
+          row.receivedAt.toISOString().slice(0, 10),
+          row.quantityRemaining,
+          row.lotStatus,
+          row.provenance,
+          row.purchaseNumber,
+          row.supplierName,
+          row.certificateType,
+          row.certificateNumber,
+          row.issueDate === null ? null : row.issueDate.toISOString().slice(0, 10),
+          // "No expiry" rather than blank: a document that does not expire is a
+          // fact, and an empty cell would read as information nobody recorded.
+          row.certificateId === null
+            ? null
+            : row.expiryDate === null
+              ? "No expiry"
+              : row.expiryDate.toISOString().slice(0, 10),
+          row.daysToExpiry,
+          certificateStatusLabel(row.status),
+          row.certificateId === null ? "No" : "Yes",
+        ]),
+        [
+          "TOTAL",
+          `${totals.batches} batches`,
+          "",
+          "",
+          "",
+          totals.units,
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          `${totals.valid} valid, ${totals.expiringSoon} expiring, ${totals.expired} expired, ${totals.missing} missing`,
+          "",
+        ],
+      ],
+      [
+        ...preamble(report, params),
+        "One row per batch, not per product. Only the certificate currently in force is shown; superseded documents remain on the product as history.",
+        "A certificate with no expiry date is valid — a Certificate of Conformity typically never expires.",
+        "Supplier is lot provenance, not a statement about who issued the certificate. Batches not acquired by purchase have none.",
+        "Batch status is not compliance: a quarantined or rejected batch can hold a valid certificate.",
         ...truncated(rows.length),
       ],
     );

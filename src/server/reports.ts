@@ -10,7 +10,13 @@ import {
 } from "@/lib/money-basis";
 import { prisma } from "@/lib/prisma";
 import type { ReportParams } from "@/lib/report-query";
+import {
+  certificateStatus,
+  EXPIRING_SOON_DAYS,
+  type CertificateStatus,
+} from "@/lib/certificate-status";
 import { requireUser } from "@/server/auth";
+import { certificateFileUrl } from "@/server/certificates";
 
 /**
  * The reporting queries.
@@ -979,6 +985,401 @@ export async function loadMovementSummaryReport(
     return {
       ok: false,
       error: toSafeError(error, "loadMovementSummaryReport"),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// R5 · Certificate compliance register
+// ---------------------------------------------------------------------------
+
+/**
+ * One held batch and the paperwork covering it.
+ *
+ * Lot grain, not product grain, and that is the whole point of the report. A
+ * part with two batches — one released under a valid form and one with nothing
+ * filed — is one problem and one clean batch, not one product's worth of doubt
+ * over both. Certificates have lived on lots since §17; this is the register
+ * that makes that visible.
+ */
+export interface CertificateRegisterRow {
+  lotId: string;
+  productId: string;
+  sku: string;
+  productName: string;
+  category: string | null;
+  productStatus: string;
+  receivedAt: Date;
+  quantityRemaining: number;
+  lotStatus: string;
+  /** How the batch arrived: PURCHASE, OPENING, ADJUSTMENT, SALES_RETURN, MANUAL. */
+  provenance: string;
+  /** Purchase lots only. Null for every other provenance. */
+  purchaseId: string | null;
+  purchaseNumber: string | null;
+  /**
+   * **Supplier (lot provenance)** — the label any UI must use, per §17.
+   *
+   * An acquisition fact read from the purchase behind the batch, never an
+   * attestation: it does not say the supplier issued the certificate, and lots
+   * with no purchase behind them have no supplier at all.
+   */
+  supplierName: string | null;
+  certificateId: string | null;
+  certificateType: string | null;
+  certificateNumber: string | null;
+  issueDate: Date | null;
+  /** Null means it does not expire. That is a complete answer, not a gap. */
+  expiryDate: Date | null;
+  /** Negative once expired; null when there is no certificate or no expiry. */
+  daysToExpiry: number | null;
+  status: CertificateStatus;
+  /** The authenticated download route, or null when nothing is filed. */
+  fileUrl: string | null;
+  fileName: string | null;
+}
+
+export interface CertificateRegisterTotals {
+  batches: number;
+  units: number;
+  valid: number;
+  expiringSoon: number;
+  expired: number;
+  missing: number;
+}
+
+interface CertificateRegisterSqlRow {
+  lot_id: string;
+  product_id: string;
+  sku: string;
+  product_name: string;
+  category: string | null;
+  product_status: string;
+  received_at: Date;
+  quantity_remaining: number;
+  lot_status: string;
+  provenance: string;
+  purchase_id: string | null;
+  purchase_number: string | null;
+  supplier_name: string | null;
+  certificate_id: string | null;
+  certificate_type: string | null;
+  certificate_number: string | null;
+  issue_date: Date | null;
+  expiry_date: Date | null;
+  file_name: string | null;
+}
+
+/**
+ * `status` sorts by expiry as well, deliberately.
+ *
+ * The four states are derived from a date, so ordering by that date already
+ * groups them — expired, then expiring, then dated-and-fine, with undated rows
+ * (no expiry, and no certificate at all) last through the NULLS LAST every
+ * `orderBy` in this module appends. A separate CASE ordering would be a second
+ * expression of the same rule.
+ */
+const CERTIFICATE_REGISTER_SORTS: Record<string, string> = {
+  expiry: "c.expiry_date",
+  sku: "p.sku",
+  name: "p.name",
+  units: "l.quantity_remaining",
+  received: "l.received_at",
+  status: "c.expiry_date",
+  supplier: "s.name",
+};
+
+/** Whole days between two calendar days, UTC — the reduction the status rule uses. */
+function daysBetweenUtc(from: Date, to: Date): number {
+  const a = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
+  const b = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
+  return Math.round((b - a) / 86_400_000);
+}
+
+/**
+ * The compliance register.
+ *
+ * **Current state, with no date range.** Like the valuation report and for the
+ * same reason: it answers "what is on the shelf now and is its paperwork good",
+ * not "what was covered in March". An as-of compliance question would need the
+ * pre-costing boundary handling §13 defers, so there is deliberately no date
+ * control implying one.
+ *
+ * **The join is the load-bearing part.** `LEFT JOIN`, so a batch with nothing
+ * filed still produces a row — a register that silently omitted uncovered
+ * batches would be worse than no register. And `superseded_at IS NULL`, so a
+ * replaced document never reads as current coverage; the partial unique index
+ * `certificates_one_current_per_lot` guarantees at most one such row per lot,
+ * which is what makes the join safe without a DISTINCT.
+ *
+ * Legacy certificates carrying a null `stock_lot_id` cannot appear at all: the
+ * join is on the lot, and `certificates_lot_required_unless_historical` already
+ * guarantees every one of them is superseded. They stay readable as history on
+ * the product page, which is the only place they were ever coverage.
+ *
+ * **Status is computed by `certificateStatus()`**, not spelled again here. That
+ * function is the single definition of the rule — including that a null expiry
+ * is VALID — and a second copy is exactly how a report and the dashboard come
+ * to disagree about what "expiring" means. The SQL filters on *dates*, and the
+ * status filter is the date predicate equivalent to the state asked for.
+ *
+ * **Lot status is not compliance.** A quarantined or rejected batch is
+ * physically held and appears here with whatever certificate state it actually
+ * has, which may be VALID. The two are separate columns and separate filters
+ * because they are separate questions.
+ */
+export async function loadCertificateRegisterReport(
+  params: ReportParams,
+  now: Date = new Date(),
+): Promise<
+  Result<ReportPage<CertificateRegisterRow, CertificateRegisterTotals>>
+> {
+  try {
+    await requireUser();
+
+    const filters: Prisma.Sql[] = [Prisma.sql`TRUE`];
+
+    /*
+     * One reference day for the whole report, derived from `now` rather than
+     * read from the database as `CURRENT_DATE`.
+     *
+     * This matters beyond testability. Row status is computed by
+     * `certificateStatus(…, now)` in TypeScript while the totals are counted in
+     * SQL; two clocks — the application's and the database's — could disagree
+     * across midnight or a timezone and show four EXPIRING_SOON rows above a
+     * total that said three. One date, passed in, makes that unrepresentable.
+     *
+     * Expiry is a DATE column, so the reference is a calendar day with no time
+     * and no zone — the same reduction `toUtcDay` performs.
+     */
+    const today = now.toISOString().slice(0, 10);
+    const asOf = Prisma.sql`${today}::date`;
+    const horizon = Prisma.sql`${today}::date + ${EXPIRING_SOON_DAYS} * INTERVAL '1 day'`;
+
+    /*
+     * Batches drawn to zero are excluded unless asked for. There is nothing on
+     * the shelf left to be uncertain about, and their paperwork survives — the
+     * toggle is what reaches it.
+     */
+    if (!params.includeEmptied) {
+      filters.push(Prisma.sql`l.quantity_remaining > 0`);
+    }
+
+    if (params.productStatus) {
+      filters.push(
+        Prisma.sql`p.status = ${params.productStatus}::"ProductStatus"`,
+      );
+    }
+    if (params.lotStatus) {
+      filters.push(Prisma.sql`l.status = ${params.lotStatus}::"LotStatus"`);
+    }
+    if (params.certificateType) {
+      filters.push(Prisma.sql`c.certificate_type = ${params.certificateType}`);
+    }
+    if (params.supplierId) {
+      filters.push(Prisma.sql`pu.supplier_id = ${params.supplierId}`);
+    }
+    if (params.category) {
+      filters.push(Prisma.sql`p.category = ${params.category}`);
+    }
+    if (params.search) {
+      const like = `%${params.search}%`;
+      filters.push(
+        Prisma.sql`(p.name ILIKE ${like} OR p.sku ILIKE ${like} OR c.certificate_number ILIKE ${like})`,
+      );
+    }
+
+    /*
+     * The compliance filter, in dates rather than a second copy of the rule.
+     * Each branch is the SQL equivalent of one `certificateStatus()` outcome,
+     * and the horizon is the same exported constant, so the two cannot drift by
+     * editing one.
+     */
+    if (params.certificateStatus) {
+      switch (params.certificateStatus) {
+        case "MISSING":
+          filters.push(Prisma.sql`c.id IS NULL`);
+          break;
+        case "EXPIRED":
+          filters.push(
+            Prisma.sql`c.expiry_date IS NOT NULL AND c.expiry_date < ${asOf}`,
+          );
+          break;
+        case "EXPIRING_SOON":
+          filters.push(
+            Prisma.sql`c.expiry_date IS NOT NULL AND c.expiry_date >= ${asOf} AND c.expiry_date <= ${horizon}`,
+          );
+          break;
+        case "VALID":
+          filters.push(
+            Prisma.sql`c.id IS NOT NULL AND (c.expiry_date IS NULL OR c.expiry_date > ${horizon})`,
+          );
+          break;
+      }
+    }
+
+    const where = Prisma.join(filters, " AND ");
+
+    /*
+     * One FROM clause shared by all three queries, so the rows, the totals and
+     * the count cannot describe different sets.
+     *
+     * The purchase join tests `source_type = 'PURCHASE'`, which is what keeps
+     * opening, adjustment and sales-return batches supplier-less rather than
+     * borrowing one. `source_id` is a polymorphic pointer with no foreign key
+     * behind it, so that type test is the whole guarantee.
+     */
+    const from = Prisma.sql`
+      FROM stock_lots l
+      JOIN products p ON p.id = l.product_id
+      LEFT JOIN certificates c
+        ON c.stock_lot_id = l.id AND c.superseded_at IS NULL
+      LEFT JOIN purchases pu
+        ON l.source_type = 'PURCHASE' AND pu.id = l.source_id
+      LEFT JOIN suppliers s ON s.id = pu.supplier_id
+    `;
+
+    const [rows, totalRows, countRows] = await Promise.all([
+      prisma.$queryRaw<CertificateRegisterSqlRow[]>`
+        SELECT
+          l.id                  AS lot_id,
+          p.id                  AS product_id,
+          p.sku,
+          p.name                AS product_name,
+          p.category,
+          p.status::text        AS product_status,
+          l.received_at,
+          l.quantity_remaining,
+          l.status::text        AS lot_status,
+          l.source_type::text   AS provenance,
+          pu.id                 AS purchase_id,
+          pu.purchase_number,
+          s.name                AS supplier_name,
+          c.id                  AS certificate_id,
+          c.certificate_type,
+          c.certificate_number,
+          c.issue_date,
+          c.expiry_date,
+          c.file_name
+        ${from}
+        WHERE ${where}
+        ORDER BY ${orderBy(CERTIFICATE_REGISTER_SORTS, params.sort, params.direction, "expiry")}, p.sku ASC, l.received_at ASC, l.id ASC
+        LIMIT ${params.pageSize} OFFSET ${(params.page - 1) * params.pageSize}
+      `,
+      /*
+       * Totals are counted over every matching batch rather than the page, by
+       * the same date arithmetic. The four states are mutually exclusive and
+       * sum to `batches`.
+       */
+      prisma.$queryRaw<
+        {
+          batches: number;
+          units: number;
+          valid: number;
+          expiring_soon: number;
+          expired: number;
+          missing: number;
+        }[]
+      >`
+        SELECT
+          COUNT(*)::int                               AS batches,
+          COALESCE(SUM(l.quantity_remaining), 0)::int AS units,
+          COUNT(*) FILTER (
+            WHERE c.id IS NOT NULL
+              AND (
+                c.expiry_date IS NULL
+                OR c.expiry_date > ${horizon}
+              )
+          )::int                                      AS valid,
+          COUNT(*) FILTER (
+            WHERE c.expiry_date IS NOT NULL
+              AND c.expiry_date >= ${asOf}
+              AND c.expiry_date <= ${horizon}
+          )::int                                      AS expiring_soon,
+          COUNT(*) FILTER (
+            WHERE c.expiry_date IS NOT NULL AND c.expiry_date < ${asOf}
+          )::int                                      AS expired,
+          COUNT(*) FILTER (WHERE c.id IS NULL)::int    AS missing
+        ${from}
+        WHERE ${where}
+      `,
+      prisma.$queryRaw<{ n: number }[]>`
+        SELECT COUNT(*)::int AS n
+        ${from}
+        WHERE ${where}
+      `,
+    ]);
+
+    const t = totalRows[0] ?? {
+      batches: 0,
+      units: 0,
+      valid: 0,
+      expiring_soon: 0,
+      expired: 0,
+      missing: 0,
+    };
+
+    const total = countRows[0]?.n ?? 0;
+
+    return {
+      ok: true,
+      data: {
+        rows: rows.map((row) => {
+          // The one definition of the rule, called rather than re-implemented.
+          const status = certificateStatus(
+            row.certificate_id === null ? null : { expiryDate: row.expiry_date },
+            now,
+          );
+
+          return {
+            lotId: row.lot_id,
+            productId: row.product_id,
+            sku: row.sku,
+            productName: row.product_name,
+            category: row.category,
+            productStatus: row.product_status,
+            receivedAt: row.received_at,
+            quantityRemaining: row.quantity_remaining,
+            lotStatus: row.lot_status,
+            provenance: row.provenance,
+            purchaseId: row.purchase_id,
+            purchaseNumber: row.purchase_number,
+            supplierName: row.supplier_name,
+            certificateId: row.certificate_id,
+            certificateType: row.certificate_type,
+            certificateNumber: row.certificate_number,
+            issueDate: row.issue_date,
+            expiryDate: row.expiry_date,
+            daysToExpiry:
+              row.expiry_date === null
+                ? null
+                : daysBetweenUtc(now, row.expiry_date),
+            status,
+            fileUrl:
+              row.certificate_id === null
+                ? null
+                : certificateFileUrl(row.certificate_id),
+            fileName: row.file_name,
+          };
+        }),
+        totals: {
+          batches: t.batches,
+          units: t.units,
+          valid: t.valid,
+          expiringSoon: t.expiring_soon,
+          expired: t.expired,
+          missing: t.missing,
+        },
+        total,
+        page: params.page,
+        pageSize: params.pageSize,
+        pageCount: Math.max(1, Math.ceil(total / params.pageSize)),
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: toSafeError(error, "loadCertificateRegisterReport"),
     };
   }
 }

@@ -21,12 +21,28 @@ import {
   type RangePreset,
   type ReportKey,
   type ReportParams,
+  type ReportDefaults,
 } from "@/lib/report-query";
 import {
   MOVEMENT_TYPES,
   MOVEMENT_TYPE_LABELS,
 } from "@/lib/stock-movement-query";
-import type { StockTransactionType } from "@/generated/prisma/enums";
+import type {
+  LotStatus,
+  ProductStatus,
+  StockTransactionType,
+} from "@/generated/prisma/enums";
+import {
+  certificateStatusLabel,
+  type CertificateStatus,
+} from "@/lib/certificate-status";
+import {
+  LOT_STATUS_LABELS,
+  QUARANTINED_LOT_STATUS,
+  REJECTED_LOT_STATUS,
+  SALEABLE_LOT_STATUS,
+} from "@/lib/lot-status";
+import { PRODUCT_STATUSES } from "@/lib/product-query";
 
 /**
  * The reports' filter bar.
@@ -42,6 +58,35 @@ import type { StockTransactionType } from "@/generated/prisma/enums";
 
 const ANY = "__any__";
 
+/*
+ * The compliance register's option lists.
+ *
+ * Statuses come from the modules that own them — `lot-status.ts` for batches
+ * and `product-query.ts` for products — rather than being spelled again here.
+ * The certificate states are the four `certificateStatus()` returns, labelled
+ * by the same function the badge uses.
+ */
+const CERTIFICATE_STATUS_OPTIONS: readonly CertificateStatus[] = [
+  "MISSING",
+  "EXPIRED",
+  "EXPIRING_SOON",
+  "VALID",
+];
+
+const LOT_STATUS_OPTIONS: readonly LotStatus[] = [
+  SALEABLE_LOT_STATUS,
+  QUARANTINED_LOT_STATUS,
+  REJECTED_LOT_STATUS,
+];
+
+const PRODUCT_STATUS_OPTIONS = PRODUCT_STATUSES;
+
+const PRODUCT_STATUS_LABELS: Record<ProductStatus, string> = {
+  ACTIVE: "Active",
+  INACTIVE: "Inactive",
+  DISCONTINUED: "Discontinued",
+};
+
 function ReportFilters({
   report,
   params,
@@ -49,15 +94,24 @@ function ReportFilters({
   groupings,
   categories,
   movementTypes = false,
+  certificates = false,
+  certificateTypes = [],
 }: {
   report: ReportKey;
   params: ReportParams;
-  defaults: { grouping: string; sort: string };
+  defaults: ReportDefaults;
   /** Empty for a report that does not group. */
   groupings: readonly string[];
   categories: string[];
   /** Only the stock movement summary filters by ledger type. */
   movementTypes?: boolean;
+  /** Only the compliance register filters by paperwork and batch state. */
+  certificates?: boolean;
+  /**
+   * The certificate types actually on file. An open string set, read from the
+   * data rather than declared, so the options are whatever has been filed.
+   */
+  certificateTypes?: string[];
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -105,6 +159,13 @@ function ReportFilters({
 
   const filtered =
     Boolean(params.search || params.category || params.movementType) ||
+    Boolean(
+      params.certificateStatus ||
+        params.certificateType ||
+        params.lotStatus ||
+        params.includeEmptied,
+    ) ||
+    params.productStatus !== (defaults.productStatus ?? null) ||
     params.preset !== "12m" ||
     params.grouping !== defaults.grouping;
 
@@ -199,6 +260,131 @@ function ReportFilters({
             </Select>
           ) : null}
 
+          {certificates ? (
+            <>
+              <Select
+                value={params.certificateStatus ?? ANY}
+                onValueChange={(next) =>
+                  navigate({
+                    ...params,
+                    certificateStatus:
+                      next === ANY ? null : (next as CertificateStatus),
+                    page: 1,
+                  })
+                }
+              >
+                <SelectTrigger aria-label="Compliance" className="w-44">
+                  <SelectValue placeholder="All compliance" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ANY}>All compliance</SelectItem>
+                  {CERTIFICATE_STATUS_OPTIONS.map((status) => (
+                    <SelectItem key={status} value={status}>
+                      {certificateStatusLabel(status)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {/*
+                Only offered when something is filed. An empty select would be
+                a control that cannot do anything, which reads as broken rather
+                than as "no certificates yet".
+              */}
+              {certificateTypes.length > 0 ? (
+                <Select
+                  value={params.certificateType ?? ANY}
+                  onValueChange={(next) =>
+                    navigate({
+                      ...params,
+                      certificateType: next === ANY ? null : next,
+                      page: 1,
+                    })
+                  }
+                >
+                  <SelectTrigger aria-label="Certificate type" className="w-48">
+                    <SelectValue placeholder="All certificate types" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={ANY}>All certificate types</SelectItem>
+                    {certificateTypes.map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {type}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : null}
+
+              <Select
+                value={params.lotStatus ?? ANY}
+                onValueChange={(next) =>
+                  navigate({
+                    ...params,
+                    lotStatus: next === ANY ? null : (next as LotStatus),
+                    page: 1,
+                  })
+                }
+              >
+                <SelectTrigger aria-label="Batch status" className="w-40">
+                  <SelectValue placeholder="All batches" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ANY}>All batches</SelectItem>
+                  {LOT_STATUS_OPTIONS.map((status) => (
+                    <SelectItem key={status} value={status}>
+                      {LOT_STATUS_LABELS[status]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {/*
+                Retired stock is in the register; this only decides which of it
+                is on screen. "All" is a real option, not a hidden one.
+              */}
+              <Select
+                value={params.productStatus ?? ANY}
+                onValueChange={(next) =>
+                  navigate({
+                    ...params,
+                    productStatus:
+                      next === ANY ? null : (next as ProductStatus),
+                    page: 1,
+                  })
+                }
+              >
+                <SelectTrigger aria-label="Product status" className="w-44">
+                  <SelectValue placeholder="All products" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ANY}>All product statuses</SelectItem>
+                  {PRODUCT_STATUS_OPTIONS.map((status) => (
+                    <SelectItem key={status} value={status}>
+                      {PRODUCT_STATUS_LABELS[status]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <Button
+                variant={params.includeEmptied ? "secondary" : "outline"}
+                onClick={() =>
+                  navigate({
+                    ...params,
+                    includeEmptied: !params.includeEmptied,
+                    page: 1,
+                  })
+                }
+                aria-pressed={params.includeEmptied}
+              >
+                {params.includeEmptied
+                  ? "Emptied batches shown"
+                  : "Include emptied batches"}
+              </Button>
+            </>
+          ) : null}
+
           {categories.length > 0 ? (
             <Select
               value={params.category ?? ANY}
@@ -233,6 +419,11 @@ function ReportFilters({
                   search: "",
                   category: null,
                   movementType: null,
+                  certificateStatus: null,
+                  certificateType: null,
+                  lotStatus: null,
+                  productStatus: defaults.productStatus ?? null,
+                  includeEmptied: false,
                   preset: "12m",
                   grouping: defaults.grouping,
                   page: 1,

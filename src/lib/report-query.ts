@@ -1,4 +1,15 @@
-import type { StockTransactionType } from "@/generated/prisma/enums";
+import type {
+  LotStatus,
+  ProductStatus,
+  StockTransactionType,
+} from "@/generated/prisma/enums";
+import type { CertificateStatus } from "@/lib/certificate-status";
+import { PRODUCT_STATUSES } from "@/lib/product-query";
+import {
+  QUARANTINED_LOT_STATUS,
+  REJECTED_LOT_STATUS,
+  SALEABLE_LOT_STATUS,
+} from "@/lib/lot-status";
 import {
   monthsAgo,
   readDateRange,
@@ -25,6 +36,7 @@ export const REPORT_KEYS = [
   "sales",
   "purchases",
   "movements",
+  "certificates",
 ] as const;
 export type ReportKey = (typeof REPORT_KEYS)[number];
 
@@ -39,6 +51,7 @@ export const REPORT_TITLES: Record<ReportKey, string> = {
   sales: "Sales",
   purchases: "Purchase spend",
   movements: "Stock movement summary",
+  certificates: "Certificate compliance register",
 };
 
 export const REPORT_DESCRIPTIONS: Record<ReportKey, string> = {
@@ -48,6 +61,8 @@ export const REPORT_DESCRIPTIONS: Record<ReportKey, string> = {
   purchases: "Procurement spend, dated by when each delivery was received.",
   movements:
     "What moved in and out of stock, dated by when each movement was recorded.",
+  certificates:
+    "Every batch on the shelf and the airworthiness paperwork covering it, at current state.",
 };
 
 /**
@@ -84,18 +99,21 @@ export const REPORT_CONFIG = {
       "coverage",
     ] as readonly string[],
     defaultSort: "value",
+    defaultDirection: "desc",
   },
   sales: {
     groupings: ["period", "product", "category", "customer"] as readonly string[],
     defaultGrouping: "period",
     sortKeys: ["value", "revenue", "units", "orders", "label"] as readonly string[],
     defaultSort: "value",
+    defaultDirection: "desc",
   },
   purchases: {
     groupings: ["period", "supplier", "product", "category"] as readonly string[],
     defaultGrouping: "period",
     sortKeys: ["value", "units", "purchases", "label"] as readonly string[],
     defaultSort: "value",
+    defaultDirection: "desc",
   },
   /*
    * Deliberately no supplier or customer grouping. Only movements carrying a
@@ -123,6 +141,50 @@ export const REPORT_CONFIG = {
       "label",
     ] as readonly string[],
     defaultSort: "label",
+    defaultDirection: "desc",
+  },
+  /*
+   * No groupings, for the same reason valuation has none and a sharper one
+   * besides: this report *is* the detail. A compliance register exists so
+   * somebody can point at the batch an auditor asked about, and any
+   * aggregation would hide the row that answers the question.
+   *
+   * `expiry` is the default sort and, with the default direction below, the
+   * ordering the dashboard already proved reads well — soonest problem first,
+   * with undated rows (no expiry, and no certificate at all) last. Every
+   * `orderBy` in this module appends NULLS LAST, so that falls out rather than
+   * needing its own clause.
+   */
+  certificates: {
+    groupings: [] as readonly string[],
+    defaultGrouping: "lot",
+    sortKeys: [
+      "expiry",
+      "sku",
+      "name",
+      "units",
+      "received",
+      "status",
+      "supplier",
+    ] as readonly string[],
+    defaultSort: "expiry",
+    /*
+     * The one report that reads ascending by default. Soonest expiry first is
+     * the order somebody works a compliance list in, and it is the order the
+     * dashboard's attention card already uses. Every other report answers
+     * "biggest first", so `desc` stays their default and this is the exception
+     * rather than a change of convention.
+     */
+    defaultDirection: "asc",
+    /*
+     * Retired products are *in* the register — a discontinued part still
+     * sitting on the shelf still has paperwork obligations, and silently
+     * dropping it would be the omission this report exists to prevent. What is
+     * defaulted is the *filter*: the screen opens on ACTIVE, because that is
+     * the working set, and INACTIVE, DISCONTINUED or all of them are one
+     * selection away. `pstatus=all` is how the URL says "no filter".
+     */
+    defaultProductStatus: "ACTIVE" as ProductStatus | null,
   },
 } satisfies Record<
   ReportKey,
@@ -131,6 +193,9 @@ export const REPORT_CONFIG = {
     defaultGrouping: string;
     sortKeys: readonly string[];
     defaultSort: string;
+    defaultDirection: "asc" | "desc";
+    /** Only the compliance register sets one; every other report shows all. */
+    defaultProductStatus?: ProductStatus | null;
   }
 >;
 
@@ -153,6 +218,38 @@ const DEFAULT_REPORT_PAGE_SIZE = 50;
  * cold should describe the business as it is now — an all-time total is a
  * different question, and one worth asking for deliberately.
  */
+/**
+ * The compliance register's filter vocabularies, as literal tuples.
+ *
+ * Written out rather than derived from the Prisma enum objects because these
+ * are *URL* vocabularies: a value arrives as a string and has to be checked
+ * before it is trusted, and a tuple is what makes that check total. They are
+ * read only by the parser below.
+ *
+ * `CERTIFICATE_STATUSES` deliberately mirrors `CertificateStatus` without
+ * importing a runtime value from `certificate-status.ts` — that module is the
+ * definition of the *rule*, and this workstream does not modify it.
+ */
+const CERTIFICATE_STATUSES: readonly CertificateStatus[] = [
+  "MISSING",
+  "EXPIRED",
+  "EXPIRING_SOON",
+  "VALID",
+];
+
+/*
+ * Built from the constants in `lot-status.ts` rather than spelled again. That
+ * module is the single definition of saleability, and a quoted status literal
+ * anywhere else is exactly what the architecture guard in
+ * `tests/lot-status.test.ts` refuses — it is how the FIFO scan and the
+ * blocked-quantity aggregate would come to disagree.
+ */
+const LOT_STATUSES: readonly LotStatus[] = [
+  SALEABLE_LOT_STATUS,
+  QUARANTINED_LOT_STATUS,
+  REJECTED_LOT_STATUS,
+];
+
 export const RANGE_PRESETS = ["12m", "3m", "ytd", "all", "custom"] as const;
 export type RangePreset = (typeof RANGE_PRESETS)[number];
 
@@ -185,6 +282,28 @@ export interface ReportParams {
    * rather than in a second parser the CSV route would have to duplicate.
    */
   movementType: StockTransactionType | null;
+
+  /*
+   * The compliance register's own filters. They live here with the rest of the
+   * shared state for the same reason `movementType` does: the page and the CSV
+   * route both read one parser, so a filter the screen honours cannot be one
+   * the export quietly ignores. Every other report leaves them null.
+   */
+
+  /** Narrows to one derived compliance state. Never stored, never a column. */
+  certificateStatus: CertificateStatus | null;
+  /** The open label on the document — FAA 8130-3, EASA Form 1, and so on. */
+  certificateType: string | null;
+  /** Whether the batch may be sold, awaiting inspection, or condemned. */
+  lotStatus: LotStatus | null;
+  /** ACTIVE by default on the register, so retired stock is opt-in, not hidden. */
+  productStatus: ProductStatus | null;
+  /**
+   * Batches drawn to zero. Excluded by default — there is nothing on the shelf
+   * left to be uncertain about — but reachable, because their paperwork is
+   * still the record of what covered the units that left.
+   */
+  includeEmptied: boolean;
 }
 
 /**
@@ -221,6 +340,8 @@ export function parseReportParams(
     defaultGrouping: string;
     sortKeys: readonly string[];
     defaultSort: string;
+    defaultDirection: "asc" | "desc";
+    defaultProductStatus?: ProductStatus | null;
   },
   now: Date = new Date(),
 ): ReportParams {
@@ -257,7 +378,15 @@ export function parseReportParams(
     sort: options.sortKeys.includes(sort ?? "")
       ? (sort as string)
       : options.defaultSort,
-    direction: direction === "asc" ? "asc" : "desc",
+    /*
+     * Explicit in the URL wins; otherwise the report's own default. Reports
+     * that answer "biggest first" default to desc, and the compliance register
+     * to asc, because soonest-expiry-first is the order it is read in.
+     */
+    direction:
+      direction === "asc" || direction === "desc"
+        ? direction
+        : options.defaultDirection,
     page: Number.isInteger(page) && page >= 1 ? page : 1,
     pageSize: (REPORT_PAGE_SIZES as readonly number[]).includes(pageSize)
       ? pageSize
@@ -270,6 +399,30 @@ export function parseReportParams(
       const value = readOne(raw, "mtype");
       return isMovementType(value) ? value : null;
     })(),
+    certificateStatus: (() => {
+      const value = readOne(raw, "cstatus");
+      return CERTIFICATE_STATUSES.includes(value as CertificateStatus)
+        ? (value as CertificateStatus)
+        : null;
+    })(),
+    certificateType: readOne(raw, "ctype"),
+    lotStatus: (() => {
+      const value = readOne(raw, "lstatus");
+      return LOT_STATUSES.includes(value as LotStatus)
+        ? (value as LotStatus)
+        : null;
+    })(),
+    productStatus: (() => {
+      const value = readOne(raw, "pstatus");
+      // An explicit "all" is how the URL asks for no filter at all, which is
+      // distinct from the parameter being absent and taking the default.
+      if (value === "all") return null;
+      if (PRODUCT_STATUSES.includes(value as ProductStatus)) {
+        return value as ProductStatus;
+      }
+      return options.defaultProductStatus ?? null;
+    })(),
+    includeEmptied: readOne(raw, "emptied") === "1",
   };
 }
 
@@ -288,10 +441,24 @@ export function reportParamsFor(
   return parseReportParams(raw, REPORT_CONFIG[report], now);
 }
 
+/**
+ * What a report opens on, so the URL can leave it out.
+ *
+ * Grouping, sort and direction every report has; the product-status default is
+ * the compliance register's alone, and undefined elsewhere means "no filter",
+ * which is what every other report already showed.
+ */
+export interface ReportDefaults {
+  grouping: string;
+  sort: string;
+  direction: "asc" | "desc";
+  productStatus?: ProductStatus | null;
+}
+
 /** Serialises back to a query string, leaving defaults out. */
 export function toReportSearchParams(
   params: ReportParams,
-  defaults: { grouping: string; sort: string },
+  defaults: ReportDefaults,
 ): URLSearchParams {
   const query = new URLSearchParams();
 
@@ -302,7 +469,9 @@ export function toReportSearchParams(
   }
   if (params.grouping !== defaults.grouping) query.set("group", params.grouping);
   if (params.sort !== defaults.sort) query.set("sort", params.sort);
-  if (params.direction !== "desc") query.set("dir", params.direction);
+  if (params.direction !== defaults.direction) {
+    query.set("dir", params.direction);
+  }
   if (params.page > 1) query.set("page", String(params.page));
   if (params.pageSize !== DEFAULT_REPORT_PAGE_SIZE) {
     query.set("size", String(params.pageSize));
@@ -312,6 +481,13 @@ export function toReportSearchParams(
   if (params.category) query.set("category", params.category);
   if (params.search) query.set("q", params.search);
   if (params.movementType) query.set("mtype", params.movementType);
+  if (params.certificateStatus) query.set("cstatus", params.certificateStatus);
+  if (params.certificateType) query.set("ctype", params.certificateType);
+  if (params.lotStatus) query.set("lstatus", params.lotStatus);
+  if (params.productStatus !== (defaults.productStatus ?? null)) {
+    query.set("pstatus", params.productStatus ?? "all");
+  }
+  if (params.includeEmptied) query.set("emptied", "1");
 
   return query;
 }
@@ -319,7 +495,7 @@ export function toReportSearchParams(
 export function reportHref(
   report: ReportKey,
   params: ReportParams,
-  defaults: { grouping: string; sort: string },
+  defaults: ReportDefaults,
 ): string {
   const query = toReportSearchParams(params, defaults).toString();
   return query ? `/reports/${report}?${query}` : `/reports/${report}`;
@@ -335,7 +511,7 @@ export function reportHref(
 export function reportCsvHref(
   report: ReportKey,
   params: ReportParams,
-  defaults: { grouping: string; sort: string },
+  defaults: ReportDefaults,
 ): string {
   const query = toReportSearchParams(params, defaults);
   // Paging is a screen concern. An export is the whole result.
@@ -350,7 +526,7 @@ export function reportCsvHref(
 export function reportSortHref(
   report: ReportKey,
   params: ReportParams,
-  defaults: { grouping: string; sort: string },
+  defaults: ReportDefaults,
   key: string,
 ): string {
   const active = params.sort === key;
@@ -360,7 +536,16 @@ export function reportSortHref(
     {
       ...params,
       sort: key,
-      direction: active && params.direction === "desc" ? "asc" : "desc",
+      /*
+       * Clicking the active column flips it; clicking a new one starts from
+       * that report's own default, so the compliance register opens each
+       * column soonest-first rather than jumping to desc.
+       */
+      direction: active
+        ? params.direction === "asc"
+          ? "desc"
+          : "asc"
+        : defaults.direction,
       page: 1,
     },
     defaults,

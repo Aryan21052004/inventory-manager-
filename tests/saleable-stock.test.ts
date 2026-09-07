@@ -157,6 +157,7 @@ function reportParams(): ReportParams {
       defaultGrouping: "product",
       sortKeys: ["value", "units"],
       defaultSort: "value",
+      defaultDirection: "desc",
     },
   );
 }

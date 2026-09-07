@@ -635,6 +635,38 @@ export async function deleteStoredFiles(keys: readonly string[]): Promise<void> 
   );
 }
 
+/**
+ * The certificate types actually on file, for the compliance register's filter.
+ *
+ * `certificateType` is an open string — FAA 8130-3, EASA Form 1, a Certificate
+ * of Conformity, a manufacturer's own form — deliberately not an enum, so that
+ * a part sourced under a different authority needs no migration. The options
+ * are therefore read from the data rather than declared anywhere, exactly as
+ * `loadCategories` reads product categories.
+ *
+ * Scoped to **current** certificates. A type that survives only on superseded
+ * documents would be an option that always returns nothing, since the register
+ * joins on the certificate in force.
+ *
+ * Never throws: a filter that cannot list its options should offer none, not
+ * take the page down with it. Same contract as `loadCategories`.
+ */
+export async function loadCertificateTypes(): Promise<string[]> {
+  try {
+    const rows = await prisma.certificate.findMany({
+      where: { supersededAt: null },
+      distinct: ["certificateType"],
+      orderBy: { certificateType: "asc" },
+      select: { certificateType: true },
+    });
+
+    return rows.map((row) => row.certificateType);
+  } catch (error) {
+    toSafeError(error, "loadCertificateTypes");
+    return [];
+  }
+}
+
 export type CertificateResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: SafeError };
