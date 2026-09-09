@@ -5,6 +5,7 @@ import { canFulfilOutstanding, orderStatusLabel } from "@/lib/order-status";
 import { prisma } from "@/lib/prisma";
 import {
   ACCEPTED_IMAGE_LABELS,
+  batchTooLargeMessage,
   MAX_IMAGE_BYTES,
   MAX_IMAGES_PER_UPLOAD,
   MAX_IMAGE_LABEL,
@@ -336,6 +337,39 @@ export async function attachOrderItemImages(
   }
 
   /*
+   * Everything is a file before anything is measured.
+   *
+   * Hoisted out of the loop below so the batch can be weighed as a whole while
+   * every entry is still just a size — the loop that follows reads each file
+   * into memory, and the point of the aggregate check is to refuse before that
+   * happens.
+   */
+  for (const file of files) {
+    if (!(file instanceof File) || file.size === 0) {
+      throw new AppError("BAD_REQUEST", "That file could not be read.");
+    }
+  }
+
+  /*
+   * The batch as a whole, against what the transport can carry.
+   *
+   * The per-file limit and the count between them permitted fifty megabytes
+   * through a ten megabyte door, so a batch could be assembled that no amount
+   * of correct per-file validation would let through — it died at the framework
+   * boundary instead, before any of this ran.
+   *
+   * Checked here on the declared sizes, which is early enough to refuse without
+   * reading anything, and again below on the bytes actually received. The
+   * declared size is a client's claim and is not required to be true; this pass
+   * exists to fail cheaply, and the one after it is the one that decides.
+   */
+  const declaredTooLarge = batchTooLargeMessage(
+    (files as readonly File[]).map((file) => file.size),
+  );
+
+  if (declaredTooLarge) throw new AppError("BAD_REQUEST", declaredTooLarge);
+
+  /*
    * Read and check everything first. The alternative — validating as we write —
    * would leave the earlier files of a rejected batch already stored.
    */
@@ -397,6 +431,21 @@ export async function attachOrderItemImages(
       fileSize: data.byteLength,
     });
   }
+
+  /*
+   * The authoritative aggregate check, on the bytes actually read.
+   *
+   * The pass above trusted `File.size` to refuse a hopeless batch cheaply. This
+   * one trusts nothing: it measures what was received, exactly as the per-file
+   * limit is re-checked against `data.byteLength` rather than the declared
+   * size. A client that under-reported every file to slip past the first check
+   * is refused here, before a single row is written.
+   */
+  const receivedTooLarge = batchTooLargeMessage(
+    prepared.map((image) => image.fileSize),
+  );
+
+  if (receivedTooLarge) throw new AppError("BAD_REQUEST", receivedTooLarge);
 
   const images = await prisma.$transaction(
     prepared.map((image) =>

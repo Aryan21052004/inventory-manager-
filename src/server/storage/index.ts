@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import { env } from "@/lib/env";
 import { LocalFileStorage } from "@/server/storage/local";
+import { SupabaseFileStorage } from "@/server/storage/supabase";
 import type { FileStorage } from "@/server/storage/types";
 
 /**
@@ -28,20 +29,26 @@ function createStorage(): FileStorage {
     case "local":
       return new LocalFileStorage(env.FILE_STORAGE_DIR);
 
-    /*
-     * The shape the next one takes:
-     *
-     *   case "s3":
-     *     return new S3FileStorage({
-     *       bucket: env.S3_BUCKET,
-     *       region: env.S3_REGION,
-     *     });
-     *
-     * Note that it would not return signed URLs. Certificates are served
-     * through an authenticated route that reads the bytes and streams them,
-     * precisely so that access is a decision this application makes on every
-     * request rather than something a URL grants until it expires.
-     */
+    case "supabase":
+      /*
+       * The production driver. Note what it does *not* return: a URL. The
+       * `FileStorage` contract has no such method, and this implementation
+       * mints no signed links, so certificates are served through the
+       * authenticated route exactly as they were on local disk — access stays a
+       * decision this application makes on every request rather than something
+       * a URL grants until it expires.
+       *
+       * The non-null assertions are safe because `src/lib/env.ts` refuses to
+       * parse a `supabase` driver without both values, which happens at import
+       * and before this function can run. They are assertions rather than a
+       * second check because a second check here would be unreachable code
+       * asserting something already proved.
+       */
+      return new SupabaseFileStorage({
+        url: env.SUPABASE_URL!,
+        serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY!,
+        bucket: env.SUPABASE_STORAGE_BUCKET,
+      });
 
     default: {
       // Exhaustiveness: adding a driver to the env enum without handling it

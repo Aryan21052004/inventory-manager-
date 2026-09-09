@@ -11,10 +11,12 @@ import {
 } from "@/app/(app)/orders/actions";
 import { Button } from "@/components/ui/button";
 import {
+  batchTooLargeMessage,
   IMAGE_ACCEPT_ATTRIBUTE,
   MAX_IMAGES_PER_UPLOAD,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_LABEL,
+  MAX_UPLOAD_BATCH_LABEL,
   ACCEPTED_IMAGE_LABELS,
   formatImageSize,
 } from "@/lib/validation/order-item-image";
@@ -87,6 +89,22 @@ export function OrderItemImages({
     const tooBig = [...files].find((file) => file.size > MAX_IMAGE_BYTES);
     if (tooBig) {
       toast.error(`"${tooBig.name}" is larger than ${MAX_IMAGE_LABEL}.`);
+      return;
+    }
+
+    /*
+     * The batch as a whole. Every file can be within the per-file limit and the
+     * batch still be too big to send — three ordinary phone photographs will do
+     * it — and without this the request leaves, exceeds the Server Action body
+     * limit, and fails at the framework boundary where none of the messages
+     * above can reach the user.
+     *
+     * The message comes from the same shared function the server uses, so the
+     * refusal reads identically whichever side produces it.
+     */
+    const batchTooLarge = batchTooLargeMessage([...files].map((file) => file.size));
+    if (batchTooLarge) {
+      toast.error(batchTooLarge);
       return;
     }
 
@@ -194,7 +212,8 @@ export function OrderItemImages({
             {images.length === 0 ? "Add images" : "Add more"}
           </Button>
           <p className="mt-1 text-[11px] text-muted-foreground">
-            {ACCEPTED_IMAGE_LABELS} · up to {MAX_IMAGE_LABEL} each
+            {ACCEPTED_IMAGE_LABELS} · up to {MAX_IMAGE_LABEL} each ·{" "}
+            {MAX_UPLOAD_BATCH_LABEL} per batch
           </p>
         </div>
       ) : null}

@@ -47,8 +47,18 @@ const schema = z.object({
    * exhaustiveness check in src/server/storage/index.ts is tied to this list,
    * which means adding a driver name without implementing it is a compile
    * error.
+   *
+   * `local` writes to a directory and is the development answer. `supabase`
+   * writes to a private Storage bucket and is the production one — the local
+   * driver cannot be used anywhere the application runs as more than one
+   * process, because a file written to one instance's disk is unreadable from
+   * the next and gone at the following deploy.
+   *
+   * The default stays `local` so a developer who has set nothing still gets a
+   * working application. It is not a safe production default, which is why the
+   * refinement below exists rather than a silent fallback.
    */
-  FILE_STORAGE_DRIVER: z.enum(["local"]).default("local"),
+  FILE_STORAGE_DRIVER: z.enum(["local", "supabase"]).default("local"),
 
   /**
    * Root directory for the local driver. Relative paths resolve against the
@@ -61,7 +71,56 @@ const schema = z.object({
    * doing nothing.
    */
   FILE_STORAGE_DIR: z.string().min(1).default(".storage"),
-});
+
+  /**
+   * The Supabase project URL, e.g. `https://abcdefgh.supabase.co`.
+   *
+   * Optional at this level and required by the refinement below when the driver
+   * is `supabase`, so a developer running on `local` is never asked for a
+   * project they do not have.
+   */
+  SUPABASE_URL: z.string().url("SUPABASE_URL must be a URL").optional(),
+
+  /**
+   * The service-role key the storage driver authenticates with.
+   *
+   * Note the name: no `NEXT_PUBLIC_` prefix, so Next will not inline it into a
+   * browser bundle. This module is `server-only` for the same reason. The key
+   * bypasses row-level security, which is the point — the driver acts as the
+   * application, and the application has already decided the caller may have
+   * the file — and is exactly why it must never reach a client.
+   */
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
+
+  /**
+   * The bucket certificates live in. **It must be private.**
+   *
+   * Nothing here can check that, and a public bucket would make every stored
+   * certificate readable by anyone who learned its object path — without any
+   * code failing. It is stated here, in the driver, and in .env.example,
+   * because it is the one piece of this design that lives in the Supabase
+   * dashboard rather than in the repository.
+   */
+  SUPABASE_STORAGE_BUCKET: z.string().min(1).default("certificates"),
+})
+  /*
+   * A driver that cannot work must not start.
+   *
+   * Selecting `supabase` without credentials would otherwise import cleanly and
+   * fail at the first upload — which is to say, in front of a user, after they
+   * had chosen a file. Failing here means it fails at boot, with a message
+   * naming the variable that is missing.
+   */
+  .refine(
+    (value) =>
+      value.FILE_STORAGE_DRIVER !== "supabase" ||
+      Boolean(value.SUPABASE_URL && value.SUPABASE_SERVICE_ROLE_KEY),
+    {
+      message:
+        "FILE_STORAGE_DRIVER is \"supabase\", so SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are both required.",
+      path: ["FILE_STORAGE_DRIVER"],
+    },
+  );
 
 function load() {
   const parsed = schema.safeParse({
@@ -73,6 +132,9 @@ function load() {
     NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
     FILE_STORAGE_DRIVER: process.env.FILE_STORAGE_DRIVER,
     FILE_STORAGE_DIR: process.env.FILE_STORAGE_DIR,
+    SUPABASE_URL: process.env.SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+    SUPABASE_STORAGE_BUCKET: process.env.SUPABASE_STORAGE_BUCKET,
   });
 
   if (!parsed.success) {

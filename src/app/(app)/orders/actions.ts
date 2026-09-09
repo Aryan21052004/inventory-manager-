@@ -9,6 +9,7 @@ import {
   attachOrderItemImages,
   removeOrderItemImage,
 } from "@/server/order-item-images";
+import { requireUser } from "@/server/auth";
 import { recordSalesReturn } from "@/server/returns";
 import {
   cancelOrder,
@@ -406,10 +407,31 @@ export async function setOrderStatusAction(
  * A server action rather than a route handler: it is only ever called from one
  * component, it needs no caching, and it inherits the session automatically.
  * Returns only ACTIVE products — see `searchOrderProducts`.
+ *
+ * **The session is checked here, not inherited.** A `"use server"` export is a
+ * public HTTP endpoint whose id is recoverable from the client bundle, and the
+ * `(app)` layout's `auth.protect()` runs during *render* — after an action has
+ * already executed. Relying on it would leave this reachable signed-out, which
+ * is what it was: the catalogue, its selling prices and its stock levels,
+ * answerable to anyone who posted the action id.
+ *
+ * The check belongs in the action rather than in `searchOrderProducts` for a
+ * reason worth stating, because the obvious placement is the wrong one. That
+ * function wraps its body in a `try/catch` that reports and returns `[]`, so an
+ * `AppError` thrown inside it would be swallowed and an unauthenticated caller
+ * would receive an empty list — a silent refusal indistinguishable from a
+ * search that matched nothing. Checking out here lets the standard
+ * UNAUTHORIZED error reach the caller intact. It also leaves the server
+ * components that call `searchOrderProducts` during a page render untouched;
+ * they already sit behind the layout guard.
+ *
+ * Authentication only. Both roles build orders, so there is no role gate here
+ * and adding one would take the feature away from STAFF.
  */
 export async function searchOrderProductsAction(
   search: string,
 ): Promise<OrderProductOption[]> {
+  await requireUser();
   return searchOrderProducts(search);
 }
 

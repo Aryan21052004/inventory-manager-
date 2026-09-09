@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { toSafeError } from "@/lib/errors";
 import type { PurchaseStatus } from "@/lib/purchase-status";
 import type { PurchaseFieldErrors } from "@/lib/validation/purchase";
+import { requireUser } from "@/server/auth";
 import {
   cancelPurchase,
   createPurchase,
@@ -221,10 +222,26 @@ export async function setPurchaseStatusAction(
   }
 }
 
-/** Product search for the purchase builder. Only ACTIVE products come back. */
+/**
+ * Product search for the purchase builder. Only ACTIVE products come back.
+ *
+ * **The session is checked here, not inherited.** Same reasoning as
+ * `searchOrderProductsAction`, and the exposure was slightly worse: alongside
+ * each product this returns `lastPaidUnitCost`, so an unauthenticated caller
+ * was able to read supplier pricing as well as the catalogue.
+ *
+ * The check sits in the action rather than in `searchPurchaseProducts` because
+ * that function reports and returns `[]` from its own `catch`, which would turn
+ * a refusal into an empty result set. Out here the standard UNAUTHORIZED error
+ * survives. The server components that call it during a page render are
+ * unaffected — they are already behind the `(app)` layout guard.
+ *
+ * Authentication only: STAFF raise purchases too.
+ */
 export async function searchPurchaseProductsAction(
   search: string,
 ): Promise<PurchaseProductOption[]> {
+  await requireUser();
   return searchPurchaseProducts(search);
 }
 

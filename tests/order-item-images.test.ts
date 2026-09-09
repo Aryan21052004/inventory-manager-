@@ -5,10 +5,15 @@ vi.mock("@clerk/nextjs/server", async () => {
   return clerkServerMock;
 });
 
+import { readFile } from "node:fs/promises";
+
 import { prisma } from "@/lib/prisma";
 import {
   MAX_IMAGE_BYTES,
+  MAX_IMAGES_PER_UPLOAD,
+  MAX_UPLOAD_BATCH_BYTES,
   sanitiseImageName,
+  SERVER_ACTION_BODY_LIMIT_BYTES,
 } from "@/lib/validation/order-item-image";
 import {
   attachOrderItemImages,
@@ -421,6 +426,157 @@ describe("upload validation", () => {
     await expect(
       attachOrderItemImages(line.id, ["not a file"]),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The batch as a whole
+// ---------------------------------------------------------------------------
+
+/**
+ * The aggregate limit, and why it is not simply the per-file one times ten.
+ *
+ * Every file could be inside the 5 MB limit and the batch still be impossible
+ * to send: ten of them come to fifty megabytes and the Server Action body limit
+ * is ten. The request then died at the framework boundary, before any of the
+ * validation above ran, with a message written for nobody — reachable with
+ * three ordinary phone photographs.
+ *
+ * So the limits are checked against each other here, not just individually. The
+ * per-file cap and the count are deliberately unchanged; both are security
+ * bounds, and the fix was to add the missing one rather than relax them.
+ */
+describe("the batch as a whole", () => {
+  /** A valid PNG of an exact size, so a batch can be aimed at the boundary. */
+  function png(bytes: number): Buffer {
+    const body = Buffer.alloc(bytes, 0x20);
+    PNG.copy(body, 0, 0, 8);
+    return body;
+  }
+
+  it("keeps the aggregate limit under the framework's body limit", () => {
+    // The relationship the whole change rests on. If this ever inverts, a batch
+    // the application accepts is a batch the transport will refuse.
+    expect(MAX_UPLOAD_BATCH_BYTES).toBeLessThan(SERVER_ACTION_BODY_LIMIT_BYTES);
+
+    // And the aggregate has to bind before the count does, or it is not a bound
+    // at all: ten files at the per-file limit must exceed it.
+    expect(MAX_IMAGES_PER_UPLOAD * MAX_IMAGE_BYTES).toBeGreaterThan(
+      MAX_UPLOAD_BATCH_BYTES,
+    );
+  });
+
+  it("mirrors the bodySizeLimit actually configured in next.config.ts", async () => {
+    /*
+     * The constant is a copy of build configuration that neither the browser
+     * bundle nor this process can import, so the copy is checked rather than
+     * trusted. Raising one without the other is exactly how the mismatch this
+     * block exists for came about in the first place.
+     */
+    const config = await readFile(
+      new URL("../next.config.ts", import.meta.url),
+      "utf8",
+    );
+
+    const declared = /bodySizeLimit:\s*"(\d+)mb"/.exec(config);
+    expect(declared, "bodySizeLimit not found in next.config.ts").not.toBeNull();
+
+    expect(Number(declared![1]) * 1024 * 1024).toBe(
+      SERVER_ACTION_BODY_LIMIT_BYTES,
+    );
+  });
+
+  it("accepts a batch whose total is within the limit", async () => {
+    await signInWithRole("STAFF");
+    const { line } = await confirmedOrder("IMG-BATCH-OK");
+
+    // Two files, each legal on its own, together comfortably under the cap.
+    const half = Math.floor(MAX_UPLOAD_BATCH_BYTES / 2) - 1024;
+
+    const result = await attachOrderItemImages(line.id, [
+      file("one.png", png(half)),
+      file("two.png", png(half)),
+    ]);
+
+    expect(result.images).toHaveLength(2);
+    expect(await imageCount()).toBe(2);
+  });
+
+  it("refuses a batch whose total exceeds the limit, file by file legal", async () => {
+    await signInWithRole("STAFF");
+    const { line } = await confirmedOrder("IMG-BATCH-BIG");
+
+    /*
+     * The case the per-file check cannot see. Both files are exactly at the
+     * 5 MB limit and individually acceptable; together they are 10 MB, past the
+     * aggregate cap and past the transport.
+     */
+    const atLimit = png(MAX_IMAGE_BYTES);
+
+    await expect(
+      attachOrderItemImages(line.id, [
+        file("first.png", atLimit),
+        file("second.png", atLimit),
+      ]),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    expect(await imageCount()).toBe(0);
+  });
+
+  it("leaves images already on the line untouched when a batch is refused", async () => {
+    await signInWithRole("STAFF");
+    const { line } = await confirmedOrder("IMG-BATCH-KEEP");
+
+    const existing = await attachOrderItemImages(line.id, [
+      file("keeper.png", PNG),
+    ]);
+    const keeperId = existing.images[0]!.id;
+
+    const atLimit = png(MAX_IMAGE_BYTES);
+
+    await expect(
+      attachOrderItemImages(line.id, [
+        file("first.png", atLimit),
+        file("second.png", atLimit),
+      ]),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    // The rejected batch is not a reason to lose what was already there.
+    const rows = await prisma.orderItemImage.findMany({
+      where: { orderItemId: line.id },
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.id).toBe(keeperId);
+    expect(Buffer.from(rows[0]!.data).equals(PNG)).toBe(true);
+  });
+
+  it("refuses on the bytes received, not the size the client declared", async () => {
+    await signInWithRole("STAFF");
+    const { line } = await confirmedOrder("IMG-BATCH-LIE");
+
+    /*
+     * `File.size` is a client's claim. A caller that under-reports it slips
+     * past the cheap pre-check, so the aggregate is measured again on what was
+     * actually read — the same reason the per-file limit is re-checked against
+     * `data.byteLength`.
+     */
+    const atLimit = png(MAX_IMAGE_BYTES);
+
+    const understated = (name: string): File => {
+      const real = file(name, atLimit);
+      Object.defineProperty(real, "size", { value: 1, configurable: true });
+      return real;
+    };
+
+    await expect(
+      attachOrderItemImages(line.id, [
+        understated("first.png"),
+        understated("second.png"),
+      ]),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    expect(await imageCount()).toBe(0);
   });
 });
 

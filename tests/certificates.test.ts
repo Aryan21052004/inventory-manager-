@@ -660,6 +660,40 @@ describe("who may read a certificate file", () => {
     expect(file.contentType).toBe("application/pdf");
     expect(file.body.equals(PDF_BYTES)).toBe(true);
   });
+
+  it("reports a row whose stored bytes have gone, rather than failing opaquely", async () => {
+    await signInWithRole("ADMIN");
+    const product = await seedProduct({ sku: "CERT-LOSTBYTES" });
+    const certificate = await attach(await lotOf(product.id));
+
+    const row = await prisma.certificate.findUniqueOrThrow({
+      where: { id: certificate.id },
+      select: { storageKey: true },
+    });
+
+    /*
+     * The state a storage migration can leave behind: the metadata came across
+     * and the object did not. It is worth its own message because nothing the
+     * user did caused it and retrying will not fix it — and because this is
+     * exactly the failure to expect if the six existing local files are not
+     * carried over when the driver is switched.
+     *
+     * The driver reports a missing object as null rather than throwing, which
+     * is what lets this surface as NOT_FOUND instead of a 500.
+     */
+    await fileStorage.delete(row.storageKey);
+    expect(await fileStorage.exists(row.storageKey)).toBe(false);
+
+    await expect(getCertificateFile(certificate.id)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+
+    // The certificate itself is untouched — the compliance record survives the
+    // loss of the document, which is the honest outcome.
+    expect(
+      await prisma.certificate.count({ where: { id: certificate.id } }),
+    ).toBe(1);
+  });
 });
 
 describe("who may change a certificate", () => {
