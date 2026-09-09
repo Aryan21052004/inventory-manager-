@@ -3,6 +3,7 @@ import { auth } from "@clerk/nextjs/server";
 
 import { AppShell } from "@/components/layout/app-shell";
 import { authEnabled, env } from "@/lib/env";
+import { getCurrency } from "@/server/settings";
 
 /**
  * Wraps every signed-in page in the dashboard chrome. The route group `(app)`
@@ -22,8 +23,20 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     await auth.protect();
   }
 
+  /*
+   * Resolved here so the client components beneath can reach it. Server
+   * components call `getCurrency()` themselves — it is memoised per render, so
+   * this is not a second query — and the provider only exists to carry the
+   * value across the client boundary.
+   */
+  const currency = await getCurrency();
+
   return (
-    <AppShell appName={env.NEXT_PUBLIC_APP_NAME} authEnabled={authEnabled}>
+    <AppShell
+      appName={env.NEXT_PUBLIC_APP_NAME}
+      authEnabled={authEnabled}
+      currency={currency}
+    >
       {children}
     </AppShell>
   );

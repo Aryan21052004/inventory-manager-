@@ -18,6 +18,7 @@ import {
 } from "@/lib/purchase-query";
 import { loadPurchaseStats } from "@/server/purchases";
 import { loadSupplierFilterOptions } from "@/server/suppliers";
+import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Purchases" };
 
@@ -41,9 +42,10 @@ export default async function PurchasesPage({
 }) {
   const params = parsePurchaseListParams(await searchParams);
 
-  const [stats, suppliers] = await Promise.all([
+  const [stats, suppliers, currency] = await Promise.all([
     loadPurchaseStats(),
     loadSupplierFilterOptions(),
+    getCurrency(),
   ]);
 
   return (
@@ -77,14 +79,14 @@ export default async function PurchasesPage({
           />
           <StatCard
             label="On order"
-            value={formatCurrency(stats.data.pendingValue)}
+            value={formatCurrency(stats.data.pendingValue, currency)}
             hint={`${formatNumber(stats.data.pending)} awaiting delivery`}
             icon={Truck}
             tone={stats.data.pending > 0 ? "warning" : "default"}
           />
           <StatCard
             label="Received value"
-            value={formatCurrency(stats.data.receivedValue)}
+            value={formatCurrency(stats.data.receivedValue, currency)}
             hint="Goods booked into stock"
             icon={Wallet}
             tone="success"

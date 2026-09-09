@@ -30,6 +30,7 @@ import {
 } from "@/lib/supplier-query";
 import { cn } from "@/lib/utils";
 import { listSuppliers } from "@/server/suppliers";
+import { getCurrency } from "@/server/settings";
 
 /**
  * The suppliers table.
@@ -52,7 +53,15 @@ async function SuppliersTable({
   params: SupplierListParams;
   canManage: boolean;
 }) {
-  const result = await listSuppliers(params);
+  /*
+   * `getCurrency` is memoised for the render, so asking for it here rather
+   * than taking it as a prop costs no extra query — the page above has already
+   * resolved it.
+   */
+  const [result, currency] = await Promise.all([
+    listSuppliers(params),
+    getCurrency(),
+  ]);
 
   if (!result.ok) {
     return (
@@ -181,7 +190,7 @@ async function SuppliersTable({
               </TableCell>
 
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(supplier.totalPurchased)}
+                {formatCurrency(supplier.totalPurchased, currency)}
               </TableCell>
 
               <TableCell className="text-right">

@@ -44,6 +44,7 @@ import {
 } from "@/lib/format";
 import { getCurrentUser } from "@/server/auth";
 import { getCustomerDetail, type CustomerDetail } from "@/server/customers";
+import { getCurrency } from "@/server/settings";
 
 /**
  * A single customer, and everything they have bought.
@@ -75,9 +76,10 @@ export default async function CustomerDetailPage({
 }) {
   const { id } = await params;
 
-  const [result, user] = await Promise.all([
+  const [result, user, currency] = await Promise.all([
     getCustomerDetail(id),
     getCurrentUser(),
+    getCurrency(),
   ]);
 
   if (!result.ok) {
@@ -149,14 +151,14 @@ export default async function CustomerDetailPage({
         />
         <StatCard
           label="Lifetime value"
-          value={formatCurrency(customer.lifetimeValue)}
+          value={formatCurrency(customer.lifetimeValue, currency)}
           hint="Confirmed and completed"
           icon={Wallet}
           tone="success"
         />
         <StatCard
           label="Open value"
-          value={formatCurrency(customer.openValue)}
+          value={formatCurrency(customer.openValue, currency)}
           hint="Drafts and pending orders"
           icon={ReceiptText}
         />
@@ -276,7 +278,7 @@ export default async function CustomerDetailPage({
                           {formatNumber(order.itemCount)}
                         </TableCell>
                         <TableCell className="tabular text-right font-medium">
-                          {formatCurrency(order.total)}
+                          {formatCurrency(order.total, currency)}
                         </TableCell>
                         <TableCell className="hidden text-muted-foreground md:table-cell">
                           {formatDateTime(order.createdAt)}

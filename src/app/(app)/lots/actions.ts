@@ -2,8 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 
+import { formatMoney } from "@/lib/currency";
 import { toSafeError } from "@/lib/errors";
 import { releaseLot, rejectLot, writeOffLot } from "@/server/lots";
+import { getCurrency } from "@/server/settings";
 
 /**
  * The inspection actions, as thin wrappers.
@@ -93,10 +95,19 @@ export async function writeOffLotAction(
 
     revalidateLot(outcome.productId, true);
 
+    /*
+     * Formatted through the same path as every other figure in the
+     * application, in the active currency.
+     *
+     * This line used to interpolate a hard-coded `₹` in front of a raw decimal,
+     * which made it the one place in the codebase that both picked its own
+     * currency symbol and skipped the formatter — so a write-off toast could
+     * say "₹1234.5" while the screen behind it said "$1,234.50".
+     */
     const value =
       outcome.writtenOffValue === null
         ? "no recorded cost"
-        : `₹${outcome.writtenOffValue}`;
+        : formatMoney(outcome.writtenOffValue, await getCurrency());
 
     return {
       ok: true,

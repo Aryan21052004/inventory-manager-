@@ -1,6 +1,14 @@
 import type { Metadata } from "next";
-import { CircleDashed, Database, KeyRound, Server, Users } from "lucide-react";
+import {
+  CircleDashed,
+  Coins,
+  Database,
+  KeyRound,
+  Server,
+  Users,
+} from "lucide-react";
 
+import { CurrencyForm } from "@/app/(app)/settings/currency-form";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -11,8 +19,11 @@ import {
 } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { Separator } from "@/components/ui/separator";
+import { currencyLabel, formatMoney, type Currency } from "@/lib/currency";
 import { authEnabled, env } from "@/lib/env";
 import { checkDatabaseConnection } from "@/lib/prisma";
+import { getCurrentUser } from "@/server/auth";
+import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Settings" };
 
@@ -20,7 +31,20 @@ export const metadata: Metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  const database = await checkDatabaseConnection();
+  const [database, currency, user] = await Promise.all([
+    checkDatabaseConnection(),
+    getCurrency(),
+    getCurrentUser(),
+  ]);
+
+  /*
+   * Whether to render the selector at all. A courtesy, not a control: the
+   * action re-checks ADMIN on the server, so a STAFF user who called it
+   * directly would still be refused. Showing them the current value read-only
+   * is more useful than hiding the card — the currency explains every figure
+   * they see on every other screen.
+   */
+  const canEdit = user?.role === "ADMIN";
 
   return (
     <div className="flex flex-col gap-6">
@@ -28,6 +52,8 @@ export default async function SettingsPage() {
         title="Settings"
         description="Workspace configuration and the health of the services behind it."
       />
+
+      <CurrencyCard currency={currency} canEdit={canEdit} />
 
       <Card>
         <CardHeader>
@@ -120,6 +146,66 @@ export default async function SettingsPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/**
+ * The application currency.
+ *
+ * One setting, and the only one on this page that writes anything. It is placed
+ * above the status card deliberately: the status card reports on services, and
+ * this is the one thing here an administrator is likely to have come to change.
+ *
+ * The note below the control is the same point the confirmation dialog makes,
+ * stated once where somebody reading the page will find it rather than only in
+ * a modal they may never open.
+ */
+function CurrencyCard({
+  currency,
+  canEdit,
+}: {
+  currency: Currency;
+  canEdit: boolean;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Coins className="size-4 text-muted-foreground" aria-hidden />
+          Currency
+        </CardTitle>
+        <CardDescription>
+          The currency this workspace accounts in. Every price, cost and total in
+          the application is displayed in it.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {canEdit ? (
+          <CurrencyForm currency={currency} />
+        ) : (
+          <div className="flex flex-col gap-2">
+            <p className="text-sm font-medium">Application currency</p>
+            <p className="text-sm text-muted-foreground">
+              {currencyLabel(currency)} — amounts display as{" "}
+              <span className="tabular font-medium text-foreground">
+                {formatMoney("180104.96", currency)}
+              </span>
+              .
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Only an administrator can change this.
+            </p>
+          </div>
+        )}
+
+        <p className="rounded-lg border border-border bg-muted/40 p-3 text-xs leading-relaxed text-muted-foreground">
+          Changing the currency changes how existing monetary amounts are
+          displayed. Existing amounts are not converted — there are no exchange
+          rates in this system, and every stored value keeps exactly the figure
+          it was entered with.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 

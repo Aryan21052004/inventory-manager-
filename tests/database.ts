@@ -7,6 +7,16 @@ import { fakeClerkUser, signInAs } from "./clerk-mock";
  * wrong order fails loudly rather than silently orphaning rows.
  */
 export async function resetDatabase(): Promise<void> {
+  /*
+   * The settings singleton, first and separately.
+   *
+   * It points at `users` with SetNull, so the order is not forced — but leaving
+   * it would leak a currency chosen by one test into every test after it, and a
+   * suite whose result depends on file order is worse than one that has to
+   * remember a delete. Clearing it puts every test back on the same footing:
+   * no row, which `getCurrency()` reads as the INR default.
+   */
+  await prisma.appSetting.deleteMany();
   // Order-line photographs first. They cascade from the line, so the deletes
   // below would take them anyway — clearing them explicitly keeps this
   // function's "children first" shape readable rather than relying on a

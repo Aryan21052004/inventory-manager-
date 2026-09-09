@@ -17,6 +17,7 @@ import {
 import { formatCurrency, formatNumber } from "@/lib/format";
 import { getCurrentUser } from "@/server/auth";
 import { loadCustomerStats } from "@/server/customers";
+import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Customers" };
 
@@ -46,9 +47,10 @@ export default async function CustomersPage({
 }) {
   const params = parseCustomerListParams(await searchParams);
 
-  const [user, stats] = await Promise.all([
+  const [user, stats, currency] = await Promise.all([
     getCurrentUser(),
     loadCustomerStats(),
+    getCurrency(),
   ]);
 
   const canManage = user?.role === "ADMIN";
@@ -84,7 +86,7 @@ export default async function CustomersPage({
           />
           <StatCard
             label="Lifetime value"
-            value={formatCurrency(stats.data.lifetimeValue)}
+            value={formatCurrency(stats.data.lifetimeValue, currency)}
             hint="Confirmed and completed orders"
             icon={Wallet}
             tone="success"

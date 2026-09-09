@@ -39,6 +39,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import type { Currency } from "@/lib/currency";
 import {
   formatCurrency,
   formatDate,
@@ -56,6 +57,7 @@ import {
   loadSales,
   type CertificateAttentionLot,
 } from "@/server/dashboard";
+import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
@@ -298,7 +300,10 @@ function CertificateBadge({ lot }: { lot: CertificateAttentionLot }) {
 // ---------------------------------------------------------------------------
 
 async function InventorySection() {
-  const result = await loadInventory();
+  const [result, currency] = await Promise.all([
+    loadInventory(),
+    getCurrency(),
+  ]);
 
   if (!result.ok) return <SectionError message={result.error.message} />;
 
@@ -326,7 +331,7 @@ async function InventorySection() {
         />
         <StatCard
           label="Value at cost"
-          value={formatCurrency(data.stockValue)}
+          value={formatCurrency(data.stockValue, currency)}
           hint={
             data.uncostedUnits > 0
               ? `Covers ${formatNumber(data.costedUnits)} of ${formatNumber(data.totalUnits)} units`
@@ -337,7 +342,7 @@ async function InventorySection() {
         />
         <StatCard
           label="Tied up in retired stock"
-          value={formatCurrency(retired.value)}
+          value={formatCurrency(retired.value, currency)}
           hint={
             retired.units > 0
               ? `${formatNumber(retired.units)} units in inactive or discontinued products`
@@ -366,7 +371,10 @@ async function InventorySection() {
 // ---------------------------------------------------------------------------
 
 async function SalesSection() {
-  const result = await loadSales();
+  const [result, currency] = await Promise.all([
+    loadSales(),
+    getCurrency(),
+  ]);
 
   if (!result.ok) return <SectionError message={result.error.message} />;
 
@@ -377,14 +385,14 @@ async function SalesSection() {
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Realised revenue"
-          value={formatCurrency(data.realisedRevenue)}
+          value={formatCurrency(data.realisedRevenue, currency)}
           hint="Confirmed and completed orders"
           icon={Wallet}
           tone="success"
         />
         <StatCard
           label="Open order value"
-          value={formatCurrency(data.openOrderValue)}
+          value={formatCurrency(data.openOrderValue, currency)}
           hint="Confirmed, not yet shipped"
           icon={ShoppingCart}
         />
@@ -451,7 +459,7 @@ async function SalesSection() {
                       <OrderStatusBadge status={order.status as never} />
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
-                      {formatCurrency(order.total)}
+                      {formatCurrency(order.total, currency)}
                     </TableCell>
                     <TableCell className="hidden text-right text-sm text-muted-foreground md:table-cell">
                       {formatDate(order.createdAt)}
@@ -472,7 +480,10 @@ async function SalesSection() {
 // ---------------------------------------------------------------------------
 
 async function ProcurementSection() {
-  const result = await loadProcurement();
+  const [result, currency] = await Promise.all([
+    loadProcurement(),
+    getCurrency(),
+  ]);
 
   if (!result.ok) return <SectionError message={result.error.message} />;
 
@@ -483,13 +494,13 @@ async function ProcurementSection() {
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Received spend"
-          value={formatCurrency(data.receivedSpend)}
+          value={formatCurrency(data.receivedSpend, currency)}
           hint="Goods actually delivered"
           icon={Wallet}
         />
         <StatCard
           label="Committed"
-          value={formatCurrency(data.committedSpend)}
+          value={formatCurrency(data.committedSpend, currency)}
           hint="Placed with a supplier, in transit"
           icon={Truck}
         />
@@ -556,7 +567,7 @@ async function ProcurementSection() {
                       <PurchaseStatusBadge status={purchase.status as never} />
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
-                      {formatCurrency(purchase.total)}
+                      {formatCurrency(purchase.total, currency)}
                     </TableCell>
                     <TableCell className="hidden text-right text-sm text-muted-foreground md:table-cell">
                       {formatDate(purchase.purchaseDate)}
@@ -577,7 +588,10 @@ async function ProcurementSection() {
 // ---------------------------------------------------------------------------
 
 async function CostingSection() {
-  const result = await loadCosting();
+  const [result, currency] = await Promise.all([
+    loadCosting(),
+    getCurrency(),
+  ]);
 
   if (!result.ok) return <SectionError message={result.error.message} />;
 
@@ -625,7 +639,7 @@ async function CostingSection() {
           value={
             data.costedRevenue === null
               ? "—"
-              : formatCurrency(data.costedRevenue)
+              : formatCurrency(data.costedRevenue, currency)
           }
           hint={
             data.costedRevenue === null
@@ -636,7 +650,7 @@ async function CostingSection() {
         />
         <StatCard
           label="Known cost of sales"
-          value={data.knownCogs === null ? "—" : formatCurrency(data.knownCogs)}
+          value={data.knownCogs === null ? "—" : formatCurrency(data.knownCogs, currency)}
           hint={
             data.knownCogs === null
               ? "No sold units have a recorded cost"
@@ -644,7 +658,7 @@ async function CostingSection() {
           }
           icon={Wallet}
         />
-        <MarginTile data={data} />
+        <MarginTile data={data} currency={currency} />
       </div>
 
       {/*
@@ -673,7 +687,7 @@ async function CostingSection() {
               : complete
                 ? `Every one of the ${formatNumber(data.fulfilledUnits)} units fulfilled has a recorded acquisition cost, so the margin above covers everything that has shipped.`
                 : data.costedUnits === 0
-                  ? `None of the ${formatNumber(data.fulfilledUnits)} units fulfilled has a recorded acquisition cost, so no margin can be calculated. Those units sold for ${formatCurrency(data.allRevenue)}; what they cost is unknown. Coverage grows as stock received since cost tracking began is sold.`
+                  ? `None of the ${formatNumber(data.fulfilledUnits)} units fulfilled has a recorded acquisition cost, so no margin can be calculated. Those units sold for ${formatCurrency(data.allRevenue, currency)}; what they cost is unknown. Coverage grows as stock received since cost tracking began is sold.`
                   : `Margin is calculated over ${formatNumber(data.costedUnits)} of ${formatNumber(data.fulfilledUnits)} units fulfilled. The remaining ${formatNumber(data.fulfilledUnits - data.costedUnits)} have no recorded acquisition cost and are excluded from both the cost and the revenue it is measured against.`}
           </p>
 
@@ -717,6 +731,7 @@ async function CostingSection() {
  */
 function MarginTile({
   data,
+  currency,
 }: {
   data: {
     margin: string | null;
@@ -725,6 +740,7 @@ function MarginTile({
     fulfilledUnits: number;
     unitsSold: number;
   };
+  currency: Currency;
 }) {
   if (data.margin === null) {
     /*
@@ -756,7 +772,7 @@ function MarginTile({
   return (
     <StatCard
       label="Realised margin"
-      value={formatCurrency(data.margin)}
+      value={formatCurrency(data.margin, currency)}
       hint={
         complete
           ? `${(data.marginPercent ?? 0).toFixed(1)}% across every unit fulfilled`

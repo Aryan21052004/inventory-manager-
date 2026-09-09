@@ -35,6 +35,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import type { Currency } from "@/lib/currency";
 import {
   formatCurrency,
   formatDate,
@@ -54,6 +55,7 @@ import {
   loadCategories,
   type ProductDetail,
 } from "@/server/products";
+import { getCurrency } from "@/server/settings";
 import { loadSupplierOptions } from "@/server/suppliers";
 import { cn } from "@/lib/utils";
 
@@ -88,9 +90,10 @@ export default async function ProductDetailPage({
 }) {
   const { id } = await params;
 
-  const [result, user] = await Promise.all([
+  const [result, user, currency] = await Promise.all([
     getProductDetail(id),
     getCurrentUser(),
+    getCurrency(),
   ]);
 
   if (!result.ok) {
@@ -159,7 +162,7 @@ export default async function ProductDetailPage({
         />
       </div>
 
-      <StockSummary product={product} />
+      <StockSummary product={product} currency={currency} />
 
       {/*
         One panel per open batch, because that is where paperwork lives now.
@@ -258,6 +261,7 @@ export default async function ProductDetailPage({
                 value={product.stockValue}
                 costedUnits={product.costedUnits}
                 uncostedUnits={product.uncostedUnits}
+                currency={currency}
               />
             </DetailRow>
             <DetailRow label="Reference price">
@@ -267,7 +271,7 @@ export default async function ProductDetailPage({
                 </span>
               ) : (
                 <span className="tabular text-sm font-medium">
-                  {formatCurrency(product.sellingPrice)}
+                  {formatCurrency(product.sellingPrice, currency)}
                 </span>
               )}
             </DetailRow>
@@ -277,6 +281,7 @@ export default async function ProductDetailPage({
                 costedUnits={product.costedUnits}
                 uncostedUnits={product.uncostedUnits}
                 price={product.sellingPrice}
+                currency={currency}
               />
             </DetailRow>
             <DetailRow label="Status">
@@ -372,7 +377,7 @@ export default async function ProductDetailPage({
                         {lot.unitCost === null ? (
                           <span className="text-muted-foreground">Unknown</span>
                         ) : (
-                          formatCurrency(lot.unitCost)
+                          formatCurrency(lot.unitCost, currency)
                         )}
                       </TableCell>
                       <TableCell className="tabular text-right text-sm">
@@ -387,6 +392,7 @@ export default async function ProductDetailPage({
                         ) : (
                           formatCurrency(
                             Number(lot.unitCost) * lot.quantityRemaining,
+                            currency,
                           )
                         )}
                       </TableCell>
@@ -550,7 +556,7 @@ export default async function ProductDetailPage({
                         {formatNumber(line.quantity)}
                       </TableCell>
                       <TableCell className="tabular text-right font-medium">
-                        {formatCurrency(line.total)}
+                        {formatCurrency(line.total, currency)}
                       </TableCell>
                       <TableCell>
                         <Badge variant="muted">{line.status}</Badge>
@@ -599,7 +605,7 @@ export default async function ProductDetailPage({
                         {formatNumber(line.quantity)}
                       </TableCell>
                       <TableCell className="tabular text-right font-medium">
-                        {formatCurrency(line.total)}
+                        {formatCurrency(line.total, currency)}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {formatDate(line.purchaseDate)}
@@ -624,7 +630,13 @@ export default async function ProductDetailPage({
  * four units, and one holding none holds none. What the stock is worth is a
  * separate question, answered from the lots rather than from the count.
  */
-function StockSummary({ product }: { product: ProductDetail }) {
+function StockSummary({
+  product,
+  currency,
+}: {
+  product: ProductDetail;
+  currency: Currency;
+}) {
   return (
     <Card>
       <CardContent>
@@ -642,7 +654,7 @@ function StockSummary({ product }: { product: ProductDetail }) {
               Value at cost
             </p>
             <p className="tabular mt-1 text-3xl font-semibold tracking-tight">
-              {formatCurrency(product.stockValue)}
+              {formatCurrency(product.stockValue, currency)}
             </p>
             {product.uncostedUnits > 0 ? (
               <p className="mt-1 text-xs text-muted-foreground">
@@ -691,10 +703,12 @@ function AverageCost({
   value,
   costedUnits,
   uncostedUnits,
+  currency,
 }: {
   value: string;
   costedUnits: number;
   uncostedUnits: number;
+  currency: Currency;
 }) {
   if (costedUnits === 0) {
     return (
@@ -708,7 +722,7 @@ function AverageCost({
 
   return (
     <span className="tabular text-sm font-medium">
-      {formatCurrency(average)}
+      {formatCurrency(average, currency)}
       {uncostedUnits > 0 ? (
         <span className="ml-1.5 text-xs text-muted-foreground">
           (over {formatNumber(costedUnits)} costed{" "}
@@ -735,12 +749,14 @@ function Margin({
   costedUnits,
   uncostedUnits,
   price,
+  currency,
 }: {
   stockValue: string;
   costedUnits: number;
   uncostedUnits: number;
   /** The reference price. Null when the product is only ever quoted. */
   price: string | null;
+  currency: Currency;
 }) {
   /*
    * No reference price, no indicative margin.
@@ -781,7 +797,7 @@ function Margin({
           difference < 0 ? "text-destructive" : "text-foreground",
         )}
       >
-        {formatCurrency(difference)}
+        {formatCurrency(difference, currency)}
         <span className="ml-1.5 text-xs text-muted-foreground">
           ({percentage.toFixed(1)}%)
         </span>

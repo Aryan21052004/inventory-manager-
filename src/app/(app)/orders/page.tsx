@@ -17,6 +17,7 @@ import {
   type RawSearchParams,
 } from "@/lib/order-query";
 import { loadCustomers, loadOrderStats } from "@/server/orders";
+import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Orders" };
 
@@ -42,9 +43,10 @@ export default async function OrdersPage({
 }) {
   const params = parseOrderListParams(await searchParams);
 
-  const [stats, customers] = await Promise.all([
+  const [stats, customers, currency] = await Promise.all([
     loadOrderStats(),
     loadCustomers(),
+    getCurrency(),
   ]);
 
   return (
@@ -85,7 +87,7 @@ export default async function OrdersPage({
           />
           <StatCard
             label="Confirmed value"
-            value={formatCurrency(stats.data.openValue)}
+            value={formatCurrency(stats.data.openValue, currency)}
             hint={`${formatNumber(stats.data.confirmed)} awaiting completion`}
             icon={Wallet}
             tone="success"

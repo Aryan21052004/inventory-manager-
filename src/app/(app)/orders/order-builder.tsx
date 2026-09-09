@@ -48,6 +48,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useCurrency } from "@/components/layout/currency-provider";
 import { formatCurrency, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -156,6 +157,8 @@ function OrderBuilder({
   );
   const [lines, setLines] = useState<OrderLine[]>(order?.lines ?? []);
   const [submitting, setSubmitting] = useState(false);
+
+  const currency = useCurrency();
 
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<ProductOption[]>(initialProducts);
@@ -422,7 +425,7 @@ function OrderBuilder({
                             {option.sellingPrice === null ? (
                               <span className="text-muted-foreground">—</span>
                             ) : (
-                              formatCurrency(option.sellingPrice)
+                              formatCurrency(option.sellingPrice, currency)
                             )}
                           </TableCell>
                           <TableCell className="text-right">
@@ -573,7 +576,7 @@ function OrderBuilder({
                           />
                         </TableCell>
                         <TableCell className="tabular text-right font-medium">
-                          {formatCurrency((unitCents * line.quantity) / 100)}
+                          {formatCurrency((unitCents * line.quantity) / 100, currency)}
                         </TableCell>
                         <TableCell className="text-right">
                           <Button
@@ -607,7 +610,7 @@ function OrderBuilder({
               <div className="flex items-center justify-between">
                 <dt className="text-muted-foreground">Subtotal</dt>
                 <dd className="tabular font-medium">
-                  {formatCurrency(subtotalCents / 100)}
+                  {formatCurrency(subtotalCents / 100, currency)}
                 </dd>
               </div>
               {/*
@@ -618,7 +621,7 @@ function OrderBuilder({
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <dt className="font-medium">Grand total</dt>
                 <dd className="tabular text-lg font-semibold">
-                  {formatCurrency(Math.max(totalCents, 0) / 100)}
+                  {formatCurrency(Math.max(totalCents, 0) / 100, currency)}
                 </dd>
               </div>
             </dl>
@@ -787,6 +790,8 @@ function QuoteNote({
   reference: string | null;
   quoted: string;
 }) {
+  const currency = useCurrency();
+
   if (reference === null || !isValidQuote(quoted)) return null;
 
   const referenceCents = Math.round(Number(reference) * 100);
@@ -802,7 +807,7 @@ function QuoteNote({
 
   return (
     <span className="mt-1 block text-xs text-muted-foreground">
-      {formatCurrency(Math.abs(difference) / 100)}{" "}
+      {formatCurrency(Math.abs(difference) / 100, currency)}{" "}
       {difference < 0 ? "below" : "above"} reference
       {percent === null ? null : ` · ${percent}%`}
     </span>

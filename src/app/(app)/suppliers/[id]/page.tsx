@@ -46,6 +46,7 @@ import {
 } from "@/lib/format";
 import { getCurrentUser } from "@/server/auth";
 import { getSupplierDetail, type SupplierDetail } from "@/server/suppliers";
+import { getCurrency } from "@/server/settings";
 
 /**
  * A single supplier, and everything traceable back to them.
@@ -82,9 +83,10 @@ export default async function SupplierDetailPage({
 }) {
   const { id } = await params;
 
-  const [result, user] = await Promise.all([
+  const [result, user, currency] = await Promise.all([
     getSupplierDetail(id),
     getCurrentUser(),
+    getCurrency(),
   ]);
 
   if (!result.ok) {
@@ -154,7 +156,7 @@ export default async function SupplierDetailPage({
         />
         <StatCard
           label="Total purchased"
-          value={formatCurrency(supplier.totalPurchased)}
+          value={formatCurrency(supplier.totalPurchased, currency)}
           hint="Received purchases only"
           icon={Wallet}
           tone="success"
@@ -281,7 +283,7 @@ export default async function SupplierDetailPage({
                   />
                   <Figure
                     label="Value at cost"
-                    value={formatCurrency(supplier.stockOnHand.value)}
+                    value={formatCurrency(supplier.stockOnHand.value, currency)}
                   />
                   <Figure
                     label="Products"
@@ -365,7 +367,7 @@ export default async function SupplierDetailPage({
                       {formatNumber(purchase.itemCount)}
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
-                      {formatCurrency(purchase.total)}
+                      {formatCurrency(purchase.total, currency)}
                     </TableCell>
                     <TableCell className="hidden text-sm text-muted-foreground md:table-cell">
                       {formatDate(purchase.purchaseDate)}

@@ -37,6 +37,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import type { Currency } from "@/lib/currency";
 import { formatCurrency, formatDateTime, formatNumber } from "@/lib/format";
 import {
   canFulfilOutstanding,
@@ -52,6 +53,7 @@ import {
   type OrderDetailLine,
 } from "@/server/orders";
 import { listOrderItemImages } from "@/server/order-item-images";
+import { getCurrency } from "@/server/settings";
 import {
   listLinkablePurchaseLines,
   listSupplyLinksForOrder,
@@ -92,7 +94,10 @@ export default async function OrderDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const result = await getOrderDetail(id);
+  const [result, currency] = await Promise.all([
+    getOrderDetail(id),
+    getCurrency(),
+  ]);
 
   if (!result.ok) {
     return (
@@ -362,13 +367,13 @@ export default async function OrderDetailPage({
                       ) : null}
                     </TableCell>
                     <TableCell className="tabular text-right">
-                      {formatCurrency(line.unitPrice)}
+                      {formatCurrency(line.unitPrice, currency)}
                     </TableCell>
                     <TableCell className="tabular hidden text-right text-sm md:table-cell">
-                      <LineCost line={line} />
+                      <LineCost line={line} currency={currency} />
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
-                      {formatCurrency(line.total)}
+                      {formatCurrency(line.total, currency)}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -379,7 +384,7 @@ export default async function OrderDetailPage({
               <div className="flex items-center justify-between">
                 <dt className="text-muted-foreground">Subtotal</dt>
                 <dd className="tabular font-medium">
-                  {formatCurrency(order.subtotal)}
+                  {formatCurrency(order.subtotal, currency)}
                 </dd>
               </div>
               {/*
@@ -389,10 +394,14 @@ export default async function OrderDetailPage({
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <dt className="font-semibold">Grand total</dt>
                 <dd className="tabular text-lg font-semibold">
-                  {formatCurrency(order.total)}
+                  {formatCurrency(order.total, currency)}
                 </dd>
               </div>
-              <OrderMargin lines={order.lines} status={order.status} />
+              <OrderMargin
+                lines={order.lines}
+                status={order.status}
+                currency={currency}
+              />
             </dl>
           </CardContent>
         </Card>
@@ -474,7 +483,7 @@ export default async function OrderDetailPage({
                         </span>
                         <OrderStatusBadge status={entry.status} />
                         <span className="tabular shrink-0 text-sm font-medium">
-                          {formatCurrency(entry.total)}
+                          {formatCurrency(entry.total, currency)}
                         </span>
                       </Link>
                     </li>
@@ -627,7 +636,13 @@ function Timeline({ order }: { order: OrderDetail }) {
  * could be read as free. And a line straddling both shows what it can vouch
  * for, with the shortfall named underneath.
  */
-function LineCost({ line }: { line: OrderDetailLine }) {
+function LineCost({
+  line,
+  currency,
+}: {
+  line: OrderDetailLine;
+  currency: Currency;
+}) {
   if (line.costTotal === null) {
     return <span className="text-muted-foreground">—</span>;
   }
@@ -642,7 +657,7 @@ function LineCost({ line }: { line: OrderDetailLine }) {
 
   return (
     <span className="inline-flex flex-col items-end">
-      <span>{formatCurrency(line.costTotal)}</span>
+      <span>{formatCurrency(line.costTotal, currency)}</span>
       {partial ? (
         <span className="text-xs text-muted-foreground">
           {formatNumber(line.costedQuantity)} of{" "}
@@ -670,9 +685,11 @@ function LineCost({ line }: { line: OrderDetailLine }) {
 function OrderMargin({
   lines,
   status,
+  currency,
 }: {
   lines: OrderDetailLine[];
   status: OrderStatus;
+  currency: Currency;
 }) {
   const results = lines.map((line) =>
     marginOf({
@@ -737,7 +754,7 @@ function OrderMargin({
     <div className="flex flex-col gap-1 border-t border-border pt-3">
       <div className="flex items-center justify-between">
         <dt className="text-muted-foreground">Cost of goods sold</dt>
-        <dd className="tabular font-medium">{formatCurrency(cost)}</dd>
+        <dd className="tabular font-medium">{formatCurrency(cost, currency)}</dd>
       </div>
       <div className="flex items-center justify-between">
         <dt className="text-muted-foreground">Gross margin</dt>
@@ -747,7 +764,7 @@ function OrderMargin({
             margin < 0 ? "text-destructive" : "text-success",
           )}
         >
-          {formatCurrency(margin)}
+          {formatCurrency(margin, currency)}
           {revenue > 0 ? (
             <span className="ml-1.5 text-xs text-muted-foreground">
               ({((margin / revenue) * 100).toFixed(1)}%)

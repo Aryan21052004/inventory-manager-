@@ -30,6 +30,7 @@ import {
   type ProductSortKey,
 } from "@/lib/product-query";
 import { listProducts } from "@/server/products";
+import { getCurrency } from "@/server/settings";
 import { cn } from "@/lib/utils";
 
 /**
@@ -53,7 +54,15 @@ async function ProductsTable({
   suppliers: SupplierOption[];
   canManage: boolean;
 }) {
-  const result = await listProducts(params);
+  /*
+   * `getCurrency` is memoised for the render, so asking for it here rather
+   * than taking it as a prop costs no extra query — the page above has already
+   * resolved it.
+   */
+  const [result, currency] = await Promise.all([
+    listProducts(params),
+    getCurrency(),
+  ]);
 
   if (!result.ok) {
     return (
@@ -152,7 +161,7 @@ async function ProductsTable({
                 {product.sellingPrice === null ? (
                   <span className="text-muted-foreground">—</span>
                 ) : (
-                  formatCurrency(product.sellingPrice)
+                  formatCurrency(product.sellingPrice, currency)
                 )}
               </TableCell>
 

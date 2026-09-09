@@ -35,6 +35,23 @@ enum UserRole {
   STAFF
 }
 
+/// The currency the whole installation accounts in, as an ISO 4217 code.
+///
+/// Codes and not symbols: `₹` is a rendering of INR rather than the currency,
+/// and `$` belongs to several currencies at once. The code is what this column
+/// stores, what the formatter keys on, and what an exported report states.
+///
+/// All three have a two-decimal minor unit, which the costing engine relies on
+/// — every amount is computed in integer minor units and stored as
+/// `Decimal(12, 2)`. A currency with a different exponent (JPY has 0, KWD has
+/// 3) cannot simply be added to this list; it would mis-scale every stored
+/// amount with nothing to catch it.
+enum Currency {
+  USD
+  INR
+  EUR
+}
+
 /// Whether a catalogue item can be sold. DISCONTINUED is kept distinct from
 /// INACTIVE so a temporary pause reads differently from a permanent one.
 enum ProductStatus {
@@ -199,6 +216,54 @@ enum LotStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Application settings
+// ---------------------------------------------------------------------------
+
+/// Installation-wide configuration. Exactly one row, forever.
+///
+/// The single-row shape is enforced by the database rather than by convention:
+/// the primary key defaults to `singleton` and a check constraint refuses any
+/// other value, so a second settings row is not something a future writer can
+/// create by accident. That matters because "the application currency" has to
+/// have one answer — a table that quietly grew a second row would give two,
+/// and whichever one a query happened to read first would win.
+///
+/// Read through `getCurrency()` in src/server/settings.ts, which falls back to
+/// the default when the row is missing. It can legitimately be missing: a fresh
+/// database before the migration's insert, and a test that has just truncated
+/// everything. Neither should take a page down, so the loader defaults rather
+/// than throwing.
+model AppSetting {
+  /// Always `singleton`, and constrained to it. Not an autoincrement and not a
+  /// cuid: a settings row that could have any id is a settings *table*.
+  id String @id @default("singleton")
+
+  /// What the installation accounts in.
+  ///
+  /// **This is a label, not a rate.** Changing it re-denominates nothing: every
+  /// `Decimal(12, 2)` in this schema keeps the exact value it had, and the
+  /// currency says how those values should be read. There is no exchange rate
+  /// anywhere in this system and none may be added — converting historical
+  /// amounts would write numbers nobody transacted, and once written they are
+  /// indistinguishable from the real ones.
+  ///
+  /// The accepted consequence is that history is re-labelled: a purchase
+  /// entered while the setting said USD renders with a rupee sign after a
+  /// switch to INR. The admin UI states this before it saves.
+  currency Currency @default(INR)
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Who last changed it. SetNull rather than cascade — the setting outlives
+  /// the account that set it, and losing the attribution is better than losing
+  /// the row.
+  updatedBy     String? @map("updated_by")
+  updatedByUser User?   @relation("AppSettingUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@map("app_settings")
+}
+
+// ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
 
@@ -238,6 +303,7 @@ model User {
   stockLots         StockLot[]
   returnsCreated    Return[]           @relation("ReturnCreatedBy")
   lotsStatusChanged StockLot[]         @relation("LotStatusChangedBy")
+  appSettingsSet    AppSetting[]       @relation("AppSettingUpdatedBy")
 
   @@index([role])
   @@map("users")

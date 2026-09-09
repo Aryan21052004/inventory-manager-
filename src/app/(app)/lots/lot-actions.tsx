@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input, Textarea } from "@/components/ui/input";
 import type { LotStatus } from "@/generated/prisma/enums";
+import { useCurrency } from "@/components/layout/currency-provider";
 import { formatCurrency, formatNumber } from "@/lib/format";
 import {
   QUARANTINED_LOT_STATUS,
@@ -284,6 +285,7 @@ function WriteOffDialog({
 }) {
   const [quantity, setQuantity] = useState(0);
   const [reason, setReason] = useState("");
+  const currency = useCurrency();
 
   const overQuantity = quantity > lot.quantityRemaining;
   const remaining = Math.max(0, lot.quantityRemaining - quantity);
@@ -291,7 +293,7 @@ function WriteOffDialog({
   const value =
     lot.unitCost === null
       ? null
-      : formatCurrency((Number(lot.unitCost) * quantity).toFixed(2));
+      : formatCurrency((Number(lot.unitCost) * quantity).toFixed(2), currency);
 
   return (
     <Dialog

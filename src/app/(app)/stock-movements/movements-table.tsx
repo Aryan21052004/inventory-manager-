@@ -37,6 +37,8 @@ import {
   listMovements,
   type MovementListItem,
 } from "@/server/stock-movements";
+import { getCurrency } from "@/server/settings";
+import type { Currency } from "@/lib/currency";
 import { cn } from "@/lib/utils";
 
 /**
@@ -47,7 +49,10 @@ import { cn } from "@/lib/utils";
  * orders-table.tsx.
  */
 async function MovementsTable({ params }: { params: MovementListParams }) {
-  const result = await listMovements(params);
+  const [result, currency] = await Promise.all([
+    listMovements(params),
+    getCurrency(),
+  ]);
 
   if (!result.ok) {
     return (
@@ -143,7 +148,7 @@ async function MovementsTable({ params }: { params: MovementListParams }) {
               </TableCell>
 
               <TableCell className="tabular hidden text-right text-sm md:table-cell">
-                <MovementCost movement={movement} />
+                <MovementCost movement={movement} currency={currency} />
               </TableCell>
 
               <TableCell>
@@ -248,7 +253,13 @@ function SortableHead({
  * the money it can vouch for with its coverage underneath, so nobody reads a
  * partial total as a complete one.
  */
-function MovementCost({ movement }: { movement: MovementListItem }) {
+function MovementCost({
+  movement,
+  currency,
+}: {
+  movement: MovementListItem;
+  currency: Currency;
+}) {
   const units = Math.abs(movement.change);
 
   if (movement.costTotal === null) {
@@ -259,7 +270,7 @@ function MovementCost({ movement }: { movement: MovementListItem }) {
 
   return (
     <span className="inline-flex flex-col items-end">
-      <span>{formatCurrency(movement.costTotal)}</span>
+      <span>{formatCurrency(movement.costTotal, currency)}</span>
       {partial ? (
         <span className="text-xs text-muted-foreground">
           {formatNumber(movement.costedQuantity)} of {formatNumber(units)} costed

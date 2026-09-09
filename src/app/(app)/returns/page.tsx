@@ -23,6 +23,7 @@ import {
 import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
 import { getCurrentUser } from "@/server/auth";
 import { listQuarantinedLots } from "@/server/lots";
+import { getCurrency } from "@/server/settings";
 
 export const metadata = { title: "Returned stock" };
 
@@ -74,7 +75,10 @@ export default async function ReturnsPage() {
     );
   }
 
-  const lots = await listQuarantinedLots();
+  const [lots, currency] = await Promise.all([
+    listQuarantinedLots(),
+    getCurrency(),
+  ]);
 
   const units = lots.reduce((sum, lot) => sum + lot.quantityRemaining, 0);
   const oldest = lots[0]?.daysHeld ?? 0;
@@ -198,6 +202,7 @@ export default async function ReturnsPage() {
                       ) : (
                         formatCurrency(
                           Number(lot.unitCost) * lot.quantityRemaining,
+                          currency,
                         )
                       )}
                     </TableCell>

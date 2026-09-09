@@ -1,3 +1,4 @@
+import type { Currency } from "@/lib/currency";
 import { csvFilename, csvHeaders, toCsv } from "@/lib/csv";
 import { AppError, toSafeError } from "@/lib/errors";
 import {
@@ -18,6 +19,7 @@ import {
   loadValuationReport,
 } from "@/server/reports";
 import { certificateStatusLabel } from "@/lib/certificate-status";
+import { getCurrency } from "@/server/settings";
 
 /**
  * CSV export for the reports.
@@ -66,11 +68,29 @@ function paramsFor(report: ReportKey, url: URL): ReportParams {
   return { ...parsed, page: 1, pageSize: EXPORT_LIMIT };
 }
 
-/** The filters an export was run under, written into the file itself. */
-function preamble(report: ReportKey, params: ReportParams): string[] {
+/**
+ * The filters an export was run under, written into the file itself.
+ *
+ * The currency line is why this takes one: a spreadsheet of bare decimals is
+ * ambiguous the moment it leaves the application, and a file that says 18104.96
+ * without saying in what is a file somebody will guess at. Stating it in the
+ * metadata is the whole of the fix.
+ *
+ * It is stated *here* and not in the cells. Money stays a raw decimal in every
+ * numeric column — putting `₹` in front of it would turn a number column into a
+ * text column, which breaks sorting, summing and every formula anybody writes
+ * against the export. The header says the currency once; the cells stay
+ * arithmetic.
+ */
+function preamble(
+  report: ReportKey,
+  params: ReportParams,
+  currency: Currency,
+): string[] {
   const lines = [
     `${REPORT_TITLES[report]} — exported ${new Date().toISOString().slice(0, 10)}`,
     `Period: ${describeRange(params)}`,
+    `Currency: ${currency} — monetary columns are plain numbers in ${currency}, unconverted.`,
   ];
 
   if (REPORT_CONFIG[report].groupings.length > 0) {
@@ -111,7 +131,7 @@ export async function GET(
     const url = new URL(request.url);
     const reportParams = paramsFor(report, url);
 
-    const body = await render(report, reportParams);
+    const body = await render(report, reportParams, await getCurrency());
 
     return new Response(body, {
       status: 200,
@@ -158,6 +178,7 @@ function rethrow(error: { code: AppError["code"]; message: string }): never {
 async function render(
   report: ReportKey,
   params: ReportParams,
+  currency: Currency,
 ): Promise<string> {
   const truncated = (count: number): string[] =>
     count >= EXPORT_LIMIT
@@ -215,7 +236,7 @@ async function render(
         ],
       ],
       [
-        ...preamble(report, params),
+        ...preamble(report, params, currency),
         "Value at cost covers only units with a recorded acquisition cost. Uncosted units are excluded from it, never valued at zero.",
         "Value at retail is quantity x selling price — a different basis, not a second estimate of cost.",
         ...truncated(rows.length),
@@ -304,7 +325,7 @@ async function render(
         ],
       ],
       [
-        ...preamble(report, params),
+        ...preamble(report, params, currency),
         "One row per batch, not per product. Only the certificate currently in force is shown; superseded documents remain on the product as history.",
         "A certificate with no expiry date is valid — a Certificate of Conformity typically never expires.",
         "Supplier is lot provenance, not a statement about who issued the certificate. Batches not acquired by purchase have none.",
@@ -333,7 +354,7 @@ async function render(
         ["TOTAL", "", totals.orders, totals.units, totals.revenue],
       ],
       [
-        ...preamble(report, params),
+        ...preamble(report, params, currency),
         "Confirmed and completed orders only, dated by when each was confirmed.",
         ...truncated(rows.length),
       ],
@@ -377,7 +398,7 @@ async function render(
         ],
       ],
       [
-        ...preamble(report, params),
+        ...preamble(report, params, currency),
         "Dated by when each movement was recorded in the ledger — the moment the stock actually moved.",
         "Direction is read from the balance a movement left behind, not from its type, so a cancellation counts against the movement it undid.",
         "Units in minus units out equals net change. A confirmation and its later cancellation remain two movements.",
@@ -406,7 +427,7 @@ async function render(
       ["TOTAL", "", totals.purchases, totals.units, totals.receivedSpend],
     ],
     [
-      ...preamble(report, params),
+      ...preamble(report, params, currency),
       "Received purchases only, dated by when each delivery arrived. Drafts and cancellations are excluded.",
       `Committed (pending, not yet received): ${totals.committedSpend} across ${totals.committedPurchases} purchases — not counted as spend.`,
       "Spend is not cost of sales. These are different events at different times.",

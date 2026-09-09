@@ -30,6 +30,7 @@ import {
 import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { listCustomers } from "@/server/customers";
+import { getCurrency } from "@/server/settings";
 
 /**
  * The customers table.
@@ -52,7 +53,15 @@ async function CustomersTable({
   params: CustomerListParams;
   canManage: boolean;
 }) {
-  const result = await listCustomers(params);
+  /*
+   * `getCurrency` is memoised for the render, so asking for it here rather
+   * than taking it as a prop costs no extra query — the page above has already
+   * resolved it.
+   */
+  const [result, currency] = await Promise.all([
+    listCustomers(params),
+    getCurrency(),
+  ]);
 
   if (!result.ok) {
     return (
@@ -158,7 +167,7 @@ async function CustomersTable({
               </TableCell>
 
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(customer.lifetimeValue)}
+                {formatCurrency(customer.lifetimeValue, currency)}
               </TableCell>
 
               <TableCell className="hidden text-muted-foreground xl:table-cell">

@@ -55,6 +55,7 @@ import {
 import { cn } from "@/lib/utils";
 import { loadCertificateTypes } from "@/server/certificates";
 import { loadCategories } from "@/server/products";
+import { getCurrency } from "@/server/settings";
 import type { CertificateRegisterRow } from "@/server/reports";
 import {
   loadCertificateRegisterReport,
@@ -199,7 +200,10 @@ async function ValuationBody({
   params: ReportParams;
   defaults: Defaults;
 }) {
-  const result = await loadValuationReport(params);
+  const [result, currency] = await Promise.all([
+    loadValuationReport(params),
+    getCurrency(),
+  ]);
 
   if (!result.ok) {
     return (
@@ -227,14 +231,14 @@ async function ValuationBody({
       <div className="grid gap-4 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Value at cost"
-          value={formatCurrency(totals.valueAtCost)}
+          value={formatCurrency(totals.valueAtCost, currency)}
           hint={`Covers ${formatNumber(totals.costedUnits)} of ${formatNumber(totals.units)} units`}
           icon={ChevronsUpDown}
           tone="success"
         />
         <StatCard
           label="Value at retail"
-          value={formatCurrency(totals.valueAtRetail)}
+          value={formatCurrency(totals.valueAtRetail, currency)}
           hint="Quantity × selling price — a different basis"
           icon={ChevronsUpDown}
         />
@@ -251,7 +255,7 @@ async function ValuationBody({
         />
         <StatCard
           label="Retired stock"
-          value={formatCurrency(totals.retiredValueAtCost)}
+          value={formatCurrency(totals.retiredValueAtCost, currency)}
           hint={`${formatNumber(totals.retiredUnits)} units in ${formatNumber(totals.retiredProducts)} inactive or discontinued products`}
           icon={ChevronsUpDown}
           tone={totals.retiredUnits > 0 ? "warning" : "default"}
@@ -365,10 +369,10 @@ async function ValuationBody({
                 )}
               </TableCell>
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(row.valueAtCost)}
+                {formatCurrency(row.valueAtCost, currency)}
               </TableCell>
               <TableCell className="tabular hidden text-right text-muted-foreground md:table-cell">
-                {formatCurrency(row.valueAtRetail)}
+                {formatCurrency(row.valueAtRetail, currency)}
               </TableCell>
             </TableRow>
           ))}
@@ -399,7 +403,10 @@ async function SalesBody({
   params: ReportParams;
   defaults: Defaults;
 }) {
-  const result = await loadSalesReport(params);
+  const [result, currency] = await Promise.all([
+    loadSalesReport(params),
+    getCurrency(),
+  ]);
 
   if (!result.ok) {
     return (
@@ -427,7 +434,7 @@ async function SalesBody({
       <div className="grid gap-4 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Revenue"
-          value={formatCurrency(totals.revenue)}
+          value={formatCurrency(totals.revenue, currency)}
           hint="What customers were charged"
           icon={ChevronsUpDown}
           tone="success"
@@ -504,7 +511,7 @@ async function SalesBody({
                 {formatNumber(row.units)}
               </TableCell>
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(row.revenue)}
+                {formatCurrency(row.revenue, currency)}
               </TableCell>
             </TableRow>
           ))}
@@ -535,7 +542,10 @@ async function PurchaseBody({
   params: ReportParams;
   defaults: Defaults;
 }) {
-  const result = await loadPurchaseSpendReport(params);
+  const [result, currency] = await Promise.all([
+    loadPurchaseSpendReport(params),
+    getCurrency(),
+  ]);
 
   if (!result.ok) {
     return (
@@ -563,14 +573,14 @@ async function PurchaseBody({
       <div className="grid gap-4 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Received spend"
-          value={formatCurrency(totals.receivedSpend)}
+          value={formatCurrency(totals.receivedSpend, currency)}
           hint="Goods actually delivered"
           icon={ChevronsUpDown}
           tone="success"
         />
         <StatCard
           label="Committed"
-          value={formatCurrency(totals.committedSpend)}
+          value={formatCurrency(totals.committedSpend, currency)}
           hint={`${formatNumber(totals.committedPurchases)} pending — not counted as spend`}
           icon={ChevronsUpDown}
         />
@@ -663,7 +673,7 @@ async function PurchaseBody({
                 {formatNumber(row.units)}
               </TableCell>
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(row.receivedSpend)}
+                {formatCurrency(row.receivedSpend, currency)}
               </TableCell>
             </TableRow>
           ))}

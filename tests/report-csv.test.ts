@@ -21,6 +21,7 @@ import {
 import { GET } from "@/app/api/reports/[report]/csv/route";
 import { confirmOrder, createOrder } from "@/server/orders";
 import { createPurchase, receivePurchase } from "@/server/purchases";
+import { setCurrency } from "@/server/settings";
 
 import { signOut } from "./clerk-mock";
 import {
@@ -497,5 +498,160 @@ describe("the stock movement summary export", () => {
     ).text();
 
     expect(csv).toContain('"Bracket, 4x6"" Rev.B"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Currency
+// ---------------------------------------------------------------------------
+
+/**
+ * An export has to say what currency its numbers are in, and it has to say it
+ * without spoiling the numbers.
+ *
+ * Both halves are load-bearing. A spreadsheet of bare decimals is ambiguous the
+ * moment it leaves the application — 18104.96 of what? — so the active currency
+ * goes into the metadata. But it goes in the *metadata*: a symbol inside a
+ * numeric cell would turn a number column into a text column, and every sort,
+ * sum and formula written against the export would stop working.
+ */
+describe("the CSV states its currency without formatting the numbers", () => {
+  beforeEach(async () => {
+    await resetDatabase();
+    signOut();
+  });
+
+  /** A product with a costed batch, so the money columns are not all zero. */
+  async function priced() {
+    await seedProduct({
+      sku: "CSV-CUR",
+      name: "Currency Fixture",
+      sellingPrice: "1250.00",
+      stockQuantity: 40,
+      lotUnitCost: "800.00",
+    });
+  }
+
+  it("names the active currency in the preamble", async () => {
+    const admin = await signInWithRole("ADMIN");
+    await setCurrency("USD");
+    await priced();
+
+    const csv = await (
+      await GET(request("valuation"), routeParams("valuation"))
+    ).text();
+
+    expect(csv).toContain("Currency: USD");
+    expect(admin.role).toBe("ADMIN");
+  });
+
+  it("follows the setting when it changes", async () => {
+    await signInWithRole("ADMIN");
+    await priced();
+
+    await setCurrency("EUR");
+    const eur = await (
+      await GET(request("valuation"), routeParams("valuation"))
+    ).text();
+    expect(eur).toContain("Currency: EUR");
+
+    await setCurrency("INR");
+    const inr = await (
+      await GET(request("valuation"), routeParams("valuation"))
+    ).text();
+    expect(inr).toContain("Currency: INR");
+  });
+
+  it("says INR by default, with no setting row", async () => {
+    await signInWithRole("STAFF");
+    await priced();
+
+    const csv = await (
+      await GET(request("valuation"), routeParams("valuation"))
+    ).text();
+
+    expect(csv).toContain("Currency: INR");
+  });
+
+  it("states the currency on every report", async () => {
+    await signInWithRole("ADMIN");
+    await setCurrency("EUR");
+    await priced();
+
+    for (const report of [
+      "valuation",
+      "sales",
+      "purchases",
+      "movements",
+      "certificates",
+    ]) {
+      const csv = await (await GET(request(report), routeParams(report))).text();
+      expect(csv, `${report} should name its currency`).toContain("Currency: EUR");
+    }
+  });
+
+  /**
+   * The half that protects the spreadsheet. Money cells stay plain decimals —
+   * no symbol, no thousands separator, nothing that would make Excel read the
+   * column as text.
+   */
+  it("leaves monetary cells as raw decimals", async () => {
+    await signInWithRole("ADMIN");
+    await setCurrency("INR");
+    await priced();
+
+    const csv = await (
+      await GET(request("valuation"), routeParams("valuation"))
+    ).text();
+
+    const rows = bodyRows(csv);
+    const product = rows.find((row) => row.startsWith("CSV-CUR,"));
+    expect(product).toBeDefined();
+
+    // 40 units at 800.00 — a bare number, exactly as the loader produced it.
+    expect(product).toContain("32000.00");
+    expect(product).not.toContain("₹");
+    expect(product).not.toContain("32,000");
+  });
+
+  it("puts no currency symbol in any data row, in any currency", async () => {
+    await signInWithRole("ADMIN");
+    await priced();
+
+    for (const currency of ["USD", "INR", "EUR"] as const) {
+      await setCurrency(currency);
+
+      for (const report of ["valuation", "sales", "purchases"]) {
+        const csv = await (
+          await GET(request(report), routeParams(report))
+        ).text();
+
+        for (const row of bodyRows(csv)) {
+          expect(row, `${report}/${currency}: ${row}`).not.toMatch(/[$₹€£¥]/);
+        }
+      }
+    }
+  });
+
+  /**
+   * The column structure is unchanged by the currency work. The preamble grew a
+   * line; the header and the cells did not move.
+   */
+  it("keeps the existing column structure", async () => {
+    await signInWithRole("ADMIN");
+    await setCurrency("USD");
+    await priced();
+
+    const csv = await (
+      await GET(request("valuation"), routeParams("valuation"))
+    ).text();
+
+    const lines = csv.replace(/^\ufeff/, "").split("\r\n").filter(Boolean);
+    const header = lines.find((line) => line.startsWith("SKU,"));
+
+    expect(header).toBe(
+      "SKU,Product,Category,Supplier,Status,Units on hand,Costed units," +
+        "Uncosted units,Value at cost,Value at retail,Cost coverage %",
+    );
   });
 });

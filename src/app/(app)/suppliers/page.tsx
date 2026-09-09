@@ -17,6 +17,7 @@ import {
 } from "@/lib/supplier-query";
 import { getCurrentUser } from "@/server/auth";
 import { loadSupplierStats } from "@/server/suppliers";
+import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Suppliers" };
 
@@ -47,9 +48,10 @@ export default async function SuppliersPage({
 }) {
   const params = parseSupplierListParams(await searchParams);
 
-  const [user, stats] = await Promise.all([
+  const [user, stats, currency] = await Promise.all([
     getCurrentUser(),
     loadSupplierStats(),
+    getCurrency(),
   ]);
 
   const canManage = user?.role === "ADMIN";
@@ -84,7 +86,7 @@ export default async function SuppliersPage({
           />
           <StatCard
             label="Total purchased"
-            value={formatCurrency(stats.data.totalPurchased)}
+            value={formatCurrency(stats.data.totalPurchased, currency)}
             hint="Received purchases only"
             icon={Wallet}
             tone="success"

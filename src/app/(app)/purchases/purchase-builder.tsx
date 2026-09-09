@@ -47,6 +47,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useCurrency } from "@/components/layout/currency-provider";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
 
 /**
@@ -122,6 +123,8 @@ function PurchaseBuilder({
     purchase?.purchaseDate ?? new Date().toISOString().slice(0, 10),
   );
   const [submitting, setSubmitting] = useState(false);
+
+  const currency = useCurrency();
 
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<ProductOption[]>(initialProducts);
@@ -376,7 +379,7 @@ function PurchaseBuilder({
                             ) : (
                               <>
                                 <span className="font-medium">
-                                  {formatCurrency(option.lastPaidUnitCost)}
+                                  {formatCurrency(option.lastPaidUnitCost, currency)}
                                 </span>
                                 {option.lastPaidAt ? (
                                   <span className="block text-xs font-normal text-muted-foreground">
@@ -501,7 +504,7 @@ function PurchaseBuilder({
                       </TableCell>
 
                       <TableCell className="tabular text-right font-medium">
-                        {formatCurrency(lineCents(line) / 100)}
+                        {formatCurrency(lineCents(line) / 100, currency)}
                       </TableCell>
 
                       <TableCell className="text-right">
@@ -549,7 +552,7 @@ function PurchaseBuilder({
               <div className="flex items-center justify-between">
                 <dt className="text-muted-foreground">Subtotal</dt>
                 <dd className="tabular font-medium">
-                  {formatCurrency(totalCents / 100)}
+                  {formatCurrency(totalCents / 100, currency)}
                 </dd>
               </div>
               {/*
@@ -560,7 +563,7 @@ function PurchaseBuilder({
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <dt className="font-medium">Grand total</dt>
                 <dd className="tabular text-lg font-semibold">
-                  {formatCurrency(totalCents / 100)}
+                  {formatCurrency(totalCents / 100, currency)}
                 </dd>
               </div>
             </dl>

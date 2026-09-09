@@ -18,6 +18,7 @@ import {
 import { getCurrentUser } from "@/server/auth";
 import { loadCategories, loadProductStats } from "@/server/products";
 import { loadSupplierOptions } from "@/server/suppliers";
+import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Products" };
 
@@ -47,11 +48,12 @@ export default async function ProductsPage({
 }) {
   const params = parseProductListParams(await searchParams);
 
-  const [user, stats, categories, suppliers] = await Promise.all([
+  const [user, stats, categories, suppliers, currency] = await Promise.all([
     getCurrentUser(),
     loadProductStats(),
     loadCategories(),
     loadSupplierOptions(),
+    getCurrency(),
   ]);
 
   const canManage = user?.role === "ADMIN";
@@ -78,7 +80,7 @@ export default async function ProductsPage({
           />
           <StatCard
             label="Stock value"
-            value={formatCurrency(stats.data.stockValue)}
+            value={formatCurrency(stats.data.stockValue, currency)}
             hint={
               stats.data.uncostedUnits > 0
                 ? `Excludes ${formatNumber(stats.data.uncostedUnits)} ${stats.data.uncostedUnits === 1 ? "unit" : "units"} of unknown cost`
