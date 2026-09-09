@@ -5,6 +5,10 @@ import { revalidatePath } from "next/cache";
 import { toSafeError } from "@/lib/errors";
 import type { OrderStatus } from "@/lib/order-status";
 import type { OrderFieldErrors } from "@/lib/validation/order";
+import {
+  attachOrderItemImages,
+  removeOrderItemImage,
+} from "@/server/order-item-images";
 import { recordSalesReturn } from "@/server/returns";
 import {
   cancelOrder,
@@ -309,6 +313,69 @@ export async function recordReturnAction(
     };
   } catch (error) {
     return { ok: false, message: toSafeError(error, "recordReturnAction").message };
+  }
+}
+
+/**
+ * Attaching photographs to one order line.
+ *
+ * The files arrive as `FormData` because that is the only way a browser sends
+ * bytes to a server action; the entries are handed to the server module
+ * untouched, which reads each one and decides what it actually is.
+ *
+ * Revalidates the order page and nothing else. A photograph moves no stock, so
+ * `/products`, `/stock-movements` and the dashboard have nothing to re-read —
+ * `revalidateOrder` is called without its `movedStock` flag for that reason.
+ */
+export async function uploadOrderItemImagesAction(
+  orderItemId: string,
+  formData: FormData,
+): Promise<{ ok: true; message: string } | { ok: false; message: string }> {
+  try {
+    const files = formData.getAll("images");
+    const outcome = await attachOrderItemImages(orderItemId, files);
+
+    revalidateOrder(outcome.orderId);
+
+    const count = outcome.images.length;
+
+    return {
+      ok: true,
+      message: `${count} ${count === 1 ? "photograph" : "photographs"} added to ${outcome.productName}. Existing images are untouched.`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: toSafeError(error, "uploadOrderItemImagesAction").message,
+    };
+  }
+}
+
+/**
+ * Removing one photograph from one line.
+ *
+ * Both ids travel, and both are used to find the row — an image id alone is not
+ * an address, so a request naming the wrong line removes nothing rather than
+ * somebody else's picture.
+ */
+export async function removeOrderItemImageAction(
+  orderItemId: string,
+  imageId: string,
+): Promise<{ ok: true; message: string } | { ok: false; message: string }> {
+  try {
+    const outcome = await removeOrderItemImage(orderItemId, imageId);
+
+    revalidateOrder(outcome.orderId);
+
+    return {
+      ok: true,
+      message: `Photograph removed from ${outcome.productName}. The other images on that line are unchanged.`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: toSafeError(error, "removeOrderItemImageAction").message,
+    };
   }
 }
 

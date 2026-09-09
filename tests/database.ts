@@ -7,6 +7,11 @@ import { fakeClerkUser, signInAs } from "./clerk-mock";
  * wrong order fails loudly rather than silently orphaning rows.
  */
 export async function resetDatabase(): Promise<void> {
+  // Order-line photographs first. They cascade from the line, so the deletes
+  // below would take them anyway — clearing them explicitly keeps this
+  // function's "children first" shape readable rather than relying on a
+  // cascade two tables away.
+  await prisma.orderItemImage.deleteMany();
   // Supply links first. They cascade from both lines they join, so the deletes
   // below would take them anyway — but clearing them explicitly keeps this
   // function's "children first" shape readable rather than relying on a

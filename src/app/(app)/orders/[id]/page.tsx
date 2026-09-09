@@ -44,12 +44,14 @@ import {
   type OrderStatus,
 } from "@/lib/order-status";
 import { coverageNote, marginOf, totalCoverage } from "@/lib/cost-coverage";
+import { OrderItemImages } from "@/app/(app)/orders/[id]/order-item-images";
 import { SupplyLinkManager } from "@/app/(app)/supply-links/supply-link-manager";
 import {
   getOrderDetail,
   type OrderDetail,
   type OrderDetailLine,
 } from "@/server/orders";
+import { listOrderItemImages } from "@/server/order-item-images";
 import {
   listLinkablePurchaseLines,
   listSupplyLinksForOrder,
@@ -119,6 +121,22 @@ export default async function OrderDetailPage({
    * so the options are fetched for those alone.
    */
   const supplyLinks = await listSupplyLinksForOrder(order.id);
+
+  /*
+   * The photographs on each line, read here rather than inside `getOrderDetail`
+   * so that loader's shape stays about the sale. The bytes are deliberately not
+   * fetched — each row carries the authenticated URL a browser uses to ask for
+   * one image at a time.
+   */
+  const imagesByLine = await listOrderItemImages(order.id);
+
+  /*
+   * Photographs may only be managed while the order is confirmed or completed,
+   * because `updateOrder` replaces an editable order's lines wholesale and the
+   * images cascade with them. The same predicate the server enforces, so the
+   * screen cannot offer something the action would refuse.
+   */
+  const canManageImages = canFulfilOutstanding(order.status);
 
   const linkableByLine = new Map<
     string,
@@ -239,6 +257,18 @@ export default async function OrderDetailPage({
                       <span className="font-mono text-xs text-muted-foreground">
                         {line.sku}
                       </span>
+
+                      {/*
+                        This line's photographs, under the part they are of.
+                        Renders nothing at all on an order that cannot carry
+                        them and has none.
+                      */}
+                      <OrderItemImages
+                        orderItemId={line.id}
+                        productName={line.productName}
+                        images={imagesByLine.get(line.id) ?? []}
+                        canManage={canManageImages}
+                      />
                     </TableCell>
 
                     <TableCell className="hidden md:table-cell">

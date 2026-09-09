@@ -606,6 +606,9 @@ model OrderItem {
   /// The batches created by returns against this line. One per cost layer.
   returnedLots StockLot[] @relation("ReturnedFromOrderItem")
 
+  /// Photographs attached to this line. Any number, including none.
+  images OrderItemImage[]
+
   /// Deliveries expected to cover this line's outstanding units. Advisory.
   supplyLinks SupplyLink[]
 
@@ -618,6 +621,70 @@ model OrderItem {
   @@index([orderId])
   @@index([productId])
   @@map("order_items")
+}
+
+/// A photograph attached to one order line — a packing shot, a picture of
+/// damage, the state of the goods as they went out.
+///
+/// **Attached to the line, not the order.** A photograph is nearly always *of a
+/// part*, and an order carrying five lines would otherwise leave somebody
+/// guessing which one a picture referred to. The line is the smallest thing the
+/// photograph is actually about.
+///
+/// **Deliberately not the certificate system.** A certificate is a controlled
+/// airworthiness document: it belongs to a batch, carries issue and expiry
+/// dates, is superseded rather than deleted, and drives a compliance register.
+/// An order-line photograph has no lifecycle, no expiry, and no bearing on
+/// whether anything may be sold. Merging them would give an informal snapshot a
+/// compliance meaning it must never carry.
+///
+/// **The bytes live here, as `bytea`.** Certificates go to a `FileStorage`
+/// driver because they are controlled documents an operator may want in object
+/// storage. These do not: an order and its photographs are then one thing to
+/// back up, one thing to restore and one thing to delete, with no second system
+/// that can drift out of step or leave orphaned bytes behind.
+///
+/// **Only on a committed order.** `updateOrder` replaces an editable order's
+/// lines wholesale — a `deleteMany` followed by a `create` — so a line on a
+/// DRAFT or PENDING order has no stable identity across an edit. Attaching a
+/// photograph to one would mean the cascade below silently destroyed it the
+/// next time anybody changed a quantity. The server therefore accepts images
+/// only while the order is CONFIRMED or COMPLETED, which is exactly
+/// `canFulfilOutstanding` and exactly the complement of `isEditable`. Keeping
+/// the two disjoint is what makes the cascade safe rather than dangerous, and
+/// is why `updateOrder` needed no change at all.
+model OrderItemImage {
+  id String @id @default(cuid())
+
+  /// Cascade, matching `OrderItem` itself: an attachment cannot outlive the
+  /// line it belongs to. Safe precisely because of the status rule above — no
+  /// image can exist on a line that `updateOrder` is able to replace.
+  orderItemId String    @map("order_item_id")
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  /// The image itself. The only copy: nothing mirrors these bytes onto the
+  /// line, and no URL is stored as a rival source of truth.
+  data Bytes
+
+  /// The name the file had when it was uploaded. Shown to people, and used for
+  /// nothing else — never to build a path, never to decide a content type.
+  fileName String @map("file_name")
+
+  /// Determined by reading the file's leading bytes on upload, never taken from
+  /// the browser's claim. It is what the download route sends back, so a wrong
+  /// value here would be a way to have a file served as something it is not. A
+  /// check constraint pins it to the four formats this feature accepts.
+  contentType String @map("content_type")
+
+  /// Bytes. Displayed, and bounded by a check constraint so a row cannot claim
+  /// a size the upload rules would have refused.
+  fileSize Int @map("file_size")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// The line's gallery, oldest first — the only way these are ever read.
+  @@index([orderItemId, createdAt])
+  @@map("order_item_images")
 }
 
 // ---------------------------------------------------------------------------
