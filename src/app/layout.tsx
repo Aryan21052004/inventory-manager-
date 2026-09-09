@@ -28,11 +28,12 @@ export const metadata: Metadata = {
     "Stock control for products, orders, purchases and suppliers, with automatic inventory adjustment.",
 };
 
+// Dark is the application's default now, whatever the operating system
+// prefers, so splitting this on `prefers-color-scheme` would paint the browser
+// chrome white above a dark app. One value, matching `--background` in the dark
+// palette.
 export const viewport: Viewport = {
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#111318" },
-  ],
+  themeColor: "#090c12",
 };
 
 export default function RootLayout({

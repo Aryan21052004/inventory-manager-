@@ -16,7 +16,7 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --radius: 0.625rem;
+  --radius: 0.5rem;
 
   /* Surfaces */
   --background: oklch(0.985 0.002 265);
@@ -47,24 +47,30 @@
   --warning-foreground: oklch(0.24 0.04 72);
 
   /* Lines and focus */
-  --border: oklch(0.922 0.006 265);
-  --input: oklch(0.922 0.006 265);
+  --border: oklch(0.905 0.007 265);
+  --input: oklch(0.895 0.007 265);
   --ring: oklch(0.51 0.19 266);
 
-  /* Sidebar reads as a distinct surface from the content area */
-  --sidebar: oklch(1 0 0);
+  /*
+   * Surfaces step in one direction: page background, then the shell chrome
+   * (sidebar and header share `--sidebar`), then cards on top. In light mode
+   * that means the chrome sits just below the page and cards stay pure white;
+   * in dark mode each step is lighter than the last. Separation comes from
+   * these steps and from `--border`, never from shadows.
+   */
+  --sidebar: oklch(0.976 0.004 265);
   --sidebar-foreground: oklch(0.32 0.022 265);
   --sidebar-accent: oklch(0.965 0.008 265);
   --sidebar-accent-foreground: oklch(0.24 0.03 265);
-  --sidebar-border: oklch(0.922 0.006 265);
+  --sidebar-border: oklch(0.9 0.007 265);
 }
 
 .dark {
-  --background: oklch(0.17 0.016 265);
+  --background: oklch(0.152 0.014 265);
   --foreground: oklch(0.96 0.004 265);
-  --card: oklch(0.213 0.019 265);
+  --card: oklch(0.215 0.019 265);
   --card-foreground: oklch(0.96 0.004 265);
-  --popover: oklch(0.213 0.019 265);
+  --popover: oklch(0.215 0.019 265);
   --popover-foreground: oklch(0.96 0.004 265);
 
   --primary: oklch(0.68 0.16 264);
@@ -84,15 +90,15 @@
   --warning: oklch(0.78 0.15 72);
   --warning-foreground: oklch(0.2 0.04 72);
 
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 14%);
+  --border: oklch(1 0 0 / 13%);
+  --input: oklch(1 0 0 / 16%);
   --ring: oklch(0.68 0.16 264);
 
-  --sidebar: oklch(0.196 0.018 265);
+  --sidebar: oklch(0.185 0.017 265);
   --sidebar-foreground: oklch(0.9 0.008 265);
   --sidebar-accent: oklch(0.27 0.021 265);
   --sidebar-accent-foreground: oklch(0.98 0.004 265);
-  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-border: oklch(1 0 0 / 14%);
 }
 
 @theme inline {

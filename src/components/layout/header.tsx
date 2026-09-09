@@ -11,6 +11,10 @@ import { findNavItem } from "@/lib/nav";
 /**
  * Sticky top bar: drawer trigger, current section, and account controls.
  *
+ * It shares `bg-sidebar` with the nav rail so the chrome reads as one frame
+ * around the content, and it is deliberately opaque: a translucent, blurred bar
+ * sitting over scrolling table rows reads as noise rather than as depth.
+ *
  * The title is derived from the route rather than passed in by each page, so a
  * page cannot forget to set it or set one that disagrees with the sidebar.
  *
@@ -30,7 +34,7 @@ function Header({
   const current = findNavItem(pathname);
 
   return (
-    <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b border-border bg-background/85 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/70 sm:px-6">
+    <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b border-sidebar-border bg-sidebar px-4 sm:px-6">
       <MobileNav appName={appName} />
 
       <Separator orientation="vertical" className="mr-1 h-6 lg:hidden" />

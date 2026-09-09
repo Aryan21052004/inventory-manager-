@@ -55,11 +55,11 @@ function MobileNav({ appName }: { appName: string }) {
             Move between sections of {appName}.
           </DialogPrimitive.Description>
 
-          <div className="flex h-16 shrink-0 items-center border-b border-sidebar-border px-4">
+          <div className="flex h-14 shrink-0 items-center border-b border-sidebar-border px-4">
             <Brand appName={appName} />
           </div>
 
-          <div className="flex-1 overflow-y-auto px-3 py-5 scrollbar-thin">
+          <div className="flex-1 overflow-y-auto px-2.5 py-4 scrollbar-thin">
             <SidebarNav onNavigate={() => setOpen(false)} />
           </div>
         </DialogPrimitive.Content>

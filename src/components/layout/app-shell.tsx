@@ -33,14 +33,14 @@ function AppShell({
     <div className="min-h-svh bg-background">
       <Sidebar appName={appName} />
 
-      <div className="flex min-h-svh flex-col lg:pl-64">
+      <div className="flex min-h-svh flex-col lg:pl-60">
         {/* Rendered here, not inside Header: the menu is a server component
             (Clerk's `<Show>` resolves the session on the server) and Header is
             a client one, so it travels as an element rather than an import. */}
         <Header appName={appName} userMenu={<UserMenu authEnabled={authEnabled} />} />
         {!authEnabled ? <SetupBanner /> : null}
 
-        <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
+        <main className="flex-1 px-4 py-5 sm:px-6 lg:px-6">
           {/* Caps line length on ultrawide displays; tables still scroll inside their cards. */}
           <div className="mx-auto w-full max-w-[1400px]">
             <CurrencyProvider currency={currency}>{children}</CurrencyProvider>

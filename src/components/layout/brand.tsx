@@ -23,7 +23,7 @@ function Brand({
         className,
       )}
     >
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
         <Boxes className="size-[18px]" aria-hidden />
       </span>
       <span className="min-w-0">
