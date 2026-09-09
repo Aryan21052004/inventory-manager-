@@ -34,6 +34,12 @@ import {
  * system to keep in step. The browser scales them; `loading="lazy"` keeps a line
  * with several from fetching all of them before anybody scrolls to it.
  *
+ * Presented as a field of the line — a heading, the current value, and the
+ * control that changes it, indented behind a rule inside the product cell. An
+ * empty line says "No images" rather than rendering nothing, because blank
+ * space is indistinguishable from a feature that was never built, which is
+ * exactly how this one read.
+ *
  * `canManage` decides whether the add and remove controls appear, and hiding is
  * all it does: both actions re-check the session *and* the order's status on the
  * server, so a request that skips this component is refused by the same rule.
@@ -52,6 +58,7 @@ export function OrderItemImages({
   productName,
   images,
   canManage,
+  awaitingConfirmation = false,
 }: {
   orderItemId: string;
   productName: string;
@@ -63,12 +70,26 @@ export function OrderItemImages({
    * rather than offering a button that would fail.
    */
   canManage: boolean;
+  /**
+   * True on DRAFT and PENDING — the states where images are not refused
+   * forever, only not yet. Presentation only: it decides whether an empty line
+   * says so or stays silent, and never whether anything may be written.
+   */
+  awaitingConfirmation?: boolean;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  if (!canManage && images.length === 0) return null;
+  /*
+   * A cancelled order with no photographs is the only line that shows nothing:
+   * there is neither anything to look at nor anything that could be added
+   * later. Every other state says which of the two it is.
+   */
+  if (!canManage && images.length === 0 && !awaitingConfirmation) return null;
+
+  /* The field's own heading, shown wherever there is a field rather than a note. */
+  const labelled = canManage || images.length > 0;
 
   async function upload(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -142,7 +163,19 @@ export function OrderItemImages({
   }
 
   return (
-    <div className="mt-2 flex flex-col gap-2">
+    /*
+      Indented behind a hairline rule so the block reads as a field of this
+      line rather than as something belonging to the order. The order has its
+      own cards; anything sitting inside the product cell has to say by its
+      position that it does not.
+    */
+    <div className="mt-2 flex flex-col gap-1.5 border-l border-border pl-2.5">
+      {labelled ? (
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          Images
+        </span>
+      ) : null}
+
       {images.length > 0 ? (
         <ul className="flex flex-wrap gap-2">
           {images.map((image) => (
@@ -202,20 +235,39 @@ export function OrderItemImages({
             disabled={busy}
             onChange={(event) => void upload(event.target.files)}
           />
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={() => inputRef.current?.click()}
-          >
-            {busy ? <Loader2 className="animate-spin" /> : <ImagePlus />}
-            {images.length === 0 ? "Add images" : "Add more"}
-          </Button>
+          {/*
+            The empty state sits on the button's own row rather than above it:
+            "No images" is the line's current value and the button is what
+            changes it, which is one fact, not two.
+          */}
+          <div className="flex flex-wrap items-center gap-2">
+            {images.length === 0 ? (
+              <span className="text-xs text-muted-foreground">No images</span>
+            ) : null}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => inputRef.current?.click()}
+            >
+              {busy ? <Loader2 className="animate-spin" /> : <ImagePlus />}
+              {images.length === 0 ? "Add images" : "Add more"}
+            </Button>
+          </div>
           <p className="mt-1 text-[11px] text-muted-foreground">
             {ACCEPTED_IMAGE_LABELS} · up to {MAX_IMAGE_LABEL} each ·{" "}
             {MAX_UPLOAD_BATCH_LABEL} per batch
           </p>
         </div>
+      ) : awaitingConfirmation && images.length === 0 ? (
+        /*
+          One muted line, and deliberately no control: a draft cannot carry
+          photographs, and offering a disabled button would only invite the
+          question this sentence answers.
+        */
+        <span className="text-xs text-muted-foreground">
+          Images can be added once the order is confirmed
+        </span>
       ) : null}
     </div>
   );

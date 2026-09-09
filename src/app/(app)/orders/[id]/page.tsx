@@ -143,6 +143,14 @@ export default async function OrderDetailPage({
    */
   const canManageImages = canFulfilOutstanding(order.status);
 
+  /*
+   * DRAFT and PENDING cannot carry images, for the reason above. Rendering
+   * nothing at all on those orders left the feature looking absent rather than
+   * not yet available, so the line says which it is. Presentation only — the
+   * server still refuses the write either way.
+   */
+  const imagesAwaitConfirmation = isEditable(order.status);
+
   const linkableByLine = new Map<
     string,
     Awaited<ReturnType<typeof listLinkablePurchaseLines>>
@@ -265,14 +273,16 @@ export default async function OrderDetailPage({
 
                       {/*
                         This line's photographs, under the part they are of.
-                        Renders nothing at all on an order that cannot carry
-                        them and has none.
+                        Renders nothing only on a cancelled order with none —
+                        the one case where there is neither anything to show
+                        nor anything that could later be added.
                       */}
                       <OrderItemImages
                         orderItemId={line.id}
                         productName={line.productName}
                         images={imagesByLine.get(line.id) ?? []}
                         canManage={canManageImages}
+                        awaitingConfirmation={imagesAwaitConfirmation}
                       />
                     </TableCell>
 
