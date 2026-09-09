@@ -1,19 +1,15 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { usePathname } from "next/navigation";
-import { Search } from "lucide-react";
-import { toast } from "sonner";
 
 import { MobileNav } from "@/components/layout/mobile-nav";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
-import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { findNavItem } from "@/lib/nav";
 
 /**
- * Sticky top bar: drawer trigger, current section, global search, and account
- * controls.
+ * Sticky top bar: drawer trigger, current section, and account controls.
  *
  * The title is derived from the route rather than passed in by each page, so a
  * page cannot forget to set it or set one that disagrees with the sidebar.
@@ -31,20 +27,7 @@ function Header({
   userMenu: ReactNode;
 }) {
   const pathname = usePathname();
-  const [query, setQuery] = useState("");
   const current = findNavItem(pathname);
-
-  function handleSearch(event: React.FormEvent) {
-    event.preventDefault();
-    const term = query.trim();
-    if (term === "") return;
-
-    // Global search spans products, orders and customers, none of which are
-    // queryable yet. Saying so beats a box that silently swallows input.
-    toast.info("Global search is not connected yet", {
-      description: `"${term}" will search products, orders and customers once those modules land.`,
-    });
-  }
 
   return (
     <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b border-border bg-background/85 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/70 sm:px-6">
@@ -62,23 +45,6 @@ function Header({
           </p>
         ) : null}
       </div>
-
-      <form onSubmit={handleSearch} className="hidden md:block" role="search">
-        <div className="relative">
-          <Search
-            className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-            aria-hidden
-          />
-          <Input
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search inventory…"
-            aria-label="Search inventory"
-            className="w-56 bg-muted/50 pl-8 lg:w-72"
-          />
-        </div>
-      </form>
 
       <div className="flex items-center gap-1">
         <ThemeToggle />

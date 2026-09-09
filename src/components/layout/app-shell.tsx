@@ -46,13 +46,6 @@ function AppShell({
             <CurrencyProvider currency={currency}>{children}</CurrencyProvider>
           </div>
         </main>
-
-        <footer className="border-t border-border px-4 py-4 sm:px-6 lg:px-8">
-          <p className="text-xs text-muted-foreground">
-            {appName} — foundation build. Feature modules are scaffolded but not
-            yet implemented.
-          </p>
-        </footer>
       </div>
     </div>
   );

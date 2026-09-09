@@ -1,11 +1,9 @@
 import type { Metadata } from "next";
 import {
-  CircleDashed,
   Coins,
   Database,
   KeyRound,
   Server,
-  Users,
 } from "lucide-react";
 
 import { CurrencyForm } from "@/app/(app)/settings/currency-form";
@@ -112,39 +110,6 @@ export default async function SettingsPage() {
           authReady={authEnabled}
         />
       )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Users className="size-4 text-muted-foreground" aria-hidden />
-            Users and roles
-          </CardTitle>
-          <CardDescription>
-            Clerk owns identity; this app owns what each identity is allowed to
-            do.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ul className="grid gap-3 sm:grid-cols-2">
-            {[
-              "Invite teammates and manage workspace members",
-              "Assign roles: admin, manager, staff, viewer",
-              "Restrict destructive actions to admins",
-              "Sync Clerk users into the local user table via webhook",
-              "Audit trail of who moved which stock",
-              "Per-role navigation and page access",
-            ].map((item) => (
-              <li key={item} className="flex items-start gap-2.5 text-sm">
-                <CircleDashed
-                  className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-                  aria-hidden
-                />
-                <span className="text-muted-foreground">{item}</span>
-              </li>
-            ))}
-          </ul>
-        </CardContent>
-      </Card>
     </div>
   );
 }
