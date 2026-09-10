@@ -2,6 +2,7 @@ import "server-only";
 
 import { Prisma } from "@/generated/prisma/client";
 import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
+import type { Currency } from "@/lib/currency";
 import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/errors";
 import type { PurchaseListParams, PurchaseSortKey } from "@/lib/purchase-query";
 import {
@@ -22,6 +23,7 @@ import {
 import type { SupplierStatus } from "@/generated/prisma/enums";
 import { requireUser } from "@/server/auth";
 import { getLotCertificates } from "@/server/certificates";
+import { getCurrency } from "@/server/settings";
 import { getSupplierDetail } from "@/server/suppliers";
 import {
   applyStockMovement,
@@ -739,6 +741,13 @@ export async function createPurchase(
 
   const purchase = parsed.data;
 
+  /*
+   * Read once, outside the retry loop and outside the transaction: the
+   * currency a new document is proposed in should not change between two
+   * attempts at allocating its number.
+   */
+  const defaultCurrency = await getCurrency();
+
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       return await prisma.$transaction(async (tx) => {
@@ -776,6 +785,20 @@ export async function createPurchase(
             status: "DRAFT",
             supplierId: purchase.supplierId,
             total: centsToDecimalString(totalCents),
+            /*
+             * The currency this purchase is agreed in, seeded from the
+             * installation default because the purchase is being raised now.
+             * That is the default's entire remit — it proposes a currency for
+             * a new document and has no say over any that already exists.
+             *
+             * Authoritative for `total` and for every line: `PurchaseItem`
+             * carries no currency of its own. Receiving stamps it onto the
+             * lots, which is the point at which it stops being editable.
+             *
+             * Choosing a different one at entry is the rest of step F and is
+             * not wired up yet, so today every new purchase takes the default.
+             */
+            currency: defaultCurrency,
             purchaseDate: purchase.purchaseDate ?? new Date(),
             // From the session. Not a parameter, so no caller can raise a
             // purchase in somebody else's name.
@@ -893,6 +916,7 @@ async function lockPurchase(
   purchaseNumber: string;
   status: PurchaseStatus;
   supplierId: string;
+  currency: Currency | null;
 }> {
   const rows = await tx.$queryRaw<
     {
@@ -900,9 +924,10 @@ async function lockPurchase(
       purchase_number: string;
       status: PurchaseStatus;
       supplier_id: string;
+      currency: Currency | null;
     }[]
   >`
-    SELECT id, purchase_number, status, supplier_id
+    SELECT id, purchase_number, status, supplier_id, currency
     FROM purchases
     WHERE id = ${purchaseId}
     FOR UPDATE
@@ -918,6 +943,12 @@ async function lockPurchase(
     // Read under the same lock, so the "is this already our supplier" test in
     // `updatePurchase` cannot race a concurrent edit that moved it.
     supplierId: purchase.supplier_id,
+    /*
+     * Read under the same lock as the status, which is what makes the freeze
+     * safe: a concurrent edit cannot move the currency between the transition
+     * check and the lots this receipt is about to stamp with it.
+     */
+    currency: purchase.currency,
   };
 }
 
@@ -1124,6 +1155,18 @@ export async function receivePurchase(
         stockTransactionId: transaction.id,
         quantity: item.quantity,
         unitCostCents: toCents(Number(item.unitCost)),
+        /*
+         * The currency the supplier was paid in, taken from the document that
+         * proves it and frozen onto the batch here. This is the moment the
+         * purchase's currency stops being editable: from now on lots reference
+         * it, and changing it would orphan them from the invoice behind them.
+         *
+         * A legacy purchase with no recorded currency yields a lot with a cost
+         * and no currency. That is the honest outcome — the delivery is real
+         * and must be receivable — and it reads as "currency unknown" rather
+         * than borrowing the installation default.
+         */
+        costCurrency: purchase.currency,
         costSource: "PURCHASE",
         reference: { type: "PURCHASE", id: purchaseId },
         receivedAt,

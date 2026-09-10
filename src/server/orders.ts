@@ -3,6 +3,7 @@ import "server-only";
 import type { Prisma } from "@/generated/prisma/client";
 import type { CustomerStatus } from "@/generated/prisma/enums";
 import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
+import type { Currency } from "@/lib/currency";
 import {
   AppError,
   InsufficientStockError,
@@ -33,6 +34,7 @@ import {
   type OrderFieldErrors,
 } from "@/lib/validation/order";
 import { requireUser } from "@/server/auth";
+import { getCurrency } from "@/server/settings";
 import { getLotCertificates } from "@/server/certificates";
 import {
   allocateFifo,
@@ -885,6 +887,13 @@ export async function createOrder(input: unknown): Promise<CreatedOrder> {
 
   const order = parsed.data;
 
+  /*
+   * Read once, outside the retry loop and outside the transaction, so the
+   * currency a new order is proposed in cannot change between two attempts at
+   * allocating its number.
+   */
+  const defaultCurrency = await getCurrency();
+
   // Retried because the order number is computed by reading the highest one
   // that exists; see `nextOrderNumber`.
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -957,6 +966,21 @@ export async function createOrder(input: unknown): Promise<CreatedOrder> {
             customerId: order.customerId,
             subtotal: centsToDecimalString(totals.subtotalCents),
             total: centsToDecimalString(totals.totalCents),
+            /*
+             * The currency this order is agreed in, seeded from the
+             * installation default because the order is being raised now.
+             * That is the default's entire remit: it proposes a currency for a
+             * new document and never re-reads one already stored.
+             *
+             * Authoritative for `subtotal`, `total` and every line —
+             * `OrderItem` carries no currency of its own, because one order is
+             * one contract at one price list. It freezes at CONFIRMED.
+             *
+             * Choosing a different one at entry, and the rules for changing it
+             * while the order is still editable, are the rest of step F and are
+             * not wired up yet.
+             */
+            currency: defaultCurrency,
             // From the session. Not a parameter, so no caller can raise an
             // order in somebody else's name.
             createdBy: user.id,
@@ -1238,6 +1262,17 @@ export async function confirmOrder(
             allocation.costedQuantity === 0
               ? null
               : centsToDecimalString(allocation.costTotalCents),
+          /*
+           * Paired with the total, and taken from the draw rather than from
+           * any setting. When the draw spanned several currencies — or a
+           * costed layer whose currency was never recorded — `allocateFifo`
+           * has already reported a zero costed quantity, so this lands null
+           * alongside a null total and the line reads as uncosted. The layers
+           * themselves keep their real rates and currencies on their
+           * consumption rows.
+           */
+          costCurrency:
+            allocation.costedQuantity === 0 ? null : allocation.costCurrency,
           costedQuantity: allocation.costedQuantity,
           // What actually left. Never `item.quantity` — that is what was sold.
           fulfilledQuantity: take,
@@ -1379,6 +1414,7 @@ export async function fulfilOrder(
         fulfilledQuantity: true,
         costTotal: true,
         costedQuantity: true,
+        costCurrency: true,
         product: { select: { name: true } },
       },
     });
@@ -1503,13 +1539,79 @@ export async function fulfilOrder(
        * `costTotal` has always meant — a total, never a rate, because the
        * units behind it can come from several lots.
        *
+       * **But only when the two batches are in the same currency.** Adding
+       * this draw's cents to what the line already carries is only arithmetic
+       * if both are denominated the same way; otherwise it is the invented
+       * number this whole model exists to refuse. So the currencies are
+       * compared before anything is summed.
+       *
        * The null handling is not defensive noise: `order_items_cost_pairing`
        * requires `(cost_total IS NULL) = (costed_quantity = 0)`, so a draw
        * that costs nothing must leave a null total rather than a zero.
        */
-      const costedQuantity = item.costedQuantity + allocation.costedQuantity;
-      const costTotalCents =
-        toCents(Number(item.costTotal ?? 0)) + allocation.costTotalCents;
+
+      /*
+       * Has this line already had costed layers whose total was discarded?
+       *
+       * A line that went mixed-currency earlier reads exactly like a line that
+       * was never costed at all — null total, zero costed quantity, null
+       * currency — so the aggregate alone cannot tell them apart. The
+       * consumption rows can: costed layers that exist while the line claims
+       * none can only mean an earlier draw was refused a single figure.
+       *
+       * Scoped to earlier transactions, so this draw's own rows (already
+       * written by `allocateFifo` above) are not counted.
+       */
+      const priorCostedLayers =
+        item.costedQuantity > 0
+          ? 0
+          : await tx.stockLotConsumption.count({
+              where: {
+                unitCost: { not: null },
+                quantity: { gt: 0 },
+                stockTransactionId: { not: transaction.id },
+                stockTransaction: {
+                  referenceType: "ORDER",
+                  referenceId: orderId,
+                  productId: item.productId,
+                },
+              },
+            });
+
+      const alreadyIndeterminate =
+        item.costedQuantity === 0 && priorCostedLayers > 0;
+
+      let costedQuantity: number;
+      let costCurrency: Currency | null;
+      let costTotalCents: number | null;
+
+      if (allocation.costedQuantity === 0 && !allocation.costCurrencyIndeterminate) {
+        // Nothing newly costed and nothing contradictory — an entirely
+        // uncosted draw. The line keeps whatever it already said.
+        costedQuantity = item.costedQuantity;
+        costCurrency = item.costCurrency;
+        costTotalCents =
+          item.costTotal === null ? null : toCents(Number(item.costTotal));
+      } else if (
+        // This draw alone cannot name a currency.
+        allocation.costCurrencyIndeterminate ||
+        // The line was already refused one, and this draw adds more cost to it.
+        alreadyIndeterminate ||
+        // The line has a currency and this draw disagrees with it.
+        (item.costCurrency !== null &&
+          allocation.costCurrency !== item.costCurrency)
+      ) {
+        costedQuantity = 0;
+        costCurrency = null;
+        costTotalCents = null;
+      } else {
+        // Either the first costed contribution to this line, or another in the
+        // currency it already carries. Only here is the addition legitimate.
+        costedQuantity = item.costedQuantity + allocation.costedQuantity;
+        costCurrency = allocation.costCurrency;
+        costTotalCents =
+          toCents(Number(item.costTotal ?? 0)) + allocation.costTotalCents;
+      }
 
       await tx.orderItem.update({
         where: { id: item.id },
@@ -1517,7 +1619,10 @@ export async function fulfilOrder(
           fulfilledQuantity: item.fulfilledQuantity + want,
           costedQuantity,
           costTotal:
-            costedQuantity === 0 ? null : centsToDecimalString(costTotalCents),
+            costedQuantity === 0 || costTotalCents === null
+              ? null
+              : centsToDecimalString(costTotalCents),
+          costCurrency: costedQuantity === 0 ? null : costCurrency,
         },
       });
 
@@ -1724,7 +1829,15 @@ export async function cancelOrder(
        */
       await tx.orderItem.updateMany({
         where: { orderId },
-        data: { costTotal: null, costedQuantity: 0, fulfilledQuantity: 0 },
+        data: {
+          costTotal: null,
+          // Cleared with the total it denominated. A currency left behind on a
+          // line with no cost is a claim about nothing, and it would fail the
+          // paired-null constraint the moment Phase 3 adds it.
+          costCurrency: null,
+          costedQuantity: 0,
+          fulfilledQuantity: 0,
+        },
       });
     }
 

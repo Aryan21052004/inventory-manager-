@@ -331,8 +331,8 @@ describe("openingStockCost", () => {
       openingStockCost({
         openingStockCostBasis: "KNOWN",
         openingStockUnitCost: 7500.5,
-      }),
-    ).toEqual({ basis: "KNOWN", unitCostCents: 750_050 });
+      }, "USD"),
+    ).toEqual({ basis: "KNOWN", unitCostCents: 750_050, currency: "USD" });
   });
 
   it("maps an unknown declaration to its reason", () => {
@@ -340,19 +340,19 @@ describe("openingStockCost", () => {
       openingStockCost({
         openingStockCostBasis: "UNKNOWN",
         openingStockUnknownReason: "Paperwork lost",
-      }),
+      }, "USD"),
     ).toEqual({ basis: "UNKNOWN", reason: "Paperwork lost" });
   });
 
   it("throws rather than inventing the missing half", () => {
     // Every one of these is already impossible after the schema. Reaching one
     // means the schema was bypassed, and the right answer to that is to stop.
-    expect(() => openingStockCost({})).toThrow();
+    expect(() => openingStockCost({}, "USD")).toThrow();
     expect(() =>
-      openingStockCost({ openingStockCostBasis: "KNOWN" }),
+      openingStockCost({ openingStockCostBasis: "KNOWN" }, "USD"),
     ).toThrow();
     expect(() =>
-      openingStockCost({ openingStockCostBasis: "UNKNOWN" }),
+      openingStockCost({ openingStockCostBasis: "UNKNOWN" }, "USD"),
     ).toThrow();
   });
 });
@@ -634,7 +634,7 @@ describe("the adjustment movement API", () => {
           reference: { type: "MANUAL" },
           note: "Cost supplied for an outbound movement",
         },
-        { basis: "KNOWN", unitCostCents: 100 },
+        { basis: "KNOWN", unitCostCents: 100, currency: "USD" },
       ),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
 
@@ -746,7 +746,7 @@ describe("the adjustment movement API", () => {
         direction: "DECREASE",
         costBasis: "KNOWN",
         unitCost: 5,
-      }),
+      }, "USD"),
     ).toBeUndefined();
 
     expect(
@@ -754,19 +754,19 @@ describe("the adjustment movement API", () => {
         direction: "INCREASE",
         costBasis: "KNOWN",
         unitCost: 12.34,
-      }),
-    ).toEqual({ basis: "KNOWN", unitCostCents: 1234 });
+      }, "USD"),
+    ).toEqual({ basis: "KNOWN", unitCostCents: 1234, currency: "USD" });
 
     expect(
       adjustmentCost({
         direction: "INCREASE",
         costBasis: "UNKNOWN",
         unknownCostReason: "Nobody can price these",
-      }),
+      }, "USD"),
     ).toEqual({ basis: "UNKNOWN", reason: "Nobody can price these" });
 
     // An undeclared basis produces nothing, so the engine reports the missing
     // declaration rather than a half-built one invented here.
-    expect(adjustmentCost({ direction: "INCREASE" })).toBeUndefined();
+    expect(adjustmentCost({ direction: "INCREASE" }, "USD")).toBeUndefined();
   });
 });

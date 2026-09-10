@@ -6,6 +6,7 @@ import type {
   LotStatus,
   StockTransactionType,
 } from "@/generated/prisma/enums";
+import type { Currency } from "@/lib/currency";
 import { AppError, InsufficientStockError, NotFoundError } from "@/lib/errors";
 import {
   SALEABLE_LOT_SQL,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/lot-status";
 import { prisma } from "@/lib/prisma";
 import {
+  declaredCostCurrency,
   declaredCostError,
   declaredCostUnitCents,
   withUnknownCostReason,
@@ -403,6 +405,9 @@ export async function recordStockMovement(
         stockTransactionId: recorded.transaction.id,
         quantity: delta,
         unitCostCents: declaredCostUnitCents(declared),
+        // From the declaration, never from the installation default: the
+        // operator said what these units cost, so they also said in what.
+        costCurrency: declaredCostCurrency(declared),
         costSource: declared.basis === "KNOWN" ? "ADJUSTMENT" : "UNKNOWN",
         reference: movement.reference,
         receivedAt: recorded.transaction.createdAt,
@@ -530,6 +535,7 @@ export async function recordOpeningStock(
      * and `stock_lots_unknown_cost_is_null` refuses an UNKNOWN lot with one.
      */
     unitCostCents: declaredCostUnitCents(cost),
+    costCurrency: declaredCostCurrency(cost),
     costSource: cost.basis === "KNOWN" ? "OPENING" : "UNKNOWN",
     reference: { type: "MANUAL" },
     receivedAt: transaction.createdAt,
@@ -570,6 +576,19 @@ export interface LotSpec {
   quantity: number;
   /** Null when the cost is genuinely unknown. Never a guess. */
   unitCostCents: number | null;
+
+  /**
+   * What `unitCostCents` is denominated in. Null exactly when the cost is.
+   *
+   * Supplied by whoever knows: a purchase receipt passes the purchase's
+   * currency, a declared cost passes the one on its KNOWN arm, and a return
+   * passes the currency of the consumption layer it is reversing. There is
+   * deliberately no default — the installation setting is the currency for
+   * *new entry*, and reaching for it here would label a batch with whatever
+   * the setting happened to say on the day.
+   */
+  costCurrency: Currency | null;
+
   costSource: LotCostSource;
   reference: StockReference;
   /** When the goods arrived — the FIFO sort key, not necessarily now. */
@@ -623,6 +642,22 @@ export async function createLot(
     );
   }
 
+  /*
+   * There is deliberately no runtime guard here refusing a cost that arrives
+   * without a currency.
+   *
+   * Omitting one is already impossible: `costCurrency` is required on
+   * `LotSpec`, so a caller that forgets it does not compile. What remains is a
+   * caller that passes an explicit null alongside a real cost, and that is not
+   * a mistake — it is a receipt against a legacy purchase whose own currency
+   * was never recorded. Refusing it would block a physical delivery over a
+   * bookkeeping gap, and the goods still arrived.
+   *
+   * Such a lot reads as "currency unknown" rather than borrowing the
+   * installation default. It is also the one case that will need attention
+   * before the Phase 3 paired-null constraint can be validated.
+   */
+
   return tx.stockLot.create({
     data: {
       productId: spec.productId,
@@ -632,6 +667,13 @@ export async function createLot(
       quantityRemaining: spec.quantity,
       unitCost:
         spec.unitCostCents === null ? null : centsToDecimal(spec.unitCostCents),
+      /*
+       * Paired with the cost, and refused if the caller sends one without the
+       * other. The database will assert the same thing from its side in Phase
+       * 3; until then this is the guarantee, and it is the one that produces a
+       * message naming the batch rather than a constraint violation.
+       */
+      costCurrency: spec.unitCostCents === null ? null : spec.costCurrency,
       costSource: spec.costSource,
       sourceType: spec.reference.type,
       sourceId:
@@ -651,15 +693,40 @@ export interface Allocation {
   lotId: string;
   quantity: number;
   unitCostCents: number | null;
+  /**
+   * The currency of this layer's cost, copied from the lot at the draw. Null
+   * when the cost is unknown, and null on a legacy lot that carries a cost
+   * whose currency was never recorded — those are different facts, and the
+   * second is why a costed layer can still fail to name a currency.
+   */
+  costCurrency: Currency | null;
 }
 
 export interface AllocationResult {
-  /** How many units were drawn from lots whose cost is known. */
+  /**
+   * How many units were drawn from lots whose cost is known **and which agree
+   * on one currency**. Zero when they do not — see `costCurrencyIndeterminate`.
+   */
   costedQuantity: number;
-  /** What those units cost, in cents. Zero when nothing was costed. */
+  /** What those units cost, in cents. Zero when nothing can be costed. */
   costTotalCents: number;
-  /** Units drawn from lots with no known cost. */
+  /**
+   * Units this draw cannot state a cost for: those from uncosted lots, plus —
+   * when the currencies disagree — every costed unit as well, because a total
+   * spanning two currencies is not a number.
+   */
   uncostedQuantity: number;
+  /** The single currency every costed layer shares, or null when there is none. */
+  costCurrency: Currency | null;
+  /**
+   * True when costed layers exist but cannot agree on one known currency —
+   * either they span several, or one of them has no currency at all.
+   *
+   * This is what separates "nothing here was costed" from "several things were
+   * costed and no single figure can describe them". Both report a zero costed
+   * quantity, and only the caller that knows which is which can explain it.
+   */
+  costCurrencyIndeterminate: boolean;
   allocations: Allocation[];
 }
 
@@ -713,9 +780,14 @@ export async function allocateFifo(
    * quarantined stock.
    */
   const lots = await tx.$queryRaw<
-    { id: string; quantity_remaining: number; unit_cost: string | null }[]
+    {
+      id: string;
+      quantity_remaining: number;
+      unit_cost: string | null;
+      cost_currency: Currency | null;
+    }[]
   >`
-    SELECT id, quantity_remaining, unit_cost::text AS unit_cost
+    SELECT id, quantity_remaining, unit_cost::text AS unit_cost, cost_currency
     FROM stock_lots
     WHERE product_id = ${params.productId}
       AND quantity_remaining > 0
@@ -750,10 +822,23 @@ export async function allocateFifo(
         unitCost: unitCostCents === null ? null : centsToDecimal(unitCostCents),
         totalCost:
           unitCostCents === null ? null : centsToDecimal(unitCostCents * take),
+        /*
+         * Frozen here, from the lot, for the same reason the rate is: this row
+         * is the historical record of what these units cost, and it must stay
+         * true even when the order line above it can no longer state a single
+         * figure. When a draw spans two currencies these rows are where the
+         * real cost of sale survives.
+         */
+        costCurrency: unitCostCents === null ? null : lot.cost_currency,
       },
     });
 
-    allocations.push({ lotId: lot.id, quantity: take, unitCostCents });
+    allocations.push({
+      lotId: lot.id,
+      quantity: take,
+      unitCostCents,
+      costCurrency: unitCostCents === null ? null : lot.cost_currency,
+    });
     outstanding -= take;
   }
 
@@ -772,20 +857,72 @@ export async function allocateFifo(
     );
   }
 
+  return summariseAllocations(allocations);
+}
+
+/**
+ * What a set of drawn layers adds up to — or the refusal to add them up.
+ *
+ * Split out from the loop above so the same verdict is reachable from a test
+ * and from any future caller that assembles allocations another way.
+ *
+ * **Currencies are never blended and never converted.** A draw whose costed
+ * layers disagree — two currencies, or one layer whose currency was never
+ * recorded — has no single cost, and the honest answer is to report none
+ * rather than a plausible sum of incompatible amounts. Those units then count
+ * as uncosted, which is what keeps every downstream coverage figure and margin
+ * truthful: they fall out of the cost *and* out of the revenue measured
+ * against it, so nothing can be inflated by them.
+ *
+ * The individual `StockLotConsumption` rows are untouched by this. Each keeps
+ * its own rate and its own currency, and they remain the record of what the
+ * sale actually cost.
+ */
+function summariseAllocations(allocations: Allocation[]): AllocationResult {
   let costedQuantity = 0;
   let costTotalCents = 0;
   let uncostedQuantity = 0;
 
+  // The distinct currencies across *costed* layers only. A null in here is a
+  // costed layer whose currency is unrecorded, which is as disqualifying as a
+  // second currency would be — it just cannot be named.
+  const currencies = new Set<Currency | null>();
+
   for (const allocation of allocations) {
     if (allocation.unitCostCents === null) {
       uncostedQuantity += allocation.quantity;
-    } else {
-      costedQuantity += allocation.quantity;
-      costTotalCents += allocation.unitCostCents * allocation.quantity;
+      continue;
     }
+
+    currencies.add(allocation.costCurrency);
+    costedQuantity += allocation.quantity;
+    costTotalCents += allocation.unitCostCents * allocation.quantity;
   }
 
-  return { costedQuantity, costTotalCents, uncostedQuantity, allocations };
+  const only = currencies.size === 1 ? [...currencies][0] : null;
+  const indeterminate = currencies.size > 1 || (currencies.size === 1 && only === null);
+
+  if (indeterminate) {
+    return {
+      costedQuantity: 0,
+      costTotalCents: 0,
+      // The costed units join the uncosted ones: none of them can be priced
+      // into a single figure, and coverage must say so.
+      uncostedQuantity: uncostedQuantity + costedQuantity,
+      costCurrency: null,
+      costCurrencyIndeterminate: true,
+      allocations,
+    };
+  }
+
+  return {
+    costedQuantity,
+    costTotalCents,
+    uncostedQuantity,
+    costCurrency: only,
+    costCurrencyIndeterminate: false,
+    allocations,
+  };
 }
 
 /**
@@ -891,8 +1028,17 @@ export async function returnToLots(
    */
   const lots = await tx.stockLot.findMany({
     where: { id: { in: lotIds } },
-    select: { id: true, unitCost: true },
+    select: { id: true, unitCost: true, costCurrency: true },
   });
+
+  /*
+   * The currency each layer was costed in, kept beside the rate and applied
+   * to the negative rows below. A reversal restores what left; it does not
+   * re-price it and does not re-denominate it.
+   */
+  const layerCurrencies = new Map(
+    lots.map((lot) => [lot.id, lot.costCurrency] as const),
+  );
 
   const rates = new Map(
     lots.map((lot) => [lot.id, lot.unitCost] as const),
@@ -922,6 +1068,10 @@ export async function returnToLots(
           unitCostCents === null
             ? null
             : centsToDecimal(-unitCostCents * quantity),
+        // The layer's own currency, so a plain SUM over these rows nets a
+        // return against its draw within one currency rather than across two.
+        costCurrency:
+          unitCostCents === null ? null : (layerCurrencies.get(lotId) ?? null),
       },
     });
 
@@ -985,6 +1135,10 @@ export async function returnToLots(
         quantityReceived: shortfall,
         quantityRemaining: shortfall,
         unitCost: null,
+        // Explicit rather than relying on the column default. These units came
+        // back without a cost layer to attribute them to, so there is nothing
+        // to denominate — and stating the null is how that stays deliberate.
+        costCurrency: null,
         costSource: "UNKNOWN",
         sourceType: "MANUAL",
         sourceId: null,
@@ -1028,7 +1182,7 @@ export async function drainPurchaseLots(
       productId: params.productId,
       quantityRemaining: { gt: 0 },
     },
-    select: { id: true, quantityRemaining: true, unitCost: true },
+    select: { id: true, quantityRemaining: true, unitCost: true, costCurrency: true },
     orderBy: { id: "asc" },
   });
 
@@ -1051,6 +1205,7 @@ export async function drainPurchaseLots(
           unitCostCents === null
             ? null
             : centsToDecimal(unitCostCents * lot.quantityRemaining),
+        costCurrency: unitCostCents === null ? null : lot.costCurrency,
       },
     });
   }
@@ -1094,7 +1249,7 @@ export async function drainLot(
     stockTransactionId: string;
     quantity: number;
   },
-): Promise<{ unitCostCents: number | null }> {
+): Promise<{ unitCostCents: number | null; costCurrency: Currency | null }> {
   if (params.quantity <= 0) {
     throw new AppError(
       "INTERNAL",
@@ -1104,7 +1259,7 @@ export async function drainLot(
 
   const lot = await tx.stockLot.findUnique({
     where: { id: params.lotId },
-    select: { id: true, quantityRemaining: true, unitCost: true },
+    select: { id: true, quantityRemaining: true, unitCost: true, costCurrency: true },
   });
 
   if (!lot) throw new NotFoundError("Stock lot");
@@ -1142,8 +1297,17 @@ export async function drainLot(
         unitCostCents === null
           ? null
           : centsToDecimal(unitCostCents * params.quantity),
+      costCurrency: unitCostCents === null ? null : lot.costCurrency,
     },
   });
 
-  return { unitCostCents };
+  /*
+   * The currency leaves with the rate, so a caller writing off a batch can say
+   * what it destroyed without reaching for the installation default. Null
+   * together, always.
+   */
+  return {
+    unitCostCents,
+    costCurrency: unitCostCents === null ? null : lot.costCurrency,
+  };
 }

@@ -156,6 +156,7 @@ describe("blocked quantity is the negation of the same rule", () => {
       data: {
         productId: product.id,
         unitCost: "100.00",
+        costCurrency: "USD",
         costSource: "OPENING",
         quantityReceived: 5,
         quantityRemaining: 5,
@@ -172,6 +173,7 @@ describe("blocked quantity is the negation of the same rule", () => {
       data: {
         productId: product.id,
         unitCost: "100.00",
+        costCurrency: "USD",
         costSource: "OPENING",
         quantityReceived: 6,
         quantityRemaining: 6,

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import type { Currency } from "@/lib/currency";
+
 import {
   COST_BASES,
   optionalCost,
@@ -215,12 +217,20 @@ export function adjustmentNote(input: {
  * never be one. A guessed acquisition cost is indistinguishable from a real
  * one the moment it is written.
  */
-export function adjustmentCost(input: {
-  direction: AdjustmentDirection;
-  costBasis?: AdjustmentCostBasis | undefined;
-  unitCost?: number | null | undefined;
-  unknownCostReason?: string | null | undefined;
-}): DeclaredCost | undefined {
+export function adjustmentCost(
+  input: {
+    direction: AdjustmentDirection;
+    costBasis?: AdjustmentCostBasis | undefined;
+    unitCost?: number | null | undefined;
+    unknownCostReason?: string | null | undefined;
+  },
+  /**
+   * What a declared adjustment cost is denominated in. Supplied by the caller
+   * from the installation default, because an adjustment is a new entry.
+   * Ignored when the basis is UNKNOWN.
+   */
+  currency: Currency,
+): DeclaredCost | undefined {
   if (input.direction !== "INCREASE") return undefined;
 
   if (input.costBasis === "UNKNOWN") {
@@ -235,7 +245,7 @@ export function adjustmentCost(input: {
 
     // NaN rather than a zero: a missing cost must fail the engine's check, and
     // zero is a real price somebody could legitimately have paid.
-    return { basis: "KNOWN", unitCostCents: cents ?? Number.NaN };
+    return { basis: "KNOWN", unitCostCents: cents ?? Number.NaN, currency };
   }
 
   return undefined;

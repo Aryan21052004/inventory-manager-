@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { Prisma } from "@/generated/prisma/client";
+import type { Currency } from "@/lib/currency";
 import { AppError, NotFoundError } from "@/lib/errors";
 import { QUARANTINED_LOT_STATUS } from "@/lib/lot-status";
 import { prisma } from "@/lib/prisma";
@@ -81,6 +82,12 @@ interface CostLayer {
   lotId: string;
   quantity: number;
   unitCostCents: number | null;
+  /**
+   * The currency the original draw was costed in, carried back untouched.
+   * Null exactly when the cost is — a return can no more invent a currency
+   * than it can invent a rate.
+   */
+  costCurrency: Currency | null;
 }
 
 function nextReturnNumber(tx: Prisma.TransactionClient): Promise<string> {
@@ -150,6 +157,7 @@ async function resolveReturnLayers(
       lotId: true,
       quantity: true,
       unitCost: true,
+      costCurrency: true,
     },
   });
 
@@ -214,6 +222,7 @@ async function resolveReturnLayers(
       quantity: take,
       unitCostCents:
         row.unitCost === null ? null : Math.round(Number(row.unitCost) * 100),
+      costCurrency: row.costCurrency,
     });
 
     outstanding -= take;
@@ -418,6 +427,15 @@ export async function recordSalesReturn(
            * which no longer exists. An uncosted draw returns uncosted.
            */
           unitCostCents: layer.unitCostCents,
+          /*
+           * The currency those units left at, frozen by the original draw and
+           * coming back with them. Never today's setting, and never a fresh
+           * judgement — the same rule the rate above already follows. Because
+           * returns already split one lot per cost layer, a return spanning
+           * two currencies produces two lots, each correct, with nothing
+           * averaged across them.
+           */
+          costCurrency: layer.costCurrency,
           costSource: layer.unitCostCents === null ? "UNKNOWN" : "RETURN",
           reference: { type: "SALES_RETURN", id: salesReturn.id },
           // Dated by arrival, so returned stock sits in FIFO where it actually

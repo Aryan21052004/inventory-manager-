@@ -45,10 +45,10 @@ export const getCurrency = cache(async (): Promise<Currency> => {
   try {
     const setting = await prisma.appSetting.findUnique({
       where: { id: SINGLETON_ID },
-      select: { currency: true },
+      select: { defaultCurrency: true },
     });
 
-    return setting?.currency ?? DEFAULT_CURRENCY;
+    return setting?.defaultCurrency ?? DEFAULT_CURRENCY;
   } catch {
     /*
      * An unreachable database must not take down a page that renders money.
@@ -85,10 +85,10 @@ export async function setCurrency(currency: Currency): Promise<Currency> {
 
   const setting = await prisma.appSetting.upsert({
     where: { id: SINGLETON_ID },
-    create: { id: SINGLETON_ID, currency, updatedBy: user.id },
-    update: { currency, updatedBy: user.id },
-    select: { currency: true },
+    create: { id: SINGLETON_ID, defaultCurrency: currency, updatedBy: user.id },
+    update: { defaultCurrency: currency, updatedBy: user.id },
+    select: { defaultCurrency: true },
   });
 
-  return setting.currency;
+  return setting.defaultCurrency;
 }

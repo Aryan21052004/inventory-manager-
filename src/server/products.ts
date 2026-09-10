@@ -25,6 +25,7 @@ import {
   updateProductSchema,
   type ProductFieldErrors,
 } from "@/lib/validation/product";
+import { getCurrency } from "@/server/settings";
 import { requireRole } from "@/server/auth";
 import {
   certificateKeysForProduct,
@@ -774,6 +775,15 @@ export async function createProduct(
 
   const data = parsed.data;
 
+  /*
+   * The currency this product's price and opening stock are recorded in.
+   *
+   * Read once, outside the transaction, and used only to seed a record being
+   * created right now — which is the whole and only remit of the installation
+   * default. Nothing already stored is read through it.
+   */
+  const defaultCurrency = await getCurrency();
+
   try {
     return await prisma.$transaction(async (tx) => {
       /*
@@ -810,6 +820,16 @@ export async function createProduct(
           description: data.description,
           category: data.category,
           sellingPrice: data.sellingPrice?.toFixed(2) ?? null,
+          /*
+           * Paired with the price, and derived from it rather than set
+           * independently: a part that is only ever quoted carries no price
+           * and therefore nothing to denominate. A price gets the default
+           * because it is being entered now.
+           */
+          priceCurrency:
+            data.sellingPrice === null || data.sellingPrice === undefined
+              ? null
+              : defaultCurrency,
           // Zero, then moved by the ledger — never written straight from input.
           stockQuantity: 0,
           status: data.status,
@@ -834,7 +854,7 @@ export async function createProduct(
           productId: product.id,
           quantity: data.stockQuantity,
           userId: user.id,
-          cost: openingStockCost(data),
+          cost: openingStockCost(data, defaultCurrency),
         });
       }
 
@@ -879,6 +899,13 @@ export async function updateProduct(
 
   const data = parsed.data;
 
+  /*
+   * Only ever used for a product that has no price currency yet. An existing
+   * one is preserved above, so changing the setting cannot re-denominate a
+   * price that is already recorded.
+   */
+  const defaultCurrency = await getCurrency();
+
   try {
     return await prisma.$transaction(async (tx) => {
       /*
@@ -897,7 +924,7 @@ export async function updateProduct(
        */
       const existing = await tx.product.findUnique({
         where: { id },
-        select: { supplierId: true },
+        select: { supplierId: true, priceCurrency: true },
       });
 
       if (!existing) throw new NotFoundError("Product");
@@ -924,6 +951,26 @@ export async function updateProduct(
           description: data.description,
           category: data.category,
           sellingPrice: data.sellingPrice?.toFixed(2) ?? null,
+          /*
+           * Clearing the price clears the currency with it; setting one keeps
+           * whatever this product was already priced in.
+           *
+           * Keeping it is the load-bearing half. Falling back to the
+           * installation default here would mean that editing a product's
+           * name, months after its price was set, silently re-denominated
+           * that price to whatever the setting says today — the precise fault
+           * this whole change exists to remove, reintroduced through an
+           * unrelated edit. Only a product with no currency at all gets the
+           * default, and then only because it is being priced now.
+           *
+           * Re-pricing a part in a *different* currency is a deliberate act
+           * and needs the form to say so; it has no way to express that yet,
+           * so it is not silently inferred here.
+           */
+          priceCurrency:
+            data.sellingPrice === null || data.sellingPrice === undefined
+              ? null
+              : (existing.priceCurrency ?? defaultCurrency),
           status: data.status,
           supplierId: data.supplierId,
         },
@@ -1085,7 +1132,9 @@ export async function adjustStock(
       reference: { type: "MANUAL" },
       note: adjustmentNote(adjustment),
     },
-    adjustmentCost(adjustment),
+    // The installation default, used the one way it legitimately can be: to
+    // seed a brand-new entry. It never labels anything already stored.
+    adjustmentCost(adjustment, await getCurrency()),
   );
 
   const product = await prisma.product.findUnique({

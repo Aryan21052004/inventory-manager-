@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import type { Currency } from "@/lib/currency";
+
 import {
   COST_BASES,
   costBasisUnitCostCents,
@@ -252,12 +254,24 @@ export const createProductSchema = z
  * Only call it for a product that opens with stock; one that opens at zero has
  * no batch and therefore nothing to declare.
  */
-export function openingStockCost(input: {
-  openingStockCostBasis?: OpeningStockCostBasis | undefined;
-  openingStockUnitCost?: number | null | undefined;
-  openingStockUnknownReason?: string | null | undefined;
-}):
-  | { basis: "KNOWN"; unitCostCents: number }
+export function openingStockCost(
+  input: {
+    openingStockCostBasis?: OpeningStockCostBasis | undefined;
+    openingStockUnitCost?: number | null | undefined;
+    openingStockUnknownReason?: string | null | undefined;
+  },
+  /**
+   * What a declared opening cost is denominated in.
+   *
+   * A separate argument rather than a field on the form shape, because it does
+   * not come from the form: opening stock is a new entry, so the caller passes
+   * the installation default. That is the one legitimate use of the default —
+   * seeding something being created now, never labelling something already
+   * stored. It is ignored entirely when the basis is UNKNOWN.
+   */
+  currency: Currency,
+):
+  | { basis: "KNOWN"; unitCostCents: number; currency: Currency }
   | { basis: "UNKNOWN"; reason: string } {
   if (input.openingStockCostBasis === "KNOWN") {
     const cents = costBasisUnitCostCents({
@@ -271,7 +285,7 @@ export function openingStockCost(input: {
       );
     }
 
-    return { basis: "KNOWN", unitCostCents: cents };
+    return { basis: "KNOWN", unitCostCents: cents, currency };
   }
 
   if (input.openingStockCostBasis === "UNKNOWN") {

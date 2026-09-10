@@ -95,6 +95,7 @@ async function addLot(
     data: {
       productId,
       unitCost,
+      costCurrency: unitCost === null ? null : "USD",
       costSource: unitCost === null ? "UNKNOWN" : "OPENING",
       quantityReceived: quantity,
       quantityRemaining: quantity,

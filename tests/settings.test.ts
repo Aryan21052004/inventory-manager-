@@ -113,10 +113,10 @@ describe("application currency setting", () => {
     it("agrees with the column default the migration wrote", async () => {
       const created = await prisma.appSetting.create({
         data: { id: "singleton" },
-        select: { currency: true },
+        select: { defaultCurrency: true },
       });
 
-      expect(created.currency).toBe(DEFAULT_CURRENCY);
+      expect(created.defaultCurrency).toBe(DEFAULT_CURRENCY);
     });
   });
 
@@ -149,9 +149,9 @@ describe("application currency setting", () => {
       // Still what the admin set, not what the staff user asked for.
       const row = await prisma.appSetting.findUnique({
         where: { id: "singleton" },
-        select: { currency: true, updatedBy: true },
+        select: { defaultCurrency: true, updatedBy: true },
       });
-      expect(row?.currency).toBe("EUR");
+      expect(row?.defaultCurrency).toBe("EUR");
       expect(row?.updatedBy).toBe(admin.id);
     });
 
@@ -185,10 +185,10 @@ describe("application currency setting", () => {
 
       const row = await prisma.appSetting.findUnique({
         where: { id: "singleton" },
-        select: { currency: true },
+        select: { defaultCurrency: true },
       });
 
-      expect(row?.currency).toBe("USD");
+      expect(row?.defaultCurrency).toBe("USD");
     });
 
     it("records who changed it", async () => {
@@ -210,9 +210,9 @@ describe("application currency setting", () => {
         await setCurrency(currency);
         const row = await prisma.appSetting.findUnique({
           where: { id: "singleton" },
-          select: { currency: true },
+          select: { defaultCurrency: true },
         });
-        expect(row?.currency).toBe(currency);
+        expect(row?.defaultCurrency).toBe(currency);
       }
     });
 
@@ -231,7 +231,7 @@ describe("application currency setting", () => {
      */
     it("refuses a second settings row", async () => {
       await expect(
-        prisma.appSetting.create({ data: { id: "another", currency: "USD" } }),
+        prisma.appSetting.create({ data: { id: "another", defaultCurrency: "USD" } }),
       ).rejects.toThrow();
     });
   });

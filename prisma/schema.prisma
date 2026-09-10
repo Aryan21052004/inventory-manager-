@@ -238,19 +238,28 @@ model AppSetting {
   /// cuid: a settings row that could have any id is a settings *table*.
   id String @id @default("singleton")
 
-  /// What the installation accounts in.
+  /// The currency proposed for **new** monetary entries. Nothing more.
   ///
-  /// **This is a label, not a rate.** Changing it re-denominates nothing: every
-  /// `Decimal(12, 2)` in this schema keeps the exact value it had, and the
-  /// currency says how those values should be read. There is no exchange rate
-  /// anywhere in this system and none may be added — converting historical
-  /// amounts would write numbers nobody transacted, and once written they are
-  /// indistinguishable from the real ones.
+  /// It seeds `Order.currency` and `Purchase.currency` when a document is
+  /// raised, and the currency field when a product price is first set. From
+  /// that moment the document owns its currency and this setting has no
+  /// further say over it.
   ///
-  /// The accepted consequence is that history is re-labelled: a purchase
-  /// entered while the setting said USD renders with a rupee sign after a
-  /// switch to INR. The admin UI states this before it saves.
-  currency Currency @default(INR)
+  /// **It does not decide how anything is displayed.** Every persisted amount
+  /// is read in the currency recorded on its own row — the order's, the
+  /// purchase's, the lot's. Changing this setting changes no stored number and
+  /// no stored currency; yesterday's USD order still renders in USD tomorrow.
+  ///
+  /// There is no exchange rate anywhere in this system and none may be added.
+  /// Converting historical amounts would write numbers nobody transacted, and
+  /// once written they are indistinguishable from the real ones.
+  ///
+  /// This column previously meant the opposite — one installation-wide
+  /// currency that every stored amount was read in, so switching it re-labelled
+  /// history. It was renamed from `currency` when that was replaced by
+  /// per-record currencies, precisely so the old reading cannot survive by
+  /// accident in a query somebody copied.
+  defaultCurrency Currency @default(INR) @map("default_currency")
 
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -455,6 +464,24 @@ model Product {
   /// number nobody stands behind.
   sellingPrice Decimal? @map("selling_price") @db.Decimal(12, 2)
 
+  /// What `sellingPrice` is denominated in.
+  ///
+  /// Paired with the price by a check constraint: a price without a currency is
+  /// a number nobody can act on, and a currency without a price describes
+  /// nothing. `selling_price IS NULL` exactly when this is null.
+  ///
+  /// **Mutable, unlike a transaction currency.** This is a current catalogue
+  /// value, not a record of something that happened, so re-pricing a part in a
+  /// different currency is an ordinary edit. What it must never be is a
+  /// *re-reading*: changing this column does not change `sellingPrice`, and
+  /// changing the installation default does not reach either of them.
+  ///
+  /// Nullable through Phase 0 of the currency migration for every row, because
+  /// existing prices have no recoverable currency. The check constraint is
+  /// added NOT VALID so new and edited rows are held to the pairing while
+  /// legacy rows wait for a reviewed backfill.
+  priceCurrency Currency? @map("price_currency")
+
   /// Stock on hand. Never write this directly — go through the stock engine so
   /// a StockTransaction is recorded in the same database transaction.
   ///
@@ -517,6 +544,26 @@ model Order {
   /// eventually sum. Nothing can read a column that is not there.
   subtotal Decimal @default(0) @db.Decimal(12, 2)
   total    Decimal @default(0) @db.Decimal(12, 2)
+
+  /// The currency this order was agreed in, and the only one its revenue may
+  /// be read as.
+  ///
+  /// **Authoritative for every monetary column on the order and its lines.**
+  /// `OrderItem` carries no currency of its own: one order is one contract at
+  /// one price list, so a per-line currency would make `subtotal` and `total`
+  /// unrepresentable as single figures for no business gain.
+  ///
+  /// Defaulted from `AppSetting.defaultCurrency` when the order is raised, and
+  /// editable only while `isEditable(status)` — the same predicate that gates
+  /// line edits. From CONFIRMED onward it is frozen, because that is when the
+  /// stock left and the sale became a fact.
+  ///
+  /// Nullable only through Phase 0 of the currency migration, so that existing
+  /// orders — whose true currency is not recoverable from this database — can
+  /// sit unlabelled rather than be assigned one nobody verified. Phase 3
+  /// contracts it to NOT NULL after a reviewed backfill. Every write path
+  /// already sets it.
+  currency Currency? @map("currency")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -583,7 +630,27 @@ model OrderItem {
   ///
   /// Null until the order is confirmed, and null again if it is cancelled —
   /// stock that came back was never sold.
+  ///
+  /// Also null when the line drew from costed lots in **more than one
+  /// currency**. See `costCurrency`.
   costTotal Decimal? @map("cost_total") @db.Decimal(12, 2)
+
+  /// What `costTotal` is denominated in. Paired-null with it.
+  ///
+  /// **Not derivable from `Order.currency`.** Stock bought in USD can be sold
+  /// in INR; the cost side and the revenue side of one line are independent
+  /// facts, and collapsing them is the whole error this column exists to stop.
+  ///
+  /// **Null when a line's costed allocations span several currencies.** FIFO
+  /// may legitimately draw one line from a USD lot and a EUR lot, and their
+  /// sum is not a number in any currency. Rather than blend them — the failure
+  /// `costTotal`'s own note rejects for mixed *rates* — the line degrades to
+  /// uncosted: `costTotal` and this are null and `costedQuantity` is zero, so
+  /// the units fall out of both the cost and the revenue that margin is
+  /// measured over and no figure can be inflated by them. The true per-layer
+  /// costs and currencies survive on `StockLotConsumption`, which is where a
+  /// line's real COGS is reconstructed from.
+  costCurrency Currency? @map("cost_currency")
 
   /// How many of `quantity` the cost above actually covers.
   ///
@@ -763,6 +830,24 @@ model Purchase {
   status         PurchaseStatus @default(DRAFT)
 
   total Decimal @default(0) @db.Decimal(12, 2)
+
+  /// The currency this purchase was agreed in, and the only one its spend may
+  /// be read as.
+  ///
+  /// Authoritative for `total` and for every `PurchaseItem`, which carries no
+  /// currency of its own for the same reason `OrderItem` does not: one
+  /// purchase is one supplier document at one negotiated price.
+  ///
+  /// Defaulted from `AppSetting.defaultCurrency`, editable while the purchase
+  /// is a draft, and **frozen from RECEIVED** rather than from confirmation.
+  /// Receipt is the event that writes this currency into `StockLot.costCurrency`;
+  /// changing it afterwards would orphan lots from the document that explains
+  /// them. `drainPurchaseLots` removes those lots on un-receive, which is what
+  /// makes the currency editable again along with them.
+  ///
+  /// Nullable only through Phase 0 of the currency migration. See
+  /// `Order.currency`.
+  currency Currency? @map("currency")
 
   /// When the order was placed with the supplier, which is not necessarily
   /// when the row was created.
@@ -990,6 +1075,20 @@ model StockLot {
   /// plausible number nobody can source.
   unitCost   Decimal?      @map("unit_cost") @db.Decimal(12, 2)
 
+  /// What `unitCost` is denominated in. Paired-null with it, by check
+  /// constraint: a cost with no currency cannot be reported, and a currency
+  /// with no cost describes nothing. **Never invented for a null cost.**
+  ///
+  /// **Its own column rather than a join back to the purchase**, because three
+  /// of the five ways a lot comes into being have no purchase behind them:
+  /// opening stock, a manual adjustment, and a sales return. Each supplies the
+  /// currency from its own source — the purchase, the declared cost, or the
+  /// consumption row being reversed — and FIFO must be able to read it without
+  /// walking a chain that may not exist.
+  ///
+  /// Immutable, exactly as `unitCost` is.
+  costCurrency Currency? @map("cost_currency")
+
   /// Where the cost came from, and — through check constraints the migrations
   /// add, because Prisma's schema language cannot express them — a claim about
   /// whether `unitCost` is present:
@@ -1165,6 +1264,17 @@ model StockLotConsumption {
   /// `quantity * unitCost`, and signed with it, so a plain SUM over these rows
   /// nets returns against draws without the caller remembering to.
   totalCost Decimal? @map("total_cost") @db.Decimal(12, 2)
+
+  /// The currency of the two figures above, copied from the lot at the draw
+  /// for exactly the reason `unitCost` is: so historical COGS stays a fact
+  /// about this row rather than a lookup a later migration could restate.
+  /// Paired-null with them.
+  ///
+  /// These rows are where a line's real cost of sale lives once its currencies
+  /// diverge — when `OrderItem.costTotal` goes null because one line drew from
+  /// two currencies, nothing is lost, because each layer is still recorded
+  /// here at its own rate in its own currency.
+  costCurrency Currency? @map("cost_currency")
 
   createdAt DateTime @default(now()) @map("created_at")
 

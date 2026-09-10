@@ -83,6 +83,7 @@ export async function createProduct(
       data: {
         productId: product.id,
         unitCost: costed ? lotUnitCost : null,
+        costCurrency: costed ? "USD" : null,
         costSource: costed ? "OPENING" : "UNKNOWN",
         quantityReceived: stockQuantity,
         quantityRemaining: stockQuantity,
@@ -357,6 +358,7 @@ export async function seedProduct(overrides: {
       data: {
         productId: product.id,
         unitCost: costed ? overrides.lotUnitCost! : null,
+        costCurrency: costed ? "USD" : null,
         costSource: costed ? "OPENING" : "UNKNOWN",
         quantityReceived: stockQuantity,
         quantityRemaining: stockQuantity,

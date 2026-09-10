@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { isCurrency, type Currency } from "@/lib/currency";
+
 /**
  * One acquisition-cost question, asked the same way everywhere it is asked.
  *
@@ -273,9 +275,17 @@ export function costBasisUnitCostCents(answer: {
  * nobody chose that this costing model exists to prevent. There is now no way
  * to spell it: KNOWN carries a cost and cannot carry a reason, UNKNOWN carries
  * a reason and cannot carry a cost.
+ *
+ * **The currency rides on the KNOWN arm for the same reason the cost does.**
+ * A declared amount with no currency is not a cost, it is a number, and the
+ * only thing that could supply one later is the installation default — which
+ * would be the setting labelling history, the exact fault the per-record
+ * currency work exists to end. Putting it here makes "a cost without a
+ * currency" unspellable, and leaves "a currency without a cost" equally
+ * unspellable on the UNKNOWN side. Unknown stays unknown in both directions.
  */
 export type DeclaredCost =
-  | { basis: "KNOWN"; unitCostCents: number }
+  | { basis: "KNOWN"; unitCostCents: number; currency: Currency }
   | { basis: "UNKNOWN"; reason: string };
 
 /**
@@ -301,6 +311,13 @@ export function declaredCostError(
     }
     if (cost.unitCostCents < 0) {
       return `${subject} cannot have a negative acquisition cost.`;
+    }
+    // The currency is checked here for the same reason the cents are: a caller
+    // the type system did not see can omit it, and a cost stored without one
+    // could only ever be labelled later by the installation default — which is
+    // the setting relabelling history.
+    if (!isCurrency(cost.currency)) {
+      return `${subject} declared a known cost without saying what currency it is in.`;
     }
     return null;
   }
@@ -334,4 +351,16 @@ export function declaredCostError(
  */
 export function declaredCostUnitCents(cost: DeclaredCost): number | null {
   return cost.basis === "KNOWN" ? cost.unitCostCents : null;
+}
+
+/**
+ * The currency column that goes with the cost column above.
+ *
+ * Deliberately the same shape as `declaredCostUnitCents`, and deliberately
+ * derived from the same declaration rather than from a setting: the two are
+ * written to `stock_lots` as a pair and are null together, so they are read
+ * out of the union together too.
+ */
+export function declaredCostCurrency(cost: DeclaredCost): Currency | null {
+  return cost.basis === "KNOWN" ? cost.currency : null;
 }
