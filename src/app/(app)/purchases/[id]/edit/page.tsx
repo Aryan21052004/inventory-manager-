@@ -116,6 +116,11 @@ export default async function EditPurchasePage({
           purchaseNumber: purchase.purchaseNumber,
           supplierId: purchase.supplier.id,
           purchaseDate: purchase.purchaseDate.toISOString().slice(0, 10),
+          /*
+           * The purchase's own currency, not the installation default. What
+           * the supplier invoiced does not change because a setting did.
+           */
+          currency: purchase.currency,
           lines: purchase.lines.flatMap((line) => {
             const product = byId.get(line.productId);
             return product
@@ -123,6 +128,11 @@ export default async function EditPurchasePage({
                   {
                     product,
                     quantity: line.quantity,
+                    /*
+                     * A saved cost is the purchase's own figure, so a currency
+                     * change keeps it for checking rather than clearing it.
+                     */
+                    costSource: "manual" as const,
                     // The cost already recorded on the line — the supplier's
                     // number for this delivery, not the catalogue's.
                     unitCost: line.unitCost,

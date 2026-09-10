@@ -201,6 +201,11 @@ export interface OrderDetail {
   status: OrderStatus;
   subtotal: string;
   total: string;
+  /**
+   * What this order is denominated in. Null on a legacy order whose currency
+   * was never recorded — read as unknown, never as the installation default.
+   */
+  currency: Currency | null;
   createdAt: Date;
   updatedAt: Date;
   confirmedAt: Date | null;
@@ -750,6 +755,7 @@ export async function getOrderDetail(
         status: order.status,
         subtotal: order.subtotal.toString(),
         total: order.total.toString(),
+        currency: order.currency,
         createdAt: order.createdAt,
         updatedAt: order.updatedAt,
         confirmedAt: order.confirmedAt,
@@ -980,7 +986,12 @@ export async function createOrder(input: unknown): Promise<CreatedOrder> {
              * while the order is still editable, are the rest of step F and are
              * not wired up yet.
              */
-            currency: defaultCurrency,
+            /*
+             * The operator's explicit choice when the form made one, and the
+             * installation default only when it did not. The default seeds a
+             * new document; it never overrides a currency somebody picked.
+             */
+            currency: order.currency ?? defaultCurrency,
             // From the session. Not a parameter, so no caller can raise an
             // order in somebody else's name.
             createdBy: user.id,
@@ -1071,11 +1082,21 @@ export interface OrderTransitionOutcome {
 async function lockOrder(
   tx: Prisma.TransactionClient,
   orderId: string,
-): Promise<{ id: string; orderNumber: string; status: OrderStatus }> {
+): Promise<{
+  id: string;
+  orderNumber: string;
+  status: OrderStatus;
+  currency: Currency | null;
+}> {
   const rows = await tx.$queryRaw<
-    { id: string; order_number: string; status: OrderStatus }[]
+    {
+      id: string;
+      order_number: string;
+      status: OrderStatus;
+      currency: Currency | null;
+    }[]
   >`
-    SELECT id, order_number, status
+    SELECT id, order_number, status, currency
     FROM orders
     WHERE id = ${orderId}
     FOR UPDATE
@@ -1088,6 +1109,12 @@ async function lockOrder(
     id: order.id,
     orderNumber: order.order_number,
     status: order.status,
+    /*
+     * Read under the same lock as the status, which is what makes the freeze
+     * safe: a concurrent edit cannot move the currency between the editable
+     * check and the lines this update is about to write against it.
+     */
+    currency: order.currency,
   };
 }
 
@@ -1925,6 +1952,13 @@ export async function updateOrder(
 
   const order = parsed.data;
 
+  /*
+   * Only used for an order that has no currency at all — a legacy row being
+   * given one for the first time. An order that already has one keeps it
+   * unless this request names a different one.
+   */
+  const defaultCurrency = await getCurrency();
+
   return prisma.$transaction(async (tx) => {
     const existing = await lockOrder(tx, orderId);
 
@@ -2000,6 +2034,59 @@ export async function updateOrder(
 
     const totals = calculateTotals(lines);
 
+    /*
+     * The currency this edit leaves behind.
+     *
+     * An absent currency means "leave it alone", never "reset to today's
+     * default". Only an order that has none — a legacy row — takes the
+     * default, and then only because it is being given one for the first time.
+     */
+    const nextCurrency = order.currency ?? existing.currency ?? defaultCurrency;
+    const currencyChanged =
+      existing.currency !== null && nextCurrency !== existing.currency;
+
+    /*
+     * A price that did not move while the currency did.
+     *
+     * There is no conversion in this system, so a line quoted at 1,250 in
+     * euros is not 1,250 in rupees — it is a number nobody has re-decided.
+     * The server cannot see which prices the form filled in automatically
+     * (`OrderItem` carries no provenance, and these lines are about to be
+     * replaced wholesale), but it can see which ones survived a currency
+     * change unchanged, and that is the shape the mistake takes.
+     *
+     * Refused rather than silently converted or silently cleared: the
+     * operator either re-enters the price in the new currency, or says the
+     * figure really is the same in both, which is the one legitimate case.
+     */
+    if (currencyChanged) {
+      const before = await tx.orderItem.findMany({
+        where: { orderId },
+        select: { productId: true, unitPrice: true },
+      });
+
+      const previousPrice = new Map(
+        before.map((line) => [line.productId, line.unitPrice.toString()]),
+      );
+
+      const carried = lines.filter((line) => {
+        const previous = previousPrice.get(line.productId);
+        return (
+          previous !== undefined &&
+          toCents(Number(previous)) === line.unitPriceCents
+        );
+      });
+
+      if (carried.length > 0 && order.pricesConfirmedForCurrencyChange !== true) {
+        throw new AppError(
+          "CONFLICT",
+          `${carried.length === 1 ? "One line keeps" : `${carried.length} lines keep`} the same unit price after changing this order from ` +
+            `${existing.currency} to ${nextCurrency}. There are no exchange rates in this system, so a price is not converted by ` +
+            `re-labelling it — re-enter it in ${nextCurrency}, or confirm that the figure is the same in both currencies.`,
+        );
+      }
+    }
+
     // Replaced wholesale rather than diffed. The lines are a small set with no
     // identity of their own, and a delete-then-insert inside the transaction is
     // simpler to reason about than a three-way merge.
@@ -2011,6 +2098,10 @@ export async function updateOrder(
         customerId: order.customerId,
         subtotal: centsToDecimalString(totals.subtotalCents),
         total: centsToDecimalString(totals.totalCents),
+        // Only reachable while the order is editable — the guard above refuses
+        // every other status — so this is the freeze, enforced on the server
+        // rather than by hiding a control.
+        currency: nextCurrency,
         items: {
           create: lines.map((line) => ({
             productId: line.productId,

@@ -1,0 +1,182 @@
+import { describe, expect, it } from "vitest";
+
+import { DEFAULT_CURRENCY, type Currency } from "@/lib/currency";
+import {
+  carriedAcrossCurrencyChange,
+  clearedByCurrencyChange,
+  type PricedLine,
+} from "@/lib/document-currency";
+
+/**
+ * What the entry forms do when the currency changes underneath them.
+ *
+ * The rule lives in `@/lib/document-currency` rather than in the two builders
+ * so it can be tested at all — the suite runs in Node with no DOM — and so the
+ * order and purchase forms cannot drift apart while both claim to implement
+ * the same policy.
+ *
+ * Everything here is about *which figures the form may discard on the
+ * operator's behalf*. Nothing converts, because nothing in this system can.
+ */
+
+/** The selector's starting value, as both builders compute it. */
+function initialSelection(params: {
+  stored: Currency | null;
+  installationDefault: Currency;
+}): Currency {
+  return params.stored ?? params.installationDefault;
+}
+
+const line = (
+  key: string,
+  amount: string,
+  prefilled: boolean,
+): PricedLine => ({ key, amount, prefilled });
+
+describe("what the selector starts on", () => {
+  it("offers the installation default for a document being created", () => {
+    expect(
+      initialSelection({ stored: null, installationDefault: "EUR" }),
+    ).toBe("EUR");
+
+    // And the default really is the app's, not a literal repeated here.
+    expect(
+      initialSelection({ stored: null, installationDefault: DEFAULT_CURRENCY }),
+    ).toBe(DEFAULT_CURRENCY);
+  });
+
+  it("shows an existing document its own currency, not today's default", () => {
+    // The regression this whole change exists to prevent: a EUR order opened
+    // after the setting moved to USD must still read EUR.
+    expect(
+      initialSelection({ stored: "EUR", installationDefault: "USD" }),
+    ).toBe("EUR");
+  });
+
+  it("falls back to the default only for a legacy document with none", () => {
+    expect(
+      initialSelection({ stored: null, installationDefault: "INR" }),
+    ).toBe("INR");
+  });
+});
+
+describe("what a currency change clears", () => {
+  it("clears figures the form prefilled and keeps figures somebody typed", () => {
+    const lines = [
+      line("catalogue-priced", "89.99", true),
+      line("typed", "120.00", false),
+      line("also-prefilled", "12.50", true),
+    ];
+
+    expect(clearedByCurrencyChange(lines)).toEqual([
+      "catalogue-priced",
+      "also-prefilled",
+    ]);
+  });
+
+  it("keeps every figure when the operator typed all of them", () => {
+    const lines = [line("a", "10.00", false), line("b", "20.00", false)];
+
+    expect(clearedByCurrencyChange(lines)).toEqual([]);
+  });
+
+  it("never rewrites a figure — it only names the ones to clear", () => {
+    const lines = [line("a", "89.99", true)];
+
+    clearedByCurrencyChange(lines);
+
+    // No conversion, no rounding, no mutation. The caller empties the box.
+    expect(lines[0]!.amount).toBe("89.99");
+  });
+});
+
+describe("what needs acknowledging", () => {
+  const baseline = new Map([
+    ["kept", "10.00"],
+    ["reentered", "10.00"],
+  ]);
+
+  it("flags a figure that survived the change untouched", () => {
+    const lines = [line("kept", "10.00", false), line("reentered", "830.00", false)];
+
+    expect(
+      carriedAcrossCurrencyChange(lines, baseline, { from: "USD", to: "INR" }),
+    ).toEqual(["kept"]);
+  });
+
+  it("flags nothing when the currency has not actually moved", () => {
+    const lines = [line("kept", "10.00", false)];
+
+    expect(
+      carriedAcrossCurrencyChange(lines, baseline, { from: "USD", to: "USD" }),
+    ).toEqual([]);
+  });
+
+  it("flags nothing on a document that has no stored currency yet", () => {
+    // A new document, or a legacy row being given a currency for the first
+    // time: there is no previous denomination to have carried a figure across.
+    const lines = [line("kept", "10.00", false)];
+
+    expect(
+      carriedAcrossCurrencyChange(lines, baseline, { from: null, to: "INR" }),
+    ).toEqual([]);
+  });
+
+  it("stops flagging once the figure is re-entered", () => {
+    const lines = [line("kept", "825.00", false)];
+
+    expect(
+      carriedAcrossCurrencyChange(lines, baseline, { from: "USD", to: "INR" }),
+    ).toEqual([]);
+  });
+
+  it("treats a cleared prefill as re-entered rather than carried", () => {
+    // The form empties prefilled boxes on a currency change, so they no longer
+    // match the baseline and do not demand an acknowledgement of their own.
+    const lines = [line("kept", "", true)];
+
+    expect(
+      carriedAcrossCurrencyChange(lines, baseline, { from: "USD", to: "INR" }),
+    ).toEqual([]);
+  });
+});
+
+describe("orders and purchases answer identically", () => {
+  /*
+   * The two builders map different field names onto the same shape — a quoted
+   * price and a supplier's unit cost — and then ask the same two questions.
+   * This is the guard against one of them growing its own rules later.
+   */
+  const orderLines = [
+    line("part-a", "89.99", true),
+    line("part-b", "120.00", false),
+  ];
+  const purchaseLines = [
+    line("part-a", "42.50", true),
+    line("part-b", "60.00", false),
+  ];
+
+  it("clears the prefilled side and keeps the typed side on both", () => {
+    expect(clearedByCurrencyChange(orderLines)).toEqual(["part-a"]);
+    expect(clearedByCurrencyChange(purchaseLines)).toEqual(["part-a"]);
+  });
+
+  it("asks for the same acknowledgement on both", () => {
+    const orderBaseline = new Map([["part-b", "120.00"]]);
+    const purchaseBaseline = new Map([["part-b", "60.00"]]);
+
+    expect(
+      carriedAcrossCurrencyChange(orderLines, orderBaseline, {
+        from: "USD",
+        to: "EUR",
+      }),
+    ).toEqual(["part-b"]);
+
+    expect(
+      carriedAcrossCurrencyChange(purchaseLines, purchaseBaseline, {
+        from: "USD",
+        to: "EUR",
+      }),
+    ).toEqual(["part-b"]);
+  });
+});

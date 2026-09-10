@@ -136,10 +136,29 @@ export default async function EditOrderPage({
            * one that had been agreed. The price now round-trips: what was
            * quoted is what is shown, and what is shown is what is saved.
            */
+          /*
+           * The order's own currency, not the installation default. An order
+           * agreed in euros keeps showing euros however the setting has moved
+           * since — the default proposes one for a new document and has no say
+           * over one already agreed.
+           */
+          currency: order.currency,
           lines: order.lines.flatMap((line) => {
             const product = byId.get(line.productId);
             return product
-              ? [{ product, quantity: line.quantity, unitPrice: line.unitPrice }]
+              ? [
+                  {
+                    product,
+                    quantity: line.quantity,
+                    unitPrice: line.unitPrice,
+                    /*
+                     * A saved price is the order's own figure, whatever
+                     * originally suggested it, so a currency change must keep
+                     * it for the operator to check rather than discard it.
+                     */
+                    priceSource: "manual" as const,
+                  },
+                ]
               : [];
           }),
         }}

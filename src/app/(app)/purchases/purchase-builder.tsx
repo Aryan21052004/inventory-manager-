@@ -47,7 +47,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { CurrencySelect } from "@/components/ui/currency-select";
 import { useCurrency } from "@/components/layout/currency-provider";
+import type { Currency } from "@/lib/currency";
+import {
+  carriedAcrossCurrencyChange,
+  clearedByCurrencyChange,
+} from "@/lib/document-currency";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
 
 /**
@@ -94,15 +100,29 @@ interface PurchaseLine {
   quantity: number;
   /** Held as a string so the input can be typed in freely. */
   unitCost: string;
+  /**
+   * Where this figure came from. Prefilled from the last price paid, or typed.
+   * Only used when the currency changes: a prefill was denominated in whatever
+   * that earlier delivery was bought in and is cleared, while a typed figure is
+   * the operator's and is kept. See the same field on the order builder.
+   */
+  costSource: "lastPaid" | "manual";
 }
 
 export interface ExistingPurchase {
   id: string;
   purchaseNumber: string;
   supplierId: string;
+  /**
+   * What this purchase is already denominated in — shown as-is, never replaced
+   * by the installation default. Null on a legacy purchase.
+   */
+  currency: Currency | null;
   purchaseDate: string;
   lines: PurchaseLine[];
 }
+
+const COST_FROM_LAST_PAID = "lastPaid" as const;
 
 function PurchaseBuilder({
   suppliers,
@@ -124,7 +144,67 @@ function PurchaseBuilder({
   );
   const [submitting, setSubmitting] = useState(false);
 
-  const currency = useCurrency();
+  const defaultCurrency = useCurrency();
+
+  /*
+   * What this purchase is agreed in. An existing one shows its own currency,
+   * never today's default; a legacy purchase with none takes the default only
+   * because it is being given one for the first time.
+   */
+  const [currency, setCurrency] = useState<Currency>(
+    purchase?.currency ?? defaultCurrency,
+  );
+  const [costsAcknowledged, setCostsAcknowledged] = useState(false);
+
+  const baselineCurrency = purchase?.currency ?? null;
+  const baselineCosts = useMemo(
+    () =>
+      new Map(
+        (purchase?.lines ?? []).map((line) => [line.product.id, line.unitCost]),
+      ),
+    [purchase],
+  );
+
+  /*
+   * Changing the currency re-states what the figures mean and converts
+   * nothing. A last-paid prefill came from a delivery bought in some other
+   * currency, so it is cleared; a typed cost is the operator's and is kept.
+   */
+  function changeCurrency(next: Currency) {
+    if (next === currency) return;
+
+    setCurrency(next);
+    setCostsAcknowledged(false);
+    const clearing = new Set(
+      clearedByCurrencyChange(
+        lines.map((line) => ({
+          key: line.product.id,
+          amount: line.unitCost,
+          prefilled: line.costSource === COST_FROM_LAST_PAID,
+        })),
+      ),
+    );
+
+    setLines((current) =>
+      current.map((line) =>
+        clearing.has(line.product.id) ? { ...line, unitCost: "" } : line,
+      ),
+    );
+  }
+
+  /* The same test the server applies on save. */
+  const carriedCosts = carriedAcrossCurrencyChange(
+    lines.map((line) => ({
+      key: line.product.id,
+      amount: line.unitCost,
+      prefilled: line.costSource === COST_FROM_LAST_PAID,
+    })),
+    baselineCosts,
+    { from: baselineCurrency, to: currency },
+  );
+
+  const needsCostAcknowledgement =
+    carriedCosts.length > 0 && !costsAcknowledged;
 
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<ProductOption[]>(initialProducts);
@@ -175,7 +255,13 @@ function PurchaseBuilder({
        * what the supplier actually charged this time — the prefill is a
        * reminder of the last invoice, not a quote for this one.
        */
-      { product, quantity: 1, unitCost: product.lastPaidUnitCost ?? "" },
+      {
+        product,
+        quantity: 1,
+        unitCost: product.lastPaidUnitCost ?? "",
+        costSource:
+          product.lastPaidUnitCost === null ? "manual" : "lastPaid",
+      },
     ]);
   }
 
@@ -216,10 +302,14 @@ function PurchaseBuilder({
     lines.length > 0 &&
     badCost.length === 0 &&
     retired.length === 0 &&
+    // A carried cost needs saying-so; the server would refuse it anyway.
+    !needsCostAcknowledgement &&
     !submitting;
 
   const submission = () => ({
     supplierId,
+    currency,
+    ...(costsAcknowledged ? { costsConfirmedForCurrencyChange: true } : {}),
     items: lines.map((line) => ({
       productId: line.product.id,
       quantity: line.quantity,
@@ -299,6 +389,44 @@ function PurchaseBuilder({
                 </Field>
               </>
             )}
+
+            <CurrencySelect
+              value={currency}
+              onChange={changeCurrency}
+              disabled={submitting}
+              id="purchase-currency"
+              hint="What this purchase is agreed in. Changing it converts nothing — there are no exchange rates in this system — so costs prefilled from an earlier delivery are cleared and anything you typed is kept for you to check."
+            />
+
+            {carriedCosts.length > 0 ? (
+              <div className="flex flex-col gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3">
+                <p className="text-xs leading-relaxed text-foreground">
+                  {carriedCosts.length === 1
+                    ? "One line still shows the cost it had before the currency changed"
+                    : `${carriedCosts.length} lines still show the costs they had before the currency changed`}
+                  {baselineCurrency === null
+                    ? ""
+                    : ` (${baselineCurrency} → ${currency})`}
+                  . A cost is not converted by re-labelling it. Re-enter the
+                  {carriedCosts.length === 1 ? " figure" : " figures"} in{" "}
+                  {currency}, or confirm below that{" "}
+                  {carriedCosts.length === 1 ? "it is" : "they are"} the same in
+                  both.
+                </p>
+
+                <label className="flex items-start gap-2 text-xs text-foreground">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 size-3.5 shrink-0 accent-warning"
+                    checked={costsAcknowledged}
+                    onChange={(event) =>
+                      setCostsAcknowledged(event.target.checked)
+                    }
+                  />
+                  <span>These figures are correct in {currency}.</span>
+                </label>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 
@@ -497,6 +625,8 @@ function PurchaseBuilder({
                           onChange={(event) =>
                             updateLine(line.product.id, {
                               unitCost: event.target.value,
+                              // Typed, so a currency change keeps it.
+                              costSource: "manual",
                             })
                           }
                           className="tabular w-28 text-right"

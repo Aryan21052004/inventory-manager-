@@ -167,6 +167,11 @@ export interface PurchaseDetail {
   purchaseNumber: string;
   status: PurchaseStatus;
   total: string;
+  /**
+   * What this purchase is denominated in. Null on a legacy row — read as
+   * unknown, never as the installation default.
+   */
+  currency: Currency | null;
   purchaseDate: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -644,6 +649,7 @@ export async function getPurchaseDetail(
         purchaseNumber: purchase.purchaseNumber,
         status: purchase.status,
         total: purchase.total.toString(),
+        currency: purchase.currency,
         purchaseDate: purchase.purchaseDate,
         createdAt: purchase.createdAt,
         updatedAt: purchase.updatedAt,
@@ -798,7 +804,11 @@ export async function createPurchase(
              * Choosing a different one at entry is the rest of step F and is
              * not wired up yet, so today every new purchase takes the default.
              */
-            currency: defaultCurrency,
+            /*
+             * The explicit choice when there is one; the installation default
+             * only when there is not.
+             */
+            currency: purchase.currency ?? defaultCurrency,
             purchaseDate: purchase.purchaseDate ?? new Date(),
             // From the session. Not a parameter, so no caller can raise a
             // purchase in somebody else's name.
@@ -1397,6 +1407,12 @@ export async function updatePurchase(
 
   const purchase = parsed.data;
 
+  /*
+   * Only used for a purchase that has no currency at all — a legacy row being
+   * given one for the first time.
+   */
+  const defaultCurrency = await getCurrency();
+
   return prisma.$transaction(async (tx) => {
     const existing = await lockPurchase(tx, purchaseId);
 
@@ -1440,6 +1456,53 @@ export async function updatePurchase(
     const lines = await resolveLines(tx, purchase.items);
     const totalCents = calculatePurchaseTotal(lines);
 
+    /*
+     * The currency this edit leaves behind. Absent means "leave it alone",
+     * never a reset to today's default; only a purchase with none takes the
+     * default, and then because it is being given one for the first time.
+     */
+    const nextCurrency =
+      purchase.currency ?? existing.currency ?? defaultCurrency;
+    const currencyChanged =
+      existing.currency !== null && nextCurrency !== existing.currency;
+
+    /*
+     * A unit cost that did not move while the currency did — the same refusal
+     * `updateOrder` makes about prices, and for the same reason. What the
+     * supplier invoiced in euros is not that figure in rupees, and nothing in
+     * this system converts it.
+     */
+    if (currencyChanged) {
+      const before = await tx.purchaseItem.findMany({
+        where: { purchaseId },
+        select: { productId: true, unitCost: true },
+      });
+
+      const previousCost = new Map(
+        before.map((line) => [line.productId, line.unitCost.toString()]),
+      );
+
+      const carried = lines.filter((line) => {
+        const previous = previousCost.get(line.productId);
+        return (
+          previous !== undefined &&
+          toCents(Number(previous)) === line.unitCostCents
+        );
+      });
+
+      if (
+        carried.length > 0 &&
+        purchase.costsConfirmedForCurrencyChange !== true
+      ) {
+        throw new AppError(
+          "CONFLICT",
+          `${carried.length === 1 ? "One line keeps" : `${carried.length} lines keep`} the same unit cost after changing this purchase from ` +
+            `${existing.currency} to ${nextCurrency}. There are no exchange rates in this system, so a cost is not converted by ` +
+            `re-labelling it — re-enter it in ${nextCurrency}, or confirm that the figure is the same in both currencies.`,
+        );
+      }
+    }
+
     // Replaced wholesale rather than diffed. The lines are a small set with no
     // identity of their own, and a delete-then-insert inside the transaction is
     // simpler to reason about than a three-way merge.
@@ -1450,6 +1513,10 @@ export async function updatePurchase(
       data: {
         supplierId: purchase.supplierId,
         total: centsToDecimalString(totalCents),
+        // Only reachable while the purchase is editable — the guard above
+        // refuses RECEIVED and CANCELLED — so this is the freeze, enforced on
+        // the server rather than by hiding a control.
+        currency: nextCurrency,
         ...(purchase.purchaseDate ? { purchaseDate: purchase.purchaseDate } : {}),
         items: {
           create: lines.map((line) => ({

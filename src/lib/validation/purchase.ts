@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { CURRENCIES } from "@/lib/currency";
+
 /**
  * Validation for purchases.
  *
@@ -58,6 +60,19 @@ export type PurchaseLineInput = z.infer<typeof purchaseLineSchema>;
 
 export const purchaseSchema = z.object({
   supplierId: z.string().trim().min(1, "Choose a supplier"),
+
+  /**
+   * The currency this purchase is agreed in. Absent means the installation
+   * default on creation, and "leave it alone" on an edit — never a reset to
+   * today's default. See the same field on `orderSchema`.
+   */
+  currency: z.enum(CURRENCIES).optional(),
+
+  /**
+   * Confirmation that unit costs carried across a currency change are
+   * intended. Request-only, never stored — see `orderSchema`.
+   */
+  costsConfirmedForCurrencyChange: z.boolean().optional(),
 
   /** A purchase with nothing on it would receive nothing and look like it had. */
   items: z

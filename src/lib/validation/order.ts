@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { CURRENCIES } from "@/lib/currency";
+
 /**
  * Validation for orders.
  *
@@ -85,6 +87,35 @@ export type OrderLineInput = z.infer<typeof orderLineSchema>;
 
 export const orderSchema = z.object({
   customerId: z.string().trim().min(1, "Choose a customer"),
+
+  /**
+   * The currency this order is agreed in.
+   *
+   * Optional, and the two meanings of "absent" are different. On creation it
+   * means "use the installation default", which is that setting's entire
+   * remit. On an edit it means "leave the currency alone" — never "reset it to
+   * today's default", because an order raised in EUR must not become a USD
+   * order because somebody renamed a customer after the setting moved.
+   */
+  currency: z.enum(CURRENCIES).optional(),
+
+  /**
+   * Confirmation that prices carried across a currency change are intended.
+   *
+   * **Request-only. Never stored.** There is deliberately no column for it,
+   * because there is no persisted state it could describe: `updateOrder`
+   * writes the currency and every line in one transaction, so an order is
+   * never saved half-converted.
+   *
+   * The server cannot tell an auto-filled price from a typed one — `OrderItem`
+   * carries no provenance, and `updateOrder` replaces its lines wholesale, so
+   * there is nothing for a flag to survive on. What it can see is a number
+   * that did not move while the currency did, which is the shape the mistake
+   * actually takes. Those lines are refused unless this says the operator
+   * meant it, which is the legitimate case of a price that happens to be the
+   * same figure in both currencies.
+   */
+  pricesConfirmedForCurrencyChange: z.boolean().optional(),
 
   /**
    * At least one line. An order with nothing on it is not a document anyone

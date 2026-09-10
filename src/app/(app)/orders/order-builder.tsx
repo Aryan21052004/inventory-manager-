@@ -48,7 +48,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { CurrencySelect } from "@/components/ui/currency-select";
 import { useCurrency } from "@/components/layout/currency-provider";
+import type { Currency } from "@/lib/currency";
+import {
+  carriedAcrossCurrencyChange,
+  clearedByCurrencyChange,
+} from "@/lib/document-currency";
 import { formatCurrency, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -122,6 +128,19 @@ interface OrderLine {
    * the same reason the server checks the string before converting it.
    */
   unitPrice: string;
+  /**
+   * Where this figure came from, and the only place that is knowable.
+   *
+   * The server cannot tell a prefilled quote from a typed one — `OrderItem`
+   * stores no provenance, and an edit replaces its lines wholesale — so the
+   * distinction has to live here, in the state of the form that made it. It
+   * exists for exactly one decision: when the currency changes, a catalogue
+   * prefill is meaningless in the new currency and is cleared, while a figure
+   * somebody typed is theirs and is kept.
+   *
+   * "catalogue" survives only until the box is edited. There is no path back.
+   */
+  priceSource: "catalogue" | "manual";
 }
 
 /** An order being edited, as the page hands it over. */
@@ -129,6 +148,12 @@ export interface ExistingOrder {
   id: string;
   orderNumber: string;
   customerId: string;
+  /**
+   * What this order is already denominated in. Shown as-is — never replaced
+   * by the installation default, which would re-state a figure nobody
+   * re-decided. Null on a legacy order whose currency was never recorded.
+   */
+  currency: Currency | null;
   lines: OrderLine[];
 }
 
@@ -158,7 +183,80 @@ function OrderBuilder({
   const [lines, setLines] = useState<OrderLine[]>(order?.lines ?? []);
   const [submitting, setSubmitting] = useState(false);
 
-  const currency = useCurrency();
+  const defaultCurrency = useCurrency();
+
+  /*
+   * What this order is denominated in.
+   *
+   * An existing order shows its own currency, never today's default — that
+   * default proposes a currency for something being created and has no say
+   * over one already agreed. A legacy order with none recorded falls back to
+   * the default only because it is being given one for the first time.
+   */
+  const [currency, setCurrency] = useState<Currency>(
+    order?.currency ?? defaultCurrency,
+  );
+  const [pricesAcknowledged, setPricesAcknowledged] = useState(false);
+
+  /*
+   * The currency and prices this order was loaded with. The acknowledgement
+   * rule is defined against these and not against the live form, so it mirrors
+   * exactly what the server will compare on save.
+   */
+  const baselineCurrency = order?.currency ?? null;
+  const baselinePrices = useMemo(
+    () =>
+      new Map((order?.lines ?? []).map((line) => [line.product.id, line.unitPrice])),
+    [order],
+  );
+
+  /*
+   * Changing the currency re-states what every figure on the order means; it
+   * does not convert anything, because nothing here can.
+   *
+   * A catalogue prefill is cleared: it was the price list's number, and the
+   * price list is not denominated in the new currency. A figure somebody typed
+   * is kept — deleting a person's own work to tidy up a currency change would
+   * be worse than leaving them to check it.
+   */
+  function changeCurrency(next: Currency) {
+    if (next === currency) return;
+
+    setCurrency(next);
+    setPricesAcknowledged(false);
+    const clearing = new Set(
+      clearedByCurrencyChange(
+        lines.map((line) => ({
+          key: line.product.id,
+          amount: line.unitPrice,
+          prefilled: line.priceSource === "catalogue",
+        })),
+      ),
+    );
+
+    setLines((current) =>
+      current.map((line) =>
+        clearing.has(line.product.id) ? { ...line, unitPrice: "" } : line,
+      ),
+    );
+  }
+
+  /*
+   * Lines whose figure did not move while the currency did — the same test the
+   * server applies, so the form cannot offer a save the server will refuse.
+   */
+  const carriedPrices = carriedAcrossCurrencyChange(
+    lines.map((line) => ({
+      key: line.product.id,
+      amount: line.unitPrice,
+      prefilled: line.priceSource === "catalogue",
+    })),
+    baselinePrices,
+    { from: baselineCurrency, to: currency },
+  );
+
+  const needsPriceAcknowledgement =
+    carriedPrices.length > 0 && !pricesAcknowledged;
 
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<ProductOption[]>(initialProducts);
@@ -209,7 +307,15 @@ function OrderBuilder({
      */
     setLines((current) => [
       ...current,
-      { product, quantity: 1, unitPrice: product.sellingPrice ?? "" },
+      {
+        product,
+        quantity: 1,
+        unitPrice: product.sellingPrice ?? "",
+        // Prefilled from the catalogue, so a currency change may clear it.
+        // A product with no reference price starts blank and is the
+        // operator's from the outset.
+        priceSource: product.sellingPrice === null ? "manual" : "catalogue",
+      },
     ]);
   }
 
@@ -224,7 +330,11 @@ function OrderBuilder({
   function setUnitPrice(productId: string, unitPrice: string) {
     setLines((current) =>
       current.map((line) =>
-        line.product.id === productId ? { ...line, unitPrice } : line,
+        line.product.id === productId
+          ? // Typed, so it is the operator's figure now and a currency change
+            // must never discard it.
+            { ...line, unitPrice, priceSource: "manual" as const }
+          : line,
       ),
     );
   }
@@ -276,10 +386,19 @@ function OrderBuilder({
     // Every line must carry a price the server will accept. The button is
     // disabled rather than the save being allowed to fail on a round trip.
     lines.every((line) => isValidQuote(line.unitPrice)) &&
+    /*
+     * A carried price needs the operator to say they meant it. Gated here as
+     * well as on the server for the same reason every line price is: the save
+     * would be refused on a round trip, and disabling the button says so
+     * before the click rather than after it.
+     */
+    !needsPriceAcknowledgement &&
     !submitting;
 
   const submission = () => ({
     customerId,
+    currency,
+    ...(pricesAcknowledged ? { pricesConfirmedForCurrencyChange: true } : {}),
     items: lines.map((line) => ({
       productId: line.product.id,
       quantity: line.quantity,
@@ -355,6 +474,47 @@ function OrderBuilder({
                 </Select>
               </Field>
             )}
+
+            <CurrencySelect
+              value={currency}
+              onChange={changeCurrency}
+              disabled={submitting}
+              id="order-currency"
+              hint="What this order is agreed in. Changing it does not convert any figure — there are no exchange rates in this system — so prices taken from the catalogue are cleared and anything you typed is kept for you to check."
+            />
+
+            {carriedPrices.length > 0 ? (
+              <div className="flex flex-col gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3">
+                <p className="text-xs leading-relaxed text-foreground">
+                  {carriedPrices.length === 1
+                    ? "One line still shows the price it had before the currency changed"
+                    : `${carriedPrices.length} lines still show the prices they had before the currency changed`}
+                  {baselineCurrency === null
+                    ? ""
+                    : ` (${baselineCurrency} → ${currency})`}
+                  . A price is not converted by re-labelling it. Re-enter the
+                  {carriedPrices.length === 1 ? " figure" : " figures"} in{" "}
+                  {currency}, or confirm below that {carriedPrices.length === 1
+                    ? "it is"
+                    : "they are"}{" "}
+                  the same in both.
+                </p>
+
+                <label className="flex items-start gap-2 text-xs text-foreground">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 size-3.5 shrink-0 accent-warning"
+                    checked={pricesAcknowledged}
+                    onChange={(event) =>
+                      setPricesAcknowledged(event.target.checked)
+                    }
+                  />
+                  <span>
+                    These figures are correct in {currency}.
+                  </span>
+                </label>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 
