@@ -85,13 +85,14 @@ export const dynamic = "force-dynamic";
 
 export default function DashboardPage() {
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <PageHeader
         title="Dashboard"
         description="Stock health, open commitments, and what the business has actually done."
       />
 
       <Section
+        emphasis
         title="Needs attention"
         description="Everything here is something somebody has to act on."
       >
@@ -106,6 +107,21 @@ export default function DashboardPage() {
       >
         <Suspense fallback={<TileSkeletons count={4} />}>
           <InventorySection />
+        </Suspense>
+      </Section>
+
+      {/*
+        Costing sits directly under Inventory rather than after Procurement.
+        "What is on the shelf" and "how much of what sold can be costed" are two
+        halves of one question, and they used to be separated by both trading
+        sections — around fifteen hundred pixels apart.
+      */}
+      <Section
+        title="Costing & coverage"
+        description="How much of what has been sold can actually be costed."
+      >
+        <Suspense fallback={<TileSkeletons count={4} />}>
+          <CostingSection />
         </Suspense>
       </Section>
 
@@ -124,15 +140,6 @@ export default function DashboardPage() {
       >
         <Suspense fallback={<TileSkeletons count={4} />}>
           <ProcurementSection />
-        </Suspense>
-      </Section>
-
-      <Section
-        title="Costing & coverage"
-        description="How much of what has been sold can actually be costed."
-      >
-        <Suspense fallback={<TileSkeletons count={4} />}>
-          <CostingSection />
         </Suspense>
       </Section>
 
@@ -181,8 +188,8 @@ async function AttentionSection() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid gap-4 sm:grid-cols-2">
+    <div className="flex flex-col gap-3">
+      <div className="grid gap-3 sm:grid-cols-2">
         <LinkedStat
           href="/orders"
           label="Orders to action"
@@ -200,7 +207,13 @@ async function AttentionSection() {
       </div>
 
       {paperwork > 0 ? (
-        <Card>
+        /*
+          The one table on this page whose rows are tasks rather than history.
+          A tinted border is the whole distinction — it already carries a
+          warning-toned icon, and anything more would be decoration on a list
+          that is meant to be worked through and emptied.
+        */
+        <Card className="border-warning/35">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <FileWarning className="size-4 text-warning" aria-hidden />
@@ -311,9 +324,10 @@ async function InventorySection() {
   const { retired } = data;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="flex flex-col gap-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
+          compact
           label="Products"
           value={formatNumber(data.productCount)}
           hint={
@@ -324,12 +338,14 @@ async function InventorySection() {
           icon={Boxes}
         />
         <StatCard
+          compact
           label="Units on hand"
           value={formatNumber(data.totalUnits)}
           hint="Across every product holding stock"
           icon={Layers}
         />
         <StatCard
+          compact
           label="Value at cost"
           value={formatCurrency(data.stockValue, currency)}
           hint={
@@ -341,6 +357,7 @@ async function InventorySection() {
           tone="success"
         />
         <StatCard
+          compact
           label="Tied up in retired stock"
           value={formatCurrency(retired.value, currency)}
           hint={
@@ -381,9 +398,10 @@ async function SalesSection() {
   const data = result.data;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="flex flex-col gap-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
+          compact
           label="Realised revenue"
           value={formatCurrency(data.realisedRevenue, currency)}
           hint="Confirmed and completed orders"
@@ -391,18 +409,21 @@ async function SalesSection() {
           tone="success"
         />
         <StatCard
+          compact
           label="Open order value"
           value={formatCurrency(data.openOrderValue, currency)}
           hint="Confirmed, not yet shipped"
           icon={ShoppingCart}
         />
         <StatCard
+          compact
           label="Orders in flight"
           value={formatNumber(data.pendingCount + data.confirmedCount)}
           hint={`${formatNumber(data.pendingCount)} pending · ${formatNumber(data.confirmedCount)} confirmed`}
           icon={Layers}
         />
         <StatCard
+          compact
           label="Completed"
           value={formatNumber(data.completedCount)}
           hint={`${formatNumber(data.draftCount)} draft · ${formatNumber(data.cancelledCount)} cancelled`}
@@ -490,27 +511,31 @@ async function ProcurementSection() {
   const data = result.data;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="flex flex-col gap-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
+          compact
           label="Received spend"
           value={formatCurrency(data.receivedSpend, currency)}
           hint="Goods actually delivered"
           icon={Wallet}
         />
         <StatCard
+          compact
           label="Committed"
           value={formatCurrency(data.committedSpend, currency)}
           hint="Placed with a supplier, in transit"
           icon={Truck}
         />
         <StatCard
+          compact
           label="Deliveries in flight"
           value={formatNumber(data.pendingCount)}
           hint={`${formatNumber(data.draftCount)} still being written`}
           icon={Layers}
         />
         <StatCard
+          compact
           label="Received"
           value={formatNumber(data.receivedCount)}
           hint={`${formatNumber(data.cancelledCount)} cancelled`}
@@ -614,9 +639,10 @@ async function CostingSection() {
     data.fulfilledUnits > 0 && data.costedUnits === data.fulfilledUnits;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="flex flex-col gap-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
+          compact
           label="Cost coverage"
           value={data.fulfilledUnits === 0 ? "—" : `${coverage.toFixed(1)}%`}
           hint={
@@ -635,6 +661,7 @@ async function CostingSection() {
           revenue: see the basis note under the meter.
         */}
         <StatCard
+          compact
           label="Revenue from costed units"
           value={
             data.costedRevenue === null
@@ -649,6 +676,7 @@ async function CostingSection() {
           icon={ShoppingCart}
         />
         <StatCard
+          compact
           label="Known cost of sales"
           value={data.knownCogs === null ? "—" : formatCurrency(data.knownCogs, currency)}
           hint={
@@ -752,6 +780,7 @@ function MarginTile({
      */
     return (
       <StatCard
+        compact
         label="Realised margin"
         value="Not available"
         hint={
@@ -771,6 +800,7 @@ function MarginTile({
 
   return (
     <StatCard
+      compact
       label="Realised margin"
       value={formatCurrency(data.margin, currency)}
       hint={
@@ -871,16 +901,34 @@ async function ActivitySection() {
 function Section({
   title,
   description,
+  emphasis = false,
   children,
 }: {
   title: string;
   description?: string;
+  /**
+   * Marks the one section that can prompt action.
+   *
+   * Hierarchy here is a size ladder rather than an ornament: the page title is
+   * 20px, this is 18px, and every reporting section below it is 16px. Before,
+   * all six headings were the same size and position in the scroll was the only
+   * thing saying which one mattered — on a page several screens tall, that is
+   * not a signal.
+   */
+  emphasis?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-4">
+    <section className="flex flex-col gap-3">
       <div className="flex flex-col gap-1">
-        <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
+        <h2
+          className={cn(
+            "font-semibold tracking-tight",
+            emphasis ? "text-lg" : "text-base",
+          )}
+        >
+          {title}
+        </h2>
         {description ? (
           <p className="text-sm text-muted-foreground">{description}</p>
         ) : null}
@@ -890,7 +938,16 @@ function Section({
   );
 }
 
-/** A stat tile that is also a link, for the figures that lead somewhere. */
+/**
+ * A stat tile that is also a link, for the figures that lead somewhere.
+ *
+ * Two of the eighteen tiles on this page are links, and they used to be
+ * indistinguishable from the sixteen that are not. The tinted border says so
+ * before the pointer arrives, which is what a keyboard user and anyone
+ * scanning the page actually needs; the hover only confirms it. Border and
+ * background rather than a shadow or a bright fill — this is a counter that
+ * happens to lead somewhere, not a call to action.
+ */
 function LinkedStat({
   href,
   ...props
@@ -905,9 +962,19 @@ function LinkedStat({
   return (
     <Link
       href={href}
-      className="rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="group rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
-      <StatCard {...props} className="h-full" />
+      {/*
+        The transition names box-shadow explicitly. `transition-colors` alone
+        looked right but silently replaced the tile's own `transition-shadow` —
+        tailwind-merge treats every `transition-*` as one group — so these two
+        tiles snapped their hover shadow while the other sixteen eased it.
+      */}
+      <StatCard
+        {...props}
+        compact
+        className="h-full border-primary/30 transition-[box-shadow,border-color,background-color] group-hover:border-primary/60 group-hover:bg-accent/30"
+      />
     </Link>
   );
 }
@@ -916,12 +983,12 @@ function TileSkeletons({ count }: { count: number }) {
   return (
     <div
       className={cn(
-        "grid gap-4 sm:grid-cols-2",
-        count === 3 ? "xl:grid-cols-3" : "xl:grid-cols-4",
+        "grid gap-3 sm:grid-cols-2",
+        count === 3 ? "lg:grid-cols-3" : "lg:grid-cols-4",
       )}
     >
       {Array.from({ length: count }, (_, index) => (
-        <StatCardSkeleton key={index} />
+        <StatCardSkeleton key={index} compact />
       ))}
     </div>
   );

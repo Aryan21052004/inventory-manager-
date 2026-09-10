@@ -23,6 +23,7 @@ function StatCard({
   hint,
   icon: Icon,
   tone = "default",
+  compact = false,
   className,
 }: {
   label: string;
@@ -30,12 +31,25 @@ function StatCard({
   hint?: string;
   icon: LucideIcon;
   tone?: Tone;
+  /**
+   * A denser tile, for a screen that shows many at once.
+   *
+   * Opt-in, and deliberately so: the dashboard carries eighteen of these and
+   * reads as a wall, while a page showing four wants the room. Every caller
+   * that does not ask for it renders exactly as it did before.
+   *
+   * Only the geometry changes — padding, the value's size and the icon well.
+   * The label, the hint, the tones and the border stay put, so a compact tile
+   * and a default one are recognisably the same object.
+   */
+  compact?: boolean;
   className?: string;
 }) {
   return (
     <div
       className={cn(
-        "rounded-xl border border-border bg-card p-6 shadow-sm transition-shadow hover:shadow-md",
+        "rounded-xl border border-border bg-card shadow-sm transition-shadow hover:shadow-md",
+        compact ? "p-4" : "p-6",
         className,
       )}
     >
@@ -45,14 +59,20 @@ function StatCard({
         </p>
         <div
           className={cn(
-            "flex size-8 shrink-0 items-center justify-center rounded-lg",
+            "flex shrink-0 items-center justify-center rounded-lg",
+            compact ? "size-7" : "size-8",
             TONE_CLASSES[tone],
           )}
         >
-          <Icon className="size-4" aria-hidden />
+          <Icon className={compact ? "size-3.5" : "size-4"} aria-hidden />
         </div>
       </div>
-      <p className="tabular mt-4 text-2xl font-semibold tracking-tight">
+      <p
+        className={cn(
+          "tabular font-semibold tracking-tight",
+          compact ? "mt-2.5 text-xl" : "mt-4 text-2xl",
+        )}
+      >
         {value}
       </p>
       {hint ? (

@@ -50,15 +50,21 @@ function TableSkeleton({
   );
 }
 
-/** Matches the stat tile row on the dashboard. */
-function StatCardSkeleton() {
+/** Mirrors `StatCard`, including its opt-in compact geometry, so the page does
+ *  not resize when the real figures arrive. */
+function StatCardSkeleton({ compact = false }: { compact?: boolean }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
+    <div
+      className={cn(
+        "rounded-xl border border-border bg-card shadow-sm",
+        compact ? "p-4" : "p-6",
+      )}
+    >
       <div className="flex items-center justify-between">
         <Skeleton className="h-3 w-24" />
-        <Skeleton className="size-8 rounded-lg" />
+        <Skeleton className={cn("rounded-lg", compact ? "size-7" : "size-8")} />
       </div>
-      <Skeleton className="mt-4 h-8 w-32" />
+      <Skeleton className={compact ? "mt-2.5 h-7 w-28" : "mt-4 h-8 w-32"} />
       <Skeleton className="mt-2 h-3 w-20" />
     </div>
   );
