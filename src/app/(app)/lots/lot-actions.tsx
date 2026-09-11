@@ -22,8 +22,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input, Textarea } from "@/components/ui/input";
 import type { LotStatus } from "@/generated/prisma/enums";
-import { useCurrency } from "@/components/layout/currency-provider";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import type { Currency } from "@/lib/currency";
+import { formatEntry } from "@/components/ui/money";
+import { formatNumber } from "@/lib/format";
 import {
   QUARANTINED_LOT_STATUS,
   REJECTED_LOT_STATUS,
@@ -58,6 +59,8 @@ export interface LotActionTarget {
   status: LotStatus;
   quantityRemaining: number;
   unitCost: string | null;
+  /** What that cost is in, from the batch's own row. Null when the cost is. */
+  costCurrency: Currency | null;
   isReturn: boolean;
 }
 
@@ -285,15 +288,20 @@ function WriteOffDialog({
 }) {
   const [quantity, setQuantity] = useState(0);
   const [reason, setReason] = useState("");
-  const currency = useCurrency();
-
   const overQuantity = quantity > lot.quantityRemaining;
   const remaining = Math.max(0, lot.quantityRemaining - quantity);
 
+  /*
+   * Priced in the batch's own currency, never the installation default: this
+   * is what those specific units cost when they were bought.
+   */
   const value =
     lot.unitCost === null
       ? null
-      : formatCurrency((Number(lot.unitCost) * quantity).toFixed(2), currency);
+      : formatEntry({
+          currency: lot.costCurrency,
+          amount: (Number(lot.unitCost) * quantity).toFixed(2),
+        });
 
   return (
     <Dialog

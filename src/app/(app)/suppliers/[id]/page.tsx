@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -26,6 +27,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import { MoneyLines, RecordMoney } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { PurchaseStatusBadge } from "@/components/ui/purchase-status-badge";
@@ -39,14 +41,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  formatCurrency,
   formatDate,
   formatDateTime,
   formatNumber,
 } from "@/lib/format";
 import { getCurrentUser } from "@/server/auth";
 import { getSupplierDetail, type SupplierDetail } from "@/server/suppliers";
-import { getCurrency } from "@/server/settings";
 
 /**
  * A single supplier, and everything traceable back to them.
@@ -83,10 +83,9 @@ export default async function SupplierDetailPage({
 }) {
   const { id } = await params;
 
-  const [result, user, currency] = await Promise.all([
+  const [result, user] = await Promise.all([
     getSupplierDetail(id),
     getCurrentUser(),
-    getCurrency(),
   ]);
 
   if (!result.ok) {
@@ -156,7 +155,7 @@ export default async function SupplierDetailPage({
         />
         <StatCard
           label="Total purchased"
-          value={formatCurrency(supplier.totalPurchased, currency)}
+          value={<MoneyLines total={supplier.totalPurchasedByCurrency} stackedClassName="text-lg" />}
           hint="Received purchases only"
           icon={Wallet}
           tone="success"
@@ -283,7 +282,7 @@ export default async function SupplierDetailPage({
                   />
                   <Figure
                     label="Value at cost"
-                    value={formatCurrency(supplier.stockOnHand.value, currency)}
+                    value={<MoneyLines total={supplier.stockOnHand.valueByCurrency} stackedClassName="text-lg" />}
                   />
                   <Figure
                     label="Products"
@@ -367,7 +366,7 @@ export default async function SupplierDetailPage({
                       {formatNumber(purchase.itemCount)}
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
-                      {formatCurrency(purchase.total, currency)}
+                      <RecordMoney amount={purchase.total} currency={purchase.currency} />
                     </TableCell>
                     <TableCell className="hidden text-sm text-muted-foreground md:table-cell">
                       {formatDate(purchase.purchaseDate)}
@@ -463,7 +462,14 @@ function DetailRow({
   );
 }
 
-function Figure({ label, value }: { label: string; value: string }) {
+function Figure({
+  label,
+  value,
+}: {
+  label: string;
+  /** Widened for money that spans currencies — see `MoneyLines`. */
+  value: ReactNode;
+}) {
   return (
     <div>
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">

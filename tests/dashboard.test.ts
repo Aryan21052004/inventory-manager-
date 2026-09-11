@@ -15,11 +15,13 @@ import {
   loadSales,
 } from "@/server/dashboard";
 import { loadOrderStats } from "@/server/orders";
+import { setCurrency } from "@/server/settings";
 import { loadProductStats } from "@/server/products";
 import { loadPurchaseStats, receivePurchase, createPurchase, cancelPurchase } from "@/server/purchases";
 import { cancelOrder, completeOrder, confirmOrder, createOrder } from "@/server/orders";
 
 import { signOut } from "./clerk-mock";
+import { amountIn } from "./money";
 import {
   createSupplier,
   quoted,
@@ -108,14 +110,14 @@ describe("an empty database", () => {
     expect(attention.certificates.expiredCount).toBe(0);
     expect(attention.uncostedUnits).toBe(0);
     expect(inventory.productCount).toBe(0);
-    expect(Number(inventory.stockValue)).toBe(0);
-    expect(Number(sales.realisedRevenue)).toBe(0);
-    expect(Number(procurement.receivedSpend)).toBe(0);
+    expect(inventory.stockValueByCurrency).toEqual([]);
+    expect(sales.realisedRevenueByCurrency).toEqual([]);
+    expect(procurement.receivedSpendByCurrency).toEqual([]);
     expect(movements).toHaveLength(0);
 
     // No sales means no margin — not zero, and certainly not a percentage.
     expect(costing.unitsSold).toBe(0);
-    expect(costing.margin).toBeNull();
+    expect(costing.marginByCurrency).toEqual([]);
     expect(costing.marginPercent).toBeNull();
   });
 });
@@ -198,13 +200,13 @@ describe("cost coverage", () => {
 
     expect(costing.unitsSold).toBe(10);
     expect(costing.costedUnits).toBe(0);
-    expect(Number(costing.allRevenue)).toBe(1_000);
+    expect(amountIn(costing.allRevenueByCurrency, "INR")).toBe(1_000);
 
     // Nothing. Not zero, not the revenue, not a percentage.
-    expect(costing.margin).toBeNull();
+    expect(costing.marginByCurrency).toEqual([]);
     expect(costing.marginPercent).toBeNull();
-    expect(costing.knownCogs).toBeNull();
-    expect(costing.costedRevenue).toBeNull();
+    expect(costing.knownCogsByCurrency).toEqual([]);
+    expect(costing.costedRevenueByCurrency).toEqual([]);
   });
 
   it("never reports a hundred per cent margin on uncosted sales", async () => {
@@ -219,7 +221,8 @@ describe("cost coverage", () => {
 
     const costing = unwrap(await loadCosting());
     expect(costing.marginPercent).not.toBe(100);
-    expect(costing.margin).not.toBe(costing.allRevenue);
+    expect(costing.marginByCurrency).toEqual([]);
+    expect(costing.marginByCurrency).not.toEqual(costing.allRevenueByCurrency);
   });
 
   it("apportions revenue to the costed units at partial coverage", async () => {
@@ -244,11 +247,11 @@ describe("cost coverage", () => {
 
     expect(costing.unitsSold).toBe(20);
     expect(costing.costedUnits).toBe(10);
-    expect(Number(costing.allRevenue)).toBe(2_000);
-    expect(Number(costing.costedRevenue)).toBe(1_000);
-    expect(Number(costing.knownCogs)).toBe(600);
-    expect(Number(costing.margin)).toBe(400);
-    expect(Number(costing.margin)).not.toBe(1_400);
+    expect(amountIn(costing.allRevenueByCurrency, "INR")).toBe(2_000);
+    expect(amountIn(costing.costedRevenueByCurrency, "INR")).toBe(1_000);
+    expect(amountIn(costing.knownCogsByCurrency, "INR")).toBe(600);
+    expect(amountIn(costing.marginByCurrency, "INR")).toBe(400);
+    expect(amountIn(costing.marginByCurrency, "INR")).not.toBe(1_400);
     expect(costing.marginPercent).toBeCloseTo(40, 5);
   });
 
@@ -265,9 +268,9 @@ describe("cost coverage", () => {
 
     expect(costing.unitsSold).toBe(15);
     expect(costing.costedUnits).toBe(15);
-    expect(Number(costing.knownCogs)).toBe(900);
-    expect(Number(costing.costedRevenue)).toBe(1_500);
-    expect(Number(costing.margin)).toBe(600);
+    expect(amountIn(costing.knownCogsByCurrency, "INR")).toBe(900);
+    expect(amountIn(costing.costedRevenueByCurrency, "INR")).toBe(1_500);
+    expect(amountIn(costing.marginByCurrency, "INR")).toBe(600);
     expect(costing.marginPercent).toBeCloseTo(40, 5);
   });
 
@@ -283,7 +286,7 @@ describe("cost coverage", () => {
 
     const costing = unwrap(await loadCosting());
     expect(costing.costedUnits).toBe(5);
-    expect(Number(costing.knownCogs)).toBe(300);
+    expect(amountIn(costing.knownCogsByCurrency, "INR")).toBe(300);
   });
 
   it("drops a cancelled order's cost out of the figures entirely", async () => {
@@ -298,7 +301,7 @@ describe("cost coverage", () => {
 
     const costing = unwrap(await loadCosting());
     expect(costing.unitsSold).toBe(0);
-    expect(costing.margin).toBeNull();
+    expect(costing.marginByCurrency).toEqual([]);
   });
 });
 
@@ -318,7 +321,7 @@ describe("inventory value", () => {
 
     const inventory = unwrap(await loadInventory());
 
-    expect(Number(inventory.stockValue)).toBe(800);
+    expect(amountIn(inventory.stockValueByCurrency, "USD")).toBe(800);
     expect(inventory.costedUnits).toBe(10);
     expect(inventory.uncostedUnits).toBe(5);
     expect(inventory.totalUnits).toBe(15);
@@ -333,7 +336,7 @@ describe("inventory value", () => {
     });
 
     const inventory = unwrap(await loadInventory());
-    expect(Number(inventory.stockValue)).toBe(0);
+    expect(inventory.stockValueByCurrency).toEqual([]);
     expect(inventory.uncostedUnits).toBe(10);
   });
 
@@ -362,13 +365,13 @@ describe("inventory value", () => {
     const inventory = unwrap(await loadInventory());
 
     // 10×50 + 4×25 + 2×30 = 660
-    expect(Number(inventory.stockValue)).toBe(660);
+    expect(amountIn(inventory.stockValueByCurrency, "USD")).toBe(660);
     expect(inventory.totalUnits).toBe(16);
 
     // 4×25 + 2×30 = 160, across two products.
     expect(inventory.retired.productCount).toBe(2);
     expect(inventory.retired.units).toBe(6);
-    expect(Number(inventory.retired.value)).toBe(160);
+    expect(amountIn(inventory.retired.valueByCurrency, "USD")).toBe(160);
   });
 
   it("reports no retired stock when everything is active", async () => {
@@ -378,7 +381,7 @@ describe("inventory value", () => {
     const inventory = unwrap(await loadInventory());
     expect(inventory.retired.productCount).toBe(0);
     expect(inventory.retired.units).toBe(0);
-    expect(Number(inventory.retired.value)).toBe(0);
+    expect(inventory.retired.valueByCurrency).toEqual([]);
   });
 });
 
@@ -615,7 +618,7 @@ describe("sales figures", () => {
     const sales = unwrap(await loadSales());
     expect(sales.confirmedCount).toBe(1);
     expect(sales.completedCount).toBe(1);
-    expect(Number(sales.realisedRevenue)).toBe(500);
+    expect(amountIn(sales.realisedRevenueByCurrency, "INR")).toBe(500);
   });
 
   it("excludes drafts from realised revenue", async () => {
@@ -630,7 +633,7 @@ describe("sales figures", () => {
 
     const sales = unwrap(await loadSales());
     expect(sales.draftCount).toBe(1);
-    expect(Number(sales.realisedRevenue)).toBe(0);
+    expect(sales.realisedRevenueByCurrency).toEqual([]);
   });
 
   it("excludes cancelled orders from realised revenue", async () => {
@@ -645,7 +648,7 @@ describe("sales figures", () => {
 
     const sales = unwrap(await loadSales());
     expect(sales.cancelledCount).toBe(1);
-    expect(Number(sales.realisedRevenue)).toBe(0);
+    expect(sales.realisedRevenueByCurrency).toEqual([]);
   });
 
   it("counts only confirmed orders as open value", async () => {
@@ -661,7 +664,7 @@ describe("sales figures", () => {
 
     const sales = unwrap(await loadSales());
     // Confirmed 300 is open; the completed 200 is revenue but not a commitment.
-    expect(Number(sales.openOrderValue)).toBe(300);
+    expect(amountIn(sales.openOrderValueByCurrency, "INR")).toBe(300);
   });
 
   it("lists recent orders newest first", async () => {
@@ -696,7 +699,7 @@ describe("procurement figures", () => {
 
     const procurement = unwrap(await loadProcurement());
     expect(procurement.receivedCount).toBe(1);
-    expect(Number(procurement.receivedSpend)).toBe(250);
+    expect(amountIn(procurement.receivedSpendByCurrency, "INR")).toBe(250);
   });
 
   it("excludes drafts from spend", async () => {
@@ -711,8 +714,8 @@ describe("procurement figures", () => {
 
     const procurement = unwrap(await loadProcurement());
     expect(procurement.draftCount).toBe(1);
-    expect(Number(procurement.receivedSpend)).toBe(0);
-    expect(Number(procurement.committedSpend)).toBe(0);
+    expect(procurement.receivedSpendByCurrency).toEqual([]);
+    expect(procurement.committedSpendByCurrency).toEqual([]);
   });
 
   it("excludes cancelled purchases from spend", async () => {
@@ -728,7 +731,7 @@ describe("procurement figures", () => {
 
     const procurement = unwrap(await loadProcurement());
     expect(procurement.cancelledCount).toBe(1);
-    expect(Number(procurement.receivedSpend)).toBe(0);
+    expect(procurement.receivedSpendByCurrency).toEqual([]);
   });
 
   it("counts pending purchases as committed, not spent", async () => {
@@ -746,8 +749,8 @@ describe("procurement figures", () => {
     });
 
     const procurement = unwrap(await loadProcurement());
-    expect(Number(procurement.committedSpend)).toBe(250);
-    expect(Number(procurement.receivedSpend)).toBe(0);
+    expect(amountIn(procurement.committedSpendByCurrency, "INR")).toBe(250);
+    expect(procurement.receivedSpendByCurrency).toEqual([]);
   });
 });
 
@@ -773,19 +776,23 @@ describe("the dashboard agrees with the module figures", () => {
     const orderStats = unwrap(await loadOrderStats());
     expect(sales.draftCount).toBe(orderStats.draft);
     expect(sales.confirmedCount).toBe(orderStats.confirmed);
-    expect(Number(sales.openOrderValue)).toBe(Number(orderStats.openValue));
+    expect(amountIn(sales.openOrderValueByCurrency, "INR")).toBe(
+      amountIn(orderStats.openValueByCurrency, "INR"),
+    );
 
     const procurement = unwrap(await loadProcurement());
     const purchaseStats = unwrap(await loadPurchaseStats());
     expect(procurement.draftCount).toBe(purchaseStats.draft);
-    expect(Number(procurement.receivedSpend)).toBe(
-      Number(purchaseStats.receivedValue),
+    expect(amountIn(procurement.receivedSpendByCurrency, "INR")).toBe(
+      amountIn(purchaseStats.receivedValueByCurrency, "INR"),
     );
 
     const inventory = unwrap(await loadInventory());
     const productStats = unwrap(await loadProductStats());
     expect(inventory.productCount).toBe(productStats.total);
-    expect(Number(inventory.stockValue)).toBe(Number(productStats.stockValue));
+    expect(amountIn(inventory.stockValueByCurrency, "INR")).toBe(
+      amountIn(productStats.stockValueByCurrency, "INR"),
+    );
     expect(inventory.uncostedUnits).toBe(productStats.uncostedUnits);
   });
 });
@@ -845,5 +852,120 @@ describe("when the database cannot be reached", () => {
     }
 
     failing.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Historical currency on the recent-document tables
+// ---------------------------------------------------------------------------
+
+/**
+ * The currency a document was raised in belongs to the document.
+ *
+ * These two tables show one order's or one purchase's own total, and they used
+ * to be labelled with `AppSetting.defaultCurrency` — so changing the setting
+ * silently relabelled every historical figure on the dashboard. A $500 order
+ * became a ₹500 order overnight, with the stored number untouched and nothing
+ * on screen to say what had happened.
+ *
+ * The snapshot now carries the currency off the record itself, and these tests
+ * exist to keep it that way: each one moves the installation default *after*
+ * the document is raised, and asserts the document did not move with it.
+ */
+describe("recent documents keep the currency they were raised in", () => {
+  it("keeps a USD order in USD when the default later becomes INR", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const buyer = await customer();
+    const a = await part("A-1", "100.00");
+
+    await setCurrency("USD");
+    await receive(supplier.id, a.id, 10, "40.00");
+    await sell(buyer.id, a.id, 5);
+
+    // The setting moves on. What has already happened must not.
+    await setCurrency("INR");
+
+    const sales = unwrap(await loadSales());
+    const order = sales.recentOrders[0]!;
+
+    expect(order.currency).toBe("USD");
+    expect(Number(order.total)).toBe(500);
+
+    await setCurrency("EUR");
+    expect(unwrap(await loadSales()).recentOrders[0]!.currency).toBe("USD");
+  });
+
+  it("keeps an INR purchase in INR when the default later becomes USD", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const a = await part("A-1", "100.00");
+
+    await setCurrency("INR");
+    await receive(supplier.id, a.id, 4, "250.00");
+
+    await setCurrency("USD");
+
+    const procurement = unwrap(await loadProcurement());
+    const purchase = procurement.recentPurchases[0]!;
+
+    expect(purchase.currency).toBe("INR");
+    expect(Number(purchase.total)).toBe(1000);
+
+    await setCurrency("EUR");
+    expect(
+      unwrap(await loadProcurement()).recentPurchases[0]!.currency,
+    ).toBe("INR");
+  });
+
+  it("reads each document's own currency, not one shared setting", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const buyer = await customer();
+    const a = await part("A-1", "100.00");
+
+    await setCurrency("USD");
+    await receive(supplier.id, a.id, 20, "10.00");
+    await sell(buyer.id, a.id, 1);
+
+    await setCurrency("EUR");
+    await sell(buyer.id, a.id, 2);
+
+    /*
+     * Two orders, two currencies, one installation. A single setting cannot
+     * describe both, which is exactly why it must not be asked to.
+     */
+    const sales = unwrap(await loadSales());
+    const currencies = sales.recentOrders.map((order) => order.currency);
+
+    expect(currencies).toContain("USD");
+    expect(currencies).toContain("EUR");
+    expect(new Set(currencies).size).toBe(2);
+  });
+
+  it("reports an unrecorded currency as null rather than the default", async () => {
+    await signInWithRole("ADMIN");
+    const buyer = await customer();
+
+    // Legacy-shaped data: a real total whose currency predates the column.
+    await prisma.order.create({
+      data: {
+        orderNumber: "ORD-LEGACY-1",
+        customerId: buyer.id,
+        status: "COMPLETED",
+        subtotal: "750.00",
+        total: "750.00",
+        currency: null,
+      },
+    });
+
+    await setCurrency("EUR");
+
+    const order = unwrap(await loadSales()).recentOrders[0]!;
+
+    // Null is the honest answer, and the page renders it as "currency
+    // unknown". Substituting EUR here is the defect these tests guard.
+    expect(order.currency).toBeNull();
+    expect(Number(order.total)).toBe(750);
   });
 });

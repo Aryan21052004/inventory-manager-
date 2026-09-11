@@ -1,5 +1,5 @@
-import type { Currency } from "@/lib/currency";
 import { csvFilename, csvHeaders, toCsv } from "@/lib/csv";
+import type { MoneyByCurrency } from "@/lib/money-by-currency";
 import { AppError, toSafeError } from "@/lib/errors";
 import {
   describeRange,
@@ -19,7 +19,6 @@ import {
   loadValuationReport,
 } from "@/server/reports";
 import { certificateStatusLabel } from "@/lib/certificate-status";
-import { getCurrency } from "@/server/settings";
 
 /**
  * CSV export for the reports.
@@ -69,28 +68,95 @@ function paramsFor(report: ReportKey, url: URL): ReportParams {
 }
 
 /**
- * The filters an export was run under, written into the file itself.
+ * How a monetary amount says what it is denominated in.
  *
- * The currency line is why this takes one: a spreadsheet of bare decimals is
- * ambiguous the moment it leaves the application, and a file that says 18104.96
- * without saying in what is a file somebody will guess at. Stating it in the
- * metadata is the whole of the fix.
+ * Every money column now travels as a pair — the amount, and the currency
+ * beside it — because a single header line naming one currency for the whole
+ * file was a claim this application cannot make. It used to read the
+ * installation default and assert that every figure below was in it, which
+ * was wrong for any history recorded under a different setting and wrong for
+ * any business that buys and sells in more than one currency.
  *
- * It is stated *here* and not in the cells. Money stays a raw decimal in every
- * numeric column — putting `₹` in front of it would turn a number column into a
- * text column, which breaks sorting, summing and every formula anybody writes
- * against the export. The header says the currency once; the cells stay
- * arithmetic.
+ * The amount itself stays a raw decimal. Putting `₹` in the cell would turn a
+ * number column into a text column and break every sort, sum and formula
+ * written against the export; the currency belongs in its own column, where a
+ * spreadsheet can group by it.
  */
-function preamble(
-  report: ReportKey,
-  params: ReportParams,
-  currency: Currency,
-): string[] {
+const UNKNOWN_CURRENCY = "unknown";
+const MIXED_CURRENCY = "mixed";
+
+/**
+ * The amount cell and the currency cell for one monetary total.
+ *
+ * Three answers, kept distinct on purpose:
+ *
+ *   nothing to total  → both blank. Not a zero: no rows contributed at all.
+ *   one currency      → the amount, and its code — or `unknown` where the
+ *                       currency was never recorded, which is a fact about the
+ *                       data and never the installation default standing in.
+ *   several           → the amount is blank, because there is no single
+ *                       defensible number, and the currency reads `mixed`. The
+ *                       figures themselves follow on their own rows; see
+ *                       `splitRows`.
+ */
+function moneyCells(total: MoneyByCurrency): [string | null, string | null] {
+  if (total.length === 0) return [null, null];
+  if (total.length > 1) return [null, MIXED_CURRENCY];
+
+  const only = total[0]!;
+  return [only.amount, only.currency ?? UNKNOWN_CURRENCY];
+}
+
+/**
+ * The extra rows a mixed total needs — one per currency, under the same label.
+ *
+ * Only the label and the money cells are filled; every quantity cell is left
+ * blank so a spreadsheet summing the units column still gets the right answer.
+ * A total in one currency needs none of this and produces nothing.
+ */
+function splitRows(
+  label: string | null,
+  total: MoneyByCurrency,
+  width: number,
+  amountAt: number,
+): (string | number | null)[][] {
+  if (total.length <= 1) return [];
+
+  return total.map((entry) => {
+    const cells: (string | number | null)[] = Array(width).fill(null);
+    cells[0] = label;
+    cells[amountAt] = entry.amount;
+    cells[amountAt + 1] = entry.currency ?? UNKNOWN_CURRENCY;
+    return cells;
+  });
+}
+
+/** The notes every report carrying money owes its reader. */
+const MONEY_NOTES = [
+  "Monetary columns carry their own currency in the column beside them. Nothing here is converted between currencies and no exchange rate is applied.",
+  `A figure spanning several currencies has no single value: its amount is blank, its currency reads "${MIXED_CURRENCY}", and one row per currency follows it.`,
+  `"${UNKNOWN_CURRENCY}" means no currency was ever recorded against those rows. It is not an assumption that they are in any particular one.`,
+];
+
+/**
+ * A per-currency total written into a preamble line, where a column pair will
+ * not fit — `1200.00 INR; 40.00 unknown`, or `none` when there is nothing.
+ */
+function inlineMoney(total: MoneyByCurrency): string {
+  if (total.length === 0) return "none";
+
+  return total
+    .map((entry) => `${entry.amount} ${entry.currency ?? UNKNOWN_CURRENCY}`)
+    .join("; ");
+}
+
+/**
+ * The filters an export was run under, written into the file itself.
+ */
+function preamble(report: ReportKey, params: ReportParams): string[] {
   const lines = [
     `${REPORT_TITLES[report]} — exported ${new Date().toISOString().slice(0, 10)}`,
     `Period: ${describeRange(params)}`,
-    `Currency: ${currency} — monetary columns are plain numbers in ${currency}, unconverted.`,
   ];
 
   if (REPORT_CONFIG[report].groupings.length > 0) {
@@ -131,7 +197,7 @@ export async function GET(
     const url = new URL(request.url);
     const reportParams = paramsFor(report, url);
 
-    const body = await render(report, reportParams, await getCurrency());
+    const body = await render(report, reportParams);
 
     return new Response(body, {
       status: 200,
@@ -178,7 +244,6 @@ function rethrow(error: { code: AppError["code"]; message: string }): never {
 async function render(
   report: ReportKey,
   params: ReportParams,
-  currency: Currency,
 ): Promise<string> {
   const truncated = (count: number): string[] =>
     count >= EXPORT_LIMIT
@@ -191,6 +256,17 @@ async function render(
 
     const { rows, totals } = result.data;
 
+    /*
+     * Cost and retail each carry their own currency, and they are genuinely
+     * allowed to differ: stock bought from one country and priced for sale in
+     * another has a cost in one currency and a catalogue price in a second.
+     * Two independent column pairs, never netted against each other and never
+     * folded into a single figure.
+     */
+    const WIDTH = 13;
+    const COST_AT = 8;
+    const RETAIL_AT = 10;
+
     return toCsv(
       [
         "SKU",
@@ -202,23 +278,43 @@ async function render(
         "Costed units",
         "Uncosted units",
         "Value at cost",
+        "Cost currency",
         "Value at retail",
+        "Retail currency",
         "Cost coverage %",
       ],
       [
-        ...rows.map((row) => [
-          row.sku,
-          row.name,
-          row.category,
-          row.supplierName,
-          row.productStatus,
-          row.units,
-          row.costedUnits,
-          row.uncostedUnits,
-          row.valueAtCost,
-          row.valueAtRetail,
-          row.coverage,
-        ]),
+        ...rows.flatMap((row) => {
+          const [cost, costCurrency] = moneyCells(row.valueAtCostByCurrency);
+          const [retail, retailCurrency] = moneyCells(
+            row.valueAtRetailByCurrency,
+          );
+
+          return [
+            [
+              row.sku,
+              row.name,
+              row.category,
+              row.supplierName,
+              row.productStatus,
+              row.units,
+              row.costedUnits,
+              row.uncostedUnits,
+              cost,
+              costCurrency,
+              retail,
+              retailCurrency,
+              row.coverage,
+            ],
+            ...splitRows(row.sku, row.valueAtCostByCurrency, WIDTH, COST_AT),
+            ...splitRows(
+              row.sku,
+              row.valueAtRetailByCurrency,
+              WIDTH,
+              RETAIL_AT,
+            ),
+          ];
+        }),
         // A totals row, so a spreadsheet that gets forwarded still carries the
         // coverage caveat rather than only the value.
         [
@@ -230,15 +326,29 @@ async function render(
           totals.units,
           totals.costedUnits,
           totals.uncostedUnits,
-          totals.valueAtCost,
-          totals.valueAtRetail,
+          ...moneyCells(totals.valueAtCostByCurrency),
+          ...moneyCells(totals.valueAtRetailByCurrency),
           totals.coverage,
         ],
+        ...splitRows(
+          "TOTAL",
+          totals.valueAtCostByCurrency,
+          WIDTH,
+          COST_AT,
+        ),
+        ...splitRows(
+          "TOTAL",
+          totals.valueAtRetailByCurrency,
+          WIDTH,
+          RETAIL_AT,
+        ),
       ],
       [
-        ...preamble(report, params, currency),
+        ...preamble(report, params),
+        ...MONEY_NOTES,
         "Value at cost covers only units with a recorded acquisition cost. Uncosted units are excluded from it, never valued at zero.",
-        "Value at retail is quantity x selling price — a different basis, not a second estimate of cost.",
+        "Value at retail is quantity x selling price — a different basis, not a second estimate of cost. It is not comparable with value at cost, and the two are not combined even when they share a currency.",
+        `Retired stock, at cost: ${inlineMoney(totals.retiredValueAtCostByCurrency)} across ${totals.retiredUnits} units in ${totals.retiredProducts} products.`,
         ...truncated(rows.length),
       ],
     );
@@ -325,7 +435,7 @@ async function render(
         ],
       ],
       [
-        ...preamble(report, params, currency),
+        ...preamble(report, params),
         "One row per batch, not per product. Only the certificate currently in force is shown; superseded documents remain on the product as history.",
         "A certificate with no expiry date is valid — a Certificate of Conformity typically never expires.",
         "Supplier is lot provenance, not a statement about who issued the certificate. Batches not acquired by purchase have none.",
@@ -341,21 +451,36 @@ async function render(
 
     const { rows, totals } = result.data;
 
+    const WIDTH = 6;
+    const REVENUE_AT = 4;
+
     return toCsv(
-      ["Group", "Detail", "Orders", "Units", "Revenue"],
+      ["Group", "Detail", "Orders", "Units", "Revenue", "Revenue currency"],
       [
-        ...rows.map((row) => [
-          row.label,
-          row.sublabel,
-          row.orders,
-          row.units,
-          row.revenue,
+        ...rows.flatMap((row) => [
+          [
+            row.label,
+            row.sublabel,
+            row.orders,
+            row.units,
+            ...moneyCells(row.revenueByCurrency),
+          ],
+          ...splitRows(row.label, row.revenueByCurrency, WIDTH, REVENUE_AT),
         ]),
-        ["TOTAL", "", totals.orders, totals.units, totals.revenue],
+        [
+          "TOTAL",
+          "",
+          totals.orders,
+          totals.units,
+          ...moneyCells(totals.revenueByCurrency),
+        ],
+        ...splitRows("TOTAL", totals.revenueByCurrency, WIDTH, REVENUE_AT),
       ],
       [
-        ...preamble(report, params, currency),
+        ...preamble(report, params),
+        ...MONEY_NOTES,
         "Confirmed and completed orders only, dated by when each was confirmed.",
+        "Revenue is denominated in the currency each order was raised in. A group whose orders were raised in more than one is reported once per currency.",
         ...truncated(rows.length),
       ],
     );
@@ -398,7 +523,7 @@ async function render(
         ],
       ],
       [
-        ...preamble(report, params, currency),
+        ...preamble(report, params),
         "Dated by when each movement was recorded in the ledger — the moment the stock actually moved.",
         "Direction is read from the balance a movement left behind, not from its type, so a cancellation counts against the movement it undid.",
         "Units in minus units out equals net change. A confirmation and its later cancellation remain two movements.",
@@ -414,22 +539,36 @@ async function render(
 
   const { rows, totals } = result.data;
 
+  const WIDTH = 6;
+  const SPEND_AT = 4;
+
   return toCsv(
-    ["Group", "Detail", "Purchases", "Units", "Received spend"],
+    ["Group", "Detail", "Purchases", "Units", "Received spend", "Spend currency"],
     [
-      ...rows.map((row) => [
-        row.label,
-        row.sublabel,
-        row.purchases,
-        row.units,
-        row.receivedSpend,
+      ...rows.flatMap((row) => [
+        [
+          row.label,
+          row.sublabel,
+          row.purchases,
+          row.units,
+          ...moneyCells(row.receivedSpendByCurrency),
+        ],
+        ...splitRows(row.label, row.receivedSpendByCurrency, WIDTH, SPEND_AT),
       ]),
-      ["TOTAL", "", totals.purchases, totals.units, totals.receivedSpend],
+      [
+        "TOTAL",
+        "",
+        totals.purchases,
+        totals.units,
+        ...moneyCells(totals.receivedSpendByCurrency),
+      ],
+      ...splitRows("TOTAL", totals.receivedSpendByCurrency, WIDTH, SPEND_AT),
     ],
     [
-      ...preamble(report, params, currency),
+      ...preamble(report, params),
+      ...MONEY_NOTES,
       "Received purchases only, dated by when each delivery arrived. Drafts and cancellations are excluded.",
-      `Committed (pending, not yet received): ${totals.committedSpend} across ${totals.committedPurchases} purchases — not counted as spend.`,
+      `Committed (pending, not yet received): ${inlineMoney(totals.committedSpendByCurrency)} across ${totals.committedPurchases} purchases — not counted as spend.`,
       "Spend is not cost of sales. These are different events at different times.",
       ...truncated(rows.length),
     ],

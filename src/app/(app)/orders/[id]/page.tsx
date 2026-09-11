@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/card";
 import { CertificateStatusBadge } from "@/components/ui/certificate-status-badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { RecordMoney } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { OrderStatusBadge } from "@/components/ui/order-status-badge";
 import { PageHeader } from "@/components/ui/page-header";
@@ -377,13 +378,13 @@ export default async function OrderDetailPage({
                       ) : null}
                     </TableCell>
                     <TableCell className="tabular text-right">
-                      {formatCurrency(line.unitPrice, currency)}
+                      <RecordMoney amount={line.unitPrice} currency={order.currency} />
                     </TableCell>
                     <TableCell className="tabular hidden text-right text-sm md:table-cell">
                       <LineCost line={line} currency={currency} />
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
-                      {formatCurrency(line.total, currency)}
+                      <RecordMoney amount={line.total} currency={order.currency} />
                     </TableCell>
                   </TableRow>
                 ))}
@@ -394,7 +395,7 @@ export default async function OrderDetailPage({
               <div className="flex items-center justify-between">
                 <dt className="text-muted-foreground">Subtotal</dt>
                 <dd className="tabular font-medium">
-                  {formatCurrency(order.subtotal, currency)}
+                  <RecordMoney amount={order.subtotal} currency={order.currency} />
                 </dd>
               </div>
               {/*
@@ -404,7 +405,7 @@ export default async function OrderDetailPage({
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <dt className="font-semibold">Grand total</dt>
                 <dd className="tabular text-lg font-semibold">
-                  {formatCurrency(order.total, currency)}
+                  <RecordMoney amount={order.total} currency={order.currency} />
                 </dd>
               </div>
               <OrderMargin
@@ -493,7 +494,10 @@ export default async function OrderDetailPage({
                         </span>
                         <OrderStatusBadge status={entry.status} />
                         <span className="tabular shrink-0 text-sm font-medium">
-                          {formatCurrency(entry.total, currency)}
+                          <RecordMoney
+                            amount={entry.total}
+                            currency={entry.currency}
+                          />
                         </span>
                       </Link>
                     </li>

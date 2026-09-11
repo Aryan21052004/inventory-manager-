@@ -39,7 +39,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { Currency } from "@/lib/currency";
 import {
   formatCurrency,
   formatDate,
@@ -47,6 +46,8 @@ import {
   formatDelta,
   formatNumber,
 } from "@/lib/format";
+import type { Currency } from "@/lib/currency";
+import type { CurrencyTotal, MoneyByCurrency } from "@/lib/money-by-currency";
 import { cn } from "@/lib/utils";
 import {
   loadAttention,
@@ -57,7 +58,6 @@ import {
   loadSales,
   type CertificateAttentionLot,
 } from "@/server/dashboard";
-import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
@@ -82,6 +82,124 @@ export const metadata: Metadata = { title: "Dashboard" };
 
 // Every figure is live, so this page must not be captured at build time.
 export const dynamic = "force-dynamic";
+
+// ---------------------------------------------------------------------------
+// Money
+// ---------------------------------------------------------------------------
+
+/**
+ * Money whose currency was never recorded.
+ *
+ * Pinned locale, for the reason every other formatter on this page is pinned:
+ * the server and the browser must produce the same string or React reports a
+ * hydration mismatch. Two decimal places, because these are the same money
+ * columns as everything else — only the label is missing.
+ */
+const UNLABELLED = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/** One entry, formatted in its own currency. Never in anything else's. */
+function formatEntry(entry: CurrencyTotal): string {
+  return entry.currency === null
+    ? UNLABELLED.format(Number(entry.amount))
+    : formatCurrency(entry.amount, entry.currency);
+}
+
+/**
+ * A monetary total, one line per currency it is denominated in.
+ *
+ * Three shapes, and the differences between them are the whole point:
+ *
+ *   nothing to total → an em dash. **Not** `0.00`: no rows contributed at all,
+ *                      which is a different fact from rows contributing zero.
+ *   one currency     → exactly what this tile showed before the currency work,
+ *                      formatted in that row's own currency rather than in
+ *                      whatever the installation default happens to be today.
+ *   several          → stacked, one under the other, at a size that keeps the
+ *                      tile from growing. No dominant figure, no "+2 more":
+ *                      there is no exchange rate in this application, so no
+ *                      one of them is the answer and the others a footnote.
+ *
+ * A currency that was never recorded is shown with the amount intact and an
+ * explicit note that nobody knows what it is in. Labelling it with the current
+ * setting is the exact bug this whole change set exists to remove.
+ */
+function MoneyLines({ total }: { total: MoneyByCurrency }) {
+  if (total.length === 0) return <>—</>;
+
+  const stacked = total.length > 1;
+
+  return (
+    <>
+      {total.map((entry) => (
+        <span
+          key={entry.currency ?? "unknown"}
+          className={cn("block", stacked && "text-base")}
+        >
+          {formatEntry(entry)}
+          {entry.currency === null ? (
+            <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+              currency unknown
+            </span>
+          ) : null}
+        </span>
+      ))}
+    </>
+  );
+}
+
+/**
+ * One document's own total, in the currency recorded on that document.
+ *
+ * For a row of an order or a purchase, where the money is a single historical
+ * amount rather than an aggregate. It reads the currency off the record, never
+ * from `AppSetting.defaultCurrency` — an order raised in dollars stays in
+ * dollars whatever the setting says today, which is the entire point of moving
+ * currency onto the record. Rows predating the column say so instead of
+ * borrowing a label.
+ */
+function RecordMoney({
+  amount,
+  currency,
+}: {
+  amount: string;
+  currency: Currency | null;
+}) {
+  return (
+    <>
+      {formatEntry({ currency, amount })}
+      {currency === null ? (
+        <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+          currency unknown
+        </span>
+      ) : null}
+    </>
+  );
+}
+
+/** The same, for a sentence, where a stack of lines will not fit. */
+function moneyText(total: MoneyByCurrency): string {
+  if (total.length === 0) return "—";
+
+  return total
+    .map((entry) =>
+      entry.currency === null
+        ? `${formatEntry(entry)} (currency unknown)`
+        : formatEntry(entry),
+    )
+    .join(" · ");
+}
+
+/** The currencies a total spans, named for a sentence explaining a refusal. */
+function currencyNames(total: MoneyByCurrency): string {
+  if (total.length === 0) return "none";
+
+  return total
+    .map((entry) => entry.currency ?? "an unrecorded currency")
+    .join(" and ");
+}
 
 export default function DashboardPage() {
   return (
@@ -313,10 +431,7 @@ function CertificateBadge({ lot }: { lot: CertificateAttentionLot }) {
 // ---------------------------------------------------------------------------
 
 async function InventorySection() {
-  const [result, currency] = await Promise.all([
-    loadInventory(),
-    getCurrency(),
-  ]);
+  const result = await loadInventory();
 
   if (!result.ok) return <SectionError message={result.error.message} />;
 
@@ -347,7 +462,7 @@ async function InventorySection() {
         <StatCard
           compact
           label="Value at cost"
-          value={formatCurrency(data.stockValue, currency)}
+          value={<MoneyLines total={data.stockValueByCurrency} />}
           hint={
             data.uncostedUnits > 0
               ? `Covers ${formatNumber(data.costedUnits)} of ${formatNumber(data.totalUnits)} units`
@@ -359,7 +474,7 @@ async function InventorySection() {
         <StatCard
           compact
           label="Tied up in retired stock"
-          value={formatCurrency(retired.value, currency)}
+          value={<MoneyLines total={retired.valueByCurrency} />}
           hint={
             retired.units > 0
               ? `${formatNumber(retired.units)} units in inactive or discontinued products`
@@ -388,10 +503,7 @@ async function InventorySection() {
 // ---------------------------------------------------------------------------
 
 async function SalesSection() {
-  const [result, currency] = await Promise.all([
-    loadSales(),
-    getCurrency(),
-  ]);
+  const result = await loadSales();
 
   if (!result.ok) return <SectionError message={result.error.message} />;
 
@@ -403,7 +515,7 @@ async function SalesSection() {
         <StatCard
           compact
           label="Realised revenue"
-          value={formatCurrency(data.realisedRevenue, currency)}
+          value={<MoneyLines total={data.realisedRevenueByCurrency} />}
           hint="Confirmed and completed orders"
           icon={Wallet}
           tone="success"
@@ -411,7 +523,7 @@ async function SalesSection() {
         <StatCard
           compact
           label="Open order value"
-          value={formatCurrency(data.openOrderValue, currency)}
+          value={<MoneyLines total={data.openOrderValueByCurrency} />}
           hint="Confirmed, not yet shipped"
           icon={ShoppingCart}
         />
@@ -480,7 +592,7 @@ async function SalesSection() {
                       <OrderStatusBadge status={order.status as never} />
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
-                      {formatCurrency(order.total, currency)}
+                      <RecordMoney amount={order.total} currency={order.currency} />
                     </TableCell>
                     <TableCell className="hidden text-right text-sm text-muted-foreground md:table-cell">
                       {formatDate(order.createdAt)}
@@ -501,10 +613,7 @@ async function SalesSection() {
 // ---------------------------------------------------------------------------
 
 async function ProcurementSection() {
-  const [result, currency] = await Promise.all([
-    loadProcurement(),
-    getCurrency(),
-  ]);
+  const result = await loadProcurement();
 
   if (!result.ok) return <SectionError message={result.error.message} />;
 
@@ -516,14 +625,14 @@ async function ProcurementSection() {
         <StatCard
           compact
           label="Received spend"
-          value={formatCurrency(data.receivedSpend, currency)}
+          value={<MoneyLines total={data.receivedSpendByCurrency} />}
           hint="Goods actually delivered"
           icon={Wallet}
         />
         <StatCard
           compact
           label="Committed"
-          value={formatCurrency(data.committedSpend, currency)}
+          value={<MoneyLines total={data.committedSpendByCurrency} />}
           hint="Placed with a supplier, in transit"
           icon={Truck}
         />
@@ -592,7 +701,7 @@ async function ProcurementSection() {
                       <PurchaseStatusBadge status={purchase.status as never} />
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
-                      {formatCurrency(purchase.total, currency)}
+                      <RecordMoney amount={purchase.total} currency={purchase.currency} />
                     </TableCell>
                     <TableCell className="hidden text-right text-sm text-muted-foreground md:table-cell">
                       {formatDate(purchase.purchaseDate)}
@@ -613,10 +722,7 @@ async function ProcurementSection() {
 // ---------------------------------------------------------------------------
 
 async function CostingSection() {
-  const [result, currency] = await Promise.all([
-    loadCosting(),
-    getCurrency(),
-  ]);
+  const result = await loadCosting();
 
   if (!result.ok) return <SectionError message={result.error.message} />;
 
@@ -663,13 +769,9 @@ async function CostingSection() {
         <StatCard
           compact
           label="Revenue from costed units"
-          value={
-            data.costedRevenue === null
-              ? "—"
-              : formatCurrency(data.costedRevenue, currency)
-          }
+          value={<MoneyLines total={data.costedRevenueByCurrency} />}
           hint={
-            data.costedRevenue === null
+            data.costedRevenueByCurrency.length === 0
               ? "No sold units have a recorded cost"
               : `What ${formatNumber(data.costedUnits)} costed units sold for`
           }
@@ -678,15 +780,15 @@ async function CostingSection() {
         <StatCard
           compact
           label="Known cost of sales"
-          value={data.knownCogs === null ? "—" : formatCurrency(data.knownCogs, currency)}
+          value={<MoneyLines total={data.knownCogsByCurrency} />}
           hint={
-            data.knownCogs === null
+            data.knownCogsByCurrency.length === 0
               ? "No sold units have a recorded cost"
               : `Over ${formatNumber(data.costedUnits)} costed units`
           }
           icon={Wallet}
         />
-        <MarginTile data={data} currency={currency} />
+        <MarginTile data={data} />
       </div>
 
       {/*
@@ -715,7 +817,7 @@ async function CostingSection() {
               : complete
                 ? `Every one of the ${formatNumber(data.fulfilledUnits)} units fulfilled has a recorded acquisition cost, so the margin above covers everything that has shipped.`
                 : data.costedUnits === 0
-                  ? `None of the ${formatNumber(data.fulfilledUnits)} units fulfilled has a recorded acquisition cost, so no margin can be calculated. Those units sold for ${formatCurrency(data.allRevenue, currency)}; what they cost is unknown. Coverage grows as stock received since cost tracking began is sold.`
+                  ? `None of the ${formatNumber(data.fulfilledUnits)} units fulfilled has a recorded acquisition cost, so no margin can be calculated. Those units sold for ${moneyText(data.allRevenueByCurrency)}; what they cost is unknown. Coverage grows as stock received since cost tracking began is sold.`
                   : `Margin is calculated over ${formatNumber(data.costedUnits)} of ${formatNumber(data.fulfilledUnits)} units fulfilled. The remaining ${formatNumber(data.fulfilledUnits - data.costedUnits)} have no recorded acquisition cost and are excluded from both the cost and the revenue it is measured against.`}
           </p>
 
@@ -759,25 +861,34 @@ async function CostingSection() {
  */
 function MarginTile({
   data,
-  currency,
 }: {
   data: {
-    margin: string | null;
+    marginByCurrency: MoneyByCurrency;
     marginPercent: number | null;
+    costedRevenueByCurrency: MoneyByCurrency;
+    knownCogsByCurrency: MoneyByCurrency;
     costedUnits: number;
     fulfilledUnits: number;
     unitsSold: number;
   };
-  currency: Currency;
 }) {
-  if (data.margin === null) {
+  const margin = data.marginByCurrency[0];
+
+  if (margin === undefined) {
     /*
-     * Three reasons for having no margin, and they are not interchangeable.
-     * Nothing sold; sold but nothing shipped, so no cost exists yet; or
-     * shipped from stock whose price was never recorded, which will never
-     * resolve on its own. Saying the wrong one sends someone looking in the
-     * wrong place.
+     * Four reasons for having no margin, and they are not interchangeable.
+     * Nothing sold; sold but nothing shipped, so no cost exists yet; shipped
+     * from stock whose price was never recorded, which will never resolve on
+     * its own; or — the reason that could not arise before per-record
+     * currency — sold and costed perfectly well, but in two currencies that
+     * cannot be subtracted from one another.
+     *
+     * Saying the wrong one sends somebody looking in the wrong place, and the
+     * last is the one most likely to be misread as a bug rather than as an
+     * arithmetic that genuinely has no answer here.
      */
+    const costed = data.costedUnits > 0;
+
     return (
       <StatCard
         compact
@@ -788,7 +899,9 @@ function MarginTile({
             ? "Nothing sold yet"
             : data.fulfilledUnits === 0
               ? "Nothing fulfilled yet, so there is no cost of sale"
-              : "No fulfilled units have a recorded acquisition cost"
+              : !costed
+                ? "No fulfilled units have a recorded acquisition cost"
+                : `Sold in ${currencyNames(data.costedRevenueByCurrency)}, bought in ${currencyNames(data.knownCogsByCurrency)} — no exchange rate here, so the two cannot be subtracted`
         }
         icon={Scale}
         tone="warning"
@@ -796,20 +909,25 @@ function MarginTile({
     );
   }
 
+  /*
+   * One entry, in one known currency: the producer emits nothing else, because
+   * a margin only exists where its two halves agree. So this renders as a
+   * single figure exactly as it always did.
+   */
   const complete = data.costedUnits === data.fulfilledUnits;
 
   return (
     <StatCard
       compact
       label="Realised margin"
-      value={formatCurrency(data.margin, currency)}
+      value={<MoneyLines total={data.marginByCurrency} />}
       hint={
         complete
           ? `${(data.marginPercent ?? 0).toFixed(1)}% across every unit fulfilled`
           : `${(data.marginPercent ?? 0).toFixed(1)}% over ${formatNumber(data.costedUnits)} of ${formatNumber(data.fulfilledUnits)} units fulfilled`
       }
       icon={Scale}
-      tone={Number(data.margin) < 0 ? "destructive" : "success"}
+      tone={Number(margin.amount) < 0 ? "destructive" : "success"}
     />
   );
 }

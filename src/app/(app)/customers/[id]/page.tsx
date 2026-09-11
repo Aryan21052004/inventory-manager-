@@ -24,6 +24,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import { MoneyLines, RecordMoney } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { OrderStatusBadge } from "@/components/ui/order-status-badge";
 import { PageHeader } from "@/components/ui/page-header";
@@ -37,14 +38,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  formatCurrency,
   formatDate,
   formatDateTime,
   formatNumber,
 } from "@/lib/format";
 import { getCurrentUser } from "@/server/auth";
 import { getCustomerDetail, type CustomerDetail } from "@/server/customers";
-import { getCurrency } from "@/server/settings";
 
 /**
  * A single customer, and everything they have bought.
@@ -76,10 +75,9 @@ export default async function CustomerDetailPage({
 }) {
   const { id } = await params;
 
-  const [result, user, currency] = await Promise.all([
+  const [result, user] = await Promise.all([
     getCustomerDetail(id),
     getCurrentUser(),
-    getCurrency(),
   ]);
 
   if (!result.ok) {
@@ -151,14 +149,14 @@ export default async function CustomerDetailPage({
         />
         <StatCard
           label="Lifetime value"
-          value={formatCurrency(customer.lifetimeValue, currency)}
+          value={<MoneyLines total={customer.lifetimeValueByCurrency} stackedClassName="text-lg" />}
           hint="Confirmed and completed"
           icon={Wallet}
           tone="success"
         />
         <StatCard
           label="Open value"
-          value={formatCurrency(customer.openValue, currency)}
+          value={<MoneyLines total={customer.openValueByCurrency} stackedClassName="text-lg" />}
           hint="Drafts and pending orders"
           icon={ReceiptText}
         />
@@ -278,7 +276,7 @@ export default async function CustomerDetailPage({
                           {formatNumber(order.itemCount)}
                         </TableCell>
                         <TableCell className="tabular text-right font-medium">
-                          {formatCurrency(order.total, currency)}
+                          <RecordMoney amount={order.total} currency={order.currency} />
                         </TableCell>
                         <TableCell className="hidden text-muted-foreground md:table-cell">
                           {formatDateTime(order.createdAt)}

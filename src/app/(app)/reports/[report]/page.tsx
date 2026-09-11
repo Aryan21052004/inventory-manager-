@@ -34,6 +34,7 @@ import { CertificateStatusBadge } from "@/components/ui/certificate-status-badge
 import { EXPIRING_SOON_DAYS } from "@/lib/certificate-status";
 import type { RawSearchParams } from "@/lib/date-range";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
+import type { CurrencyTotal, MoneyByCurrency } from "@/lib/money-by-currency";
 import { LOT_STATUS_LABELS } from "@/lib/lot-status";
 import type { LotStatus } from "@/generated/prisma/enums";
 import {
@@ -55,7 +56,6 @@ import {
 import { cn } from "@/lib/utils";
 import { loadCertificateTypes } from "@/server/certificates";
 import { loadCategories } from "@/server/products";
-import { getCurrency } from "@/server/settings";
 import type { CertificateRegisterRow } from "@/server/reports";
 import {
   loadCertificateRegisterReport,
@@ -190,6 +190,78 @@ export default async function ReportPage({
 type Defaults = ReportDefaults;
 
 // ---------------------------------------------------------------------------
+// Money
+// ---------------------------------------------------------------------------
+
+/**
+ * Money whose currency was never recorded.
+ *
+ * Pinned locale, like every other formatter that reaches this page: the server
+ * and the browser must produce the same string or React reports a hydration
+ * mismatch. Two decimal places, because these are the same money columns as
+ * everything else — only the label is missing.
+ */
+const UNLABELLED = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/** One entry, formatted in its own currency. Never in anything else's. */
+function formatEntry(entry: CurrencyTotal): string {
+  return entry.currency === null
+    ? UNLABELLED.format(Number(entry.amount))
+    : formatCurrency(entry.amount, entry.currency);
+}
+
+/**
+ * A monetary total, one line per currency it is denominated in.
+ *
+ * The same three shapes the dashboard renders, for the same reasons:
+ *
+ *   nothing to total → an em dash. **Not** `0.00`: no rows contributed at all,
+ *                      which is a different fact from rows contributing zero.
+ *   one currency     → exactly what this cell showed before, formatted in the
+ *                      row's own currency rather than in whatever the
+ *                      installation default happens to be today.
+ *   several          → stacked. A report row can genuinely span currencies —
+ *                      a part restocked from two countries has two acquisition
+ *                      costs — and there is no rate here to pick between them,
+ *                      so both are shown rather than one and a footnote.
+ *
+ * `stackedClassName` exists only so a summary tile can drop a size when it
+ * carries two lines; a table cell is already small and passes nothing.
+ */
+function MoneyLines({
+  total,
+  stackedClassName,
+}: {
+  total: MoneyByCurrency;
+  stackedClassName?: string;
+}) {
+  if (total.length === 0) return <>—</>;
+
+  const stacked = total.length > 1;
+
+  return (
+    <>
+      {total.map((entry) => (
+        <span
+          key={entry.currency ?? "unknown"}
+          className={cn("block", stacked && stackedClassName)}
+        >
+          {formatEntry(entry)}
+          {entry.currency === null ? (
+            <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+              currency unknown
+            </span>
+          ) : null}
+        </span>
+      ))}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // R1 · Stock valuation
 // ---------------------------------------------------------------------------
 
@@ -200,10 +272,7 @@ async function ValuationBody({
   params: ReportParams;
   defaults: Defaults;
 }) {
-  const [result, currency] = await Promise.all([
-    loadValuationReport(params),
-    getCurrency(),
-  ]);
+  const result = await loadValuationReport(params);
 
   if (!result.ok) {
     return (
@@ -231,14 +300,14 @@ async function ValuationBody({
       <div className="grid gap-4 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Value at cost"
-          value={formatCurrency(totals.valueAtCost, currency)}
+          value={<MoneyLines total={totals.valueAtCostByCurrency} stackedClassName="text-lg" />}
           hint={`Covers ${formatNumber(totals.costedUnits)} of ${formatNumber(totals.units)} units`}
           icon={ChevronsUpDown}
           tone="success"
         />
         <StatCard
           label="Value at retail"
-          value={formatCurrency(totals.valueAtRetail, currency)}
+          value={<MoneyLines total={totals.valueAtRetailByCurrency} stackedClassName="text-lg" />}
           hint="Quantity × selling price — a different basis"
           icon={ChevronsUpDown}
         />
@@ -255,7 +324,7 @@ async function ValuationBody({
         />
         <StatCard
           label="Retired stock"
-          value={formatCurrency(totals.retiredValueAtCost, currency)}
+          value={<MoneyLines total={totals.retiredValueAtCostByCurrency} stackedClassName="text-lg" />}
           hint={`${formatNumber(totals.retiredUnits)} units in ${formatNumber(totals.retiredProducts)} inactive or discontinued products`}
           icon={ChevronsUpDown}
           tone={totals.retiredUnits > 0 ? "warning" : "default"}
@@ -269,7 +338,10 @@ async function ValuationBody({
         <span className="font-medium text-foreground">Value at retail</span> is
         quantity times selling price — a different basis, not a second estimate
         of cost. Uncosted units are excluded from the cost figure rather than
-        valued at zero or at the catalogue&apos;s standard cost.
+        valued at zero or at the catalogue&apos;s standard cost. Each figure is
+        shown in the currency it was recorded in, and the two are never
+        combined or converted — a part bought abroad and priced for sale at
+        home is worth one amount in each.
       </BasisNote>
 
       <Table>
@@ -369,10 +441,10 @@ async function ValuationBody({
                 )}
               </TableCell>
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(row.valueAtCost, currency)}
+                <MoneyLines total={row.valueAtCostByCurrency} />
               </TableCell>
               <TableCell className="tabular hidden text-right text-muted-foreground md:table-cell">
-                {formatCurrency(row.valueAtRetail, currency)}
+                <MoneyLines total={row.valueAtRetailByCurrency} />
               </TableCell>
             </TableRow>
           ))}
@@ -403,10 +475,7 @@ async function SalesBody({
   params: ReportParams;
   defaults: Defaults;
 }) {
-  const [result, currency] = await Promise.all([
-    loadSalesReport(params),
-    getCurrency(),
-  ]);
+  const result = await loadSalesReport(params);
 
   if (!result.ok) {
     return (
@@ -434,7 +503,7 @@ async function SalesBody({
       <div className="grid gap-4 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Revenue"
-          value={formatCurrency(totals.revenue, currency)}
+          value={<MoneyLines total={totals.revenueByCurrency} stackedClassName="text-lg" />}
           hint="What customers were charged"
           icon={ChevronsUpDown}
           tone="success"
@@ -511,7 +580,7 @@ async function SalesBody({
                 {formatNumber(row.units)}
               </TableCell>
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(row.revenue, currency)}
+                <MoneyLines total={row.revenueByCurrency} />
               </TableCell>
             </TableRow>
           ))}
@@ -542,10 +611,7 @@ async function PurchaseBody({
   params: ReportParams;
   defaults: Defaults;
 }) {
-  const [result, currency] = await Promise.all([
-    loadPurchaseSpendReport(params),
-    getCurrency(),
-  ]);
+  const result = await loadPurchaseSpendReport(params);
 
   if (!result.ok) {
     return (
@@ -573,14 +639,14 @@ async function PurchaseBody({
       <div className="grid gap-4 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Received spend"
-          value={formatCurrency(totals.receivedSpend, currency)}
+          value={<MoneyLines total={totals.receivedSpendByCurrency} stackedClassName="text-lg" />}
           hint="Goods actually delivered"
           icon={ChevronsUpDown}
           tone="success"
         />
         <StatCard
           label="Committed"
-          value={formatCurrency(totals.committedSpend, currency)}
+          value={<MoneyLines total={totals.committedSpendByCurrency} stackedClassName="text-lg" />}
           hint={`${formatNumber(totals.committedPurchases)} pending — not counted as spend`}
           icon={ChevronsUpDown}
         />
@@ -673,7 +739,7 @@ async function PurchaseBody({
                 {formatNumber(row.units)}
               </TableCell>
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(row.receivedSpend, currency)}
+                <MoneyLines total={row.receivedSpendByCurrency} />
               </TableCell>
             </TableRow>
           ))}

@@ -10,6 +10,7 @@ import {
 import { SupplierRowActions } from "@/app/(app)/suppliers/supplier-row-actions";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { MoneyLines } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { Pagination } from "@/components/ui/pagination";
 import {
@@ -20,7 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import {
   suppliersHref,
   supplierSortHref,
@@ -30,7 +31,6 @@ import {
 } from "@/lib/supplier-query";
 import { cn } from "@/lib/utils";
 import { listSuppliers } from "@/server/suppliers";
-import { getCurrency } from "@/server/settings";
 
 /**
  * The suppliers table.
@@ -58,10 +58,7 @@ async function SuppliersTable({
    * than taking it as a prop costs no extra query — the page above has already
    * resolved it.
    */
-  const [result, currency] = await Promise.all([
-    listSuppliers(params),
-    getCurrency(),
-  ]);
+  const result = await listSuppliers(params);
 
   if (!result.ok) {
     return (
@@ -190,7 +187,7 @@ async function SuppliersTable({
               </TableCell>
 
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(supplier.totalPurchased, currency)}
+                <MoneyLines total={supplier.totalPurchasedByCurrency} />
               </TableCell>
 
               <TableCell className="text-right">

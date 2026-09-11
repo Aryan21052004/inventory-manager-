@@ -7,17 +7,17 @@ import { OrderFilters } from "@/app/(app)/orders/order-filters";
 import { OrdersTable } from "@/app/(app)/orders/orders-table";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { MoneyLines } from "@/components/ui/money";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatCard } from "@/components/ui/stat-card";
 import { TableSkeleton } from "@/components/ui/skeleton";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import {
   parseOrderListParams,
   toOrderSearchParams,
   type RawSearchParams,
 } from "@/lib/order-query";
 import { loadCustomers, loadOrderStats } from "@/server/orders";
-import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Orders" };
 
@@ -43,10 +43,9 @@ export default async function OrdersPage({
 }) {
   const params = parseOrderListParams(await searchParams);
 
-  const [stats, customers, currency] = await Promise.all([
+  const [stats, customers] = await Promise.all([
     loadOrderStats(),
     loadCustomers(),
-    getCurrency(),
   ]);
 
   return (
@@ -87,7 +86,7 @@ export default async function OrdersPage({
           />
           <StatCard
             label="Confirmed value"
-            value={formatCurrency(stats.data.openValue, currency)}
+            value={<MoneyLines total={stats.data.openValueByCurrency} stackedClassName="text-lg" />}
             hint={`${formatNumber(stats.data.confirmed)} awaiting completion`}
             icon={Wallet}
             tone="success"

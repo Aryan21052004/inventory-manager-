@@ -8,6 +8,12 @@ import type {
 } from "@/generated/prisma/enums";
 import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/errors";
 import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
+import type { Currency } from "@/lib/currency";
+import {
+  groupTotals,
+  sumByCurrency,
+  type MoneyByCurrency,
+} from "@/lib/money-by-currency";
 import { prisma } from "@/lib/prisma";
 import type { ProductListParams, ProductSortKey } from "@/lib/product-query";
 import {
@@ -68,6 +74,14 @@ export interface ProductListItem {
   category: string;
   /** A reference price only — never what any order sold for. Null when unset. */
   sellingPrice: string | null;
+  /**
+   * What that price is quoted in, as recorded on the product.
+   *
+   * Carried so a screen never has to reach for the installation default to
+   * label it. Null on a product priced before the column existed — a fact to
+   * state, not a gap to fill in.
+   */
+  priceCurrency: Currency | null;
   stockQuantity: number;
   status: ProductStatus;
   supplierId: string | null;
@@ -94,7 +108,7 @@ export interface ProductStats {
    * so it always travels with `uncostedUnits` below, and the UI is obliged to
    * show the two together.
    */
-  stockValue: string;
+  stockValueByCurrency: MoneyByCurrency;
   /**
    * Units on hand whose acquisition cost was never established — stock that
    * predates lot costing, or was adjusted in without one. Not valued at zero,
@@ -125,6 +139,8 @@ export interface ProductOrderLine {
   quantity: number;
   unitPrice: string;
   total: string;
+  /** The currency the order was raised in. Null on a legacy order. */
+  currency: Currency | null;
   createdAt: Date;
 }
 
@@ -136,6 +152,8 @@ export interface ProductPurchaseLine {
   quantity: number;
   unitCost: string;
   total: string;
+  /** The currency the purchase was raised in. Null on a legacy purchase. */
+  currency: Currency | null;
   purchaseDate: Date;
 }
 
@@ -150,6 +168,14 @@ export interface ProductLot {
   id: string;
   /** Null when the acquisition cost was never established. */
   unitCost: string | null;
+  /**
+   * What that cost is denominated in, from the batch's own row.
+   *
+   * Paired with `unitCost` — both null together on a batch that predates cost
+   * tracking. Two batches of one part can disagree, which is exactly why this
+   * belongs on the lot rather than on the product.
+   */
+  costCurrency: Currency | null;
   costSource: LotCostSource;
   quantityReceived: number;
   quantityRemaining: number;
@@ -196,6 +222,8 @@ export interface ProductDetail {
   category: string;
   /** A reference price only — never what any order sold for. Null when unset. */
   sellingPrice: string | null;
+  /** What that price is quoted in. See `ProductListItem.priceCurrency`. */
+  priceCurrency: Currency | null;
   stockQuantity: number;
   status: ProductStatus;
   supplierId: string | null;
@@ -208,7 +236,7 @@ export interface ProductDetail {
   /** The batches still holding stock, oldest first — FIFO consumption order. */
   lots: ProductLot[];
   /** Value of the units on hand whose cost is known. */
-  stockValue: string;
+  stockValueByCurrency: MoneyByCurrency;
   /** Units on hand whose cost is known — the coverage of `stockValue`. */
   costedUnits: number;
   /** Units on hand with no established cost. Never valued, always disclosed. */
@@ -320,6 +348,7 @@ export async function listProducts(
           description: true,
           category: true,
           sellingPrice: true,
+          priceCurrency: true,
           stockQuantity: true,
           status: true,
           supplierId: true,
@@ -339,6 +368,7 @@ export async function listProducts(
           description: row.description,
           category: row.category,
           sellingPrice: row.sellingPrice?.toString() ?? null,
+          priceCurrency: row.priceCurrency,
           stockQuantity: row.stockQuantity,
           status: row.status,
           supplierId: row.supplierId,
@@ -364,8 +394,13 @@ export async function listProducts(
  */
 interface StatsRow {
   total: number;
-  stock_value: string;
   uncosted_units: number;
+}
+
+/** One row per currency the costed lots were bought in. */
+interface StatsValueRow {
+  currency: Currency | null;
+  stock_value: string;
 }
 
 export async function loadProductStats(): Promise<Result<ProductStats>> {
@@ -387,25 +422,34 @@ export async function loadProductStats(): Promise<Result<ProductStats>> {
      * both. Valuing them at zero, or at a guess, would misstate it instead —
      * and invisibly.
      */
-    const rows = await prisma.$queryRaw<StatsRow[]>`
-      SELECT
-        COUNT(*)::int                                    AS total,
-        COALESCE((
-          SELECT SUM(l.quantity_remaining * l.unit_cost)
-          FROM stock_lots l
-          WHERE l.quantity_remaining > 0 AND l.unit_cost IS NOT NULL
-        ), 0)::text                                      AS stock_value,
-        COALESCE((
-          SELECT SUM(l.quantity_remaining)
-          FROM stock_lots l
-          WHERE l.quantity_remaining > 0 AND l.unit_cost IS NULL
-        ), 0)::int                                       AS uncosted_units
-      FROM products
-    `;
+    const [rows, values] = await Promise.all([
+      prisma.$queryRaw<StatsRow[]>`
+        SELECT
+          COUNT(*)::int                                    AS total,
+          COALESCE((
+            SELECT SUM(l.quantity_remaining)
+            FROM stock_lots l
+            WHERE l.quantity_remaining > 0 AND l.unit_cost IS NULL
+          ), 0)::int                                       AS uncosted_units
+        FROM products
+      `,
+      /*
+       * The value, split by the currency the lot was bought in. A warehouse
+       * stocked from two countries holds two valuations, and there is no rate
+       * here to collapse them into one.
+       */
+      prisma.$queryRaw<StatsValueRow[]>`
+        SELECT
+          l.cost_currency                               AS currency,
+          SUM(l.quantity_remaining * l.unit_cost)::text  AS stock_value
+        FROM stock_lots l
+        WHERE l.quantity_remaining > 0 AND l.unit_cost IS NOT NULL
+        GROUP BY l.cost_currency
+      `,
+    ]);
 
     const totals = rows[0] ?? {
       total: 0,
-      stock_value: "0",
       uncosted_units: 0,
     };
 
@@ -413,7 +457,12 @@ export async function loadProductStats(): Promise<Result<ProductStats>> {
       ok: true,
       data: {
         total: totals.total,
-        stockValue: totals.stock_value,
+        stockValueByCurrency: groupTotals(
+          values.map((row) => ({
+            currency: row.currency,
+            amount: row.stock_value,
+          })),
+        ),
         uncostedUnits: totals.uncosted_units,
       },
     };
@@ -477,77 +526,80 @@ export async function getProductDetail(
       certificateHistory,
       lots,
     ] = await Promise.all([
-        prisma.stockTransaction.findMany({
-          where: { productId: id },
-          orderBy: { createdAt: "desc" },
-          take: 20,
-          include: { createdByUser: { select: { name: true } } },
-        }),
-        prisma.orderItem.findMany({
-          where: { productId: id },
-          orderBy: { order: { createdAt: "desc" } },
-          take: 5,
-          include: {
-            order: {
-              select: {
-                orderNumber: true,
-                status: true,
-                createdAt: true,
-                customer: { select: { name: true } },
-              },
+      prisma.stockTransaction.findMany({
+        where: { productId: id },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+        include: { createdByUser: { select: { name: true } } },
+      }),
+      prisma.orderItem.findMany({
+        where: { productId: id },
+        orderBy: { order: { createdAt: "desc" } },
+        take: 5,
+        include: {
+          order: {
+            select: {
+              orderNumber: true,
+              status: true,
+              currency: true,
+              createdAt: true,
+              customer: { select: { name: true } },
             },
           },
-        }),
-        prisma.purchaseItem.findMany({
-          where: { productId: id },
-          orderBy: { purchase: { purchaseDate: "desc" } },
-          take: 5,
-          include: {
-            purchase: {
-              select: {
-                purchaseNumber: true,
-                status: true,
-                purchaseDate: true,
-                supplier: { select: { name: true } },
-              },
+        },
+      }),
+      prisma.purchaseItem.findMany({
+        where: { productId: id },
+        orderBy: { purchase: { purchaseDate: "desc" } },
+        take: 5,
+        include: {
+          purchase: {
+            select: {
+              purchaseNumber: true,
+              status: true,
+              currency: true,
+              purchaseDate: true,
+              supplier: { select: { name: true } },
             },
           },
-        }),
-        // Whether the product has ever traded, which is what decides if it can
-        // be deleted. A count of both sides in one number — the page only needs
-        // the yes/no.
-        prisma.orderItem
-          .count({ where: { productId: id } })
-          .then(async (orders) =>
-            orders > 0
-              ? orders
-              : prisma.purchaseItem.count({ where: { productId: id } }),
-          ),
-        getCertificateHistory(id),
-        /*
-         * The batches still holding stock, in the order FIFO will take them.
-         * Oldest first, which for a product carrying pre-costing stock means
-         * the uncosted units appear at the top — they are genuinely the oldest,
-         * and they are what the next sale will draw against.
-         */
-        prisma.stockLot.findMany({
-          where: { productId: id, quantityRemaining: { gt: 0 } },
-          orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
-          select: {
-            id: true,
-            unitCost: true,
-            costSource: true,
-            quantityReceived: true,
-            quantityRemaining: true,
-            receivedAt: true,
-            sourceType: true,
-            sourceId: true,
-            status: true,
-            statusChangedAt: true,
-            statusNote: true,
-          },
-        }),
-      ]);
+        },
+      }),
+      // Whether the product has ever traded, which is what decides if it can
+      // be deleted. A count of both sides in one number — the page only needs
+      // the yes/no.
+      prisma.orderItem
+        .count({ where: { productId: id } })
+        .then(async (orders) =>
+          orders > 0
+            ? orders
+            : prisma.purchaseItem.count({ where: { productId: id } }),
+        ),
+      getCertificateHistory(id),
+      /*
+       * The batches still holding stock, in the order FIFO will take them.
+       * Oldest first, which for a product carrying pre-costing stock means
+       * the uncosted units appear at the top — they are genuinely the oldest,
+       * and they are what the next sale will draw against.
+       */
+      prisma.stockLot.findMany({
+        where: { productId: id, quantityRemaining: { gt: 0 } },
+        orderBy: [{ receivedAt: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          unitCost: true,
+          costCurrency: true,
+          costSource: true,
+          quantityReceived: true,
+          quantityRemaining: true,
+          receivedAt: true,
+          sourceType: true,
+          sourceId: true,
+          status: true,
+          statusChangedAt: true,
+          statusNote: true,
+        },
+      }),
+    ]);
 
     /*
      * Value what is known and count what is not. Deliberately two figures: a
@@ -555,7 +607,7 @@ export async function getProductDetail(
      * the shelf while looking authoritative, and valuing the unknown units at
      * zero or at some catalogue figure would misstate it invisibly.
      */
-    let stockValueCents = 0;
+    const lotValues: { currency: Currency | null; amount: string }[] = [];
     let costedUnits = 0;
     let uncostedUnits = 0;
 
@@ -564,8 +616,17 @@ export async function getProductDetail(
         uncostedUnits += lot.quantityRemaining;
       } else {
         costedUnits += lot.quantityRemaining;
-        stockValueCents +=
+        /*
+         * Each lot contributes to the bucket for the currency it was bought
+         * in. A product restocked from two countries is worth two figures,
+         * and `sumByCurrency` adds only the ones that agree.
+         */
+        const cents =
           Math.round(Number(lot.unitCost) * 100) * lot.quantityRemaining;
+        lotValues.push({
+          currency: lot.costCurrency,
+          amount: (cents / 100).toFixed(2),
+        });
       }
     }
 
@@ -604,6 +665,7 @@ export async function getProductDetail(
         description: product.description,
         category: product.category,
         sellingPrice: product.sellingPrice?.toString() ?? null,
+        priceCurrency: product.priceCurrency,
         stockQuantity: product.stockQuantity,
         status: product.status,
         supplierId: product.supplier?.id ?? null,
@@ -632,6 +694,7 @@ export async function getProductDetail(
           quantity: line.quantity,
           unitPrice: line.unitPrice.toString(),
           total: line.total.toString(),
+          currency: line.order.currency,
           createdAt: line.order.createdAt,
         })),
         recentPurchases: purchaseLines.map((line) => ({
@@ -642,6 +705,7 @@ export async function getProductDetail(
           quantity: line.quantity,
           unitCost: line.unitCost.toString(),
           total: line.total.toString(),
+          currency: line.purchase.currency,
           purchaseDate: line.purchase.purchaseDate,
         })),
         lots: lots.map((lot) => {
@@ -650,6 +714,7 @@ export async function getProductDetail(
           return {
             id: lot.id,
             unitCost: lot.unitCost?.toString() ?? null,
+            costCurrency: lot.costCurrency,
             costSource: lot.costSource,
             status: lot.status,
             statusChangedAt: lot.statusChangedAt,
@@ -670,7 +735,7 @@ export async function getProductDetail(
             certificateStatus: certificateStatus(certificate),
           };
         }),
-        stockValue: (stockValueCents / 100).toFixed(2),
+        stockValueByCurrency: sumByCurrency(lotValues),
         costedUnits,
         uncostedUnits,
       },
@@ -765,8 +830,7 @@ export async function createProduct(
   if (!parsed.success) {
     const errors = toFieldErrors(parsed.error);
     const field = Object.keys(errors)[0] as
-      | keyof ProductFieldErrors
-      | undefined;
+      keyof ProductFieldErrors | undefined;
 
     throw new AppError("BAD_REQUEST", firstIssueMessage(parsed.error), {
       field,
@@ -889,8 +953,7 @@ export async function updateProduct(
   if (!parsed.success) {
     const errors = toFieldErrors(parsed.error);
     const field = Object.keys(errors)[0] as
-      | keyof ProductFieldErrors
-      | undefined;
+      keyof ProductFieldErrors | undefined;
 
     throw new AppError("BAD_REQUEST", firstIssueMessage(parsed.error), {
       field,
@@ -1105,8 +1168,7 @@ export async function adjustStock(
 
   if (!parsed.success) {
     const field = parsed.error.issues[0]?.path[0] as
-      | keyof StockAdjustmentInput
-      | undefined;
+      keyof StockAdjustmentInput | undefined;
 
     throw new AppError("BAD_REQUEST", firstIssueMessage(parsed.error), {
       field,

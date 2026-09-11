@@ -7,6 +7,14 @@ import {
   outstandingPurchaseStatuses,
   revenueStatuses,
 } from "@/lib/money-basis";
+import type { Currency } from "@/lib/currency";
+import {
+  groupTotals,
+  NO_MONEY,
+  soleAmount,
+  soleCurrency,
+  type MoneyByCurrency,
+} from "@/lib/money-by-currency";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -101,7 +109,7 @@ export interface InventorySnapshot {
    * active, inactive and discontinued alike. Money tied up in a retired part is
    * still money tied up.
    */
-  stockValue: string;
+  stockValueByCurrency: MoneyByCurrency;
   costedUnits: number;
   uncostedUnits: number;
   /** The retired share, so it can be told apart from what is still sellable. */
@@ -120,7 +128,7 @@ export interface InventorySnapshot {
 export interface RetiredInventory {
   productCount: number;
   units: number;
-  value: string;
+  valueByCurrency: MoneyByCurrency;
   uncostedUnits: number;
 }
 
@@ -131,9 +139,9 @@ export interface SalesSnapshot {
   completedCount: number;
   cancelledCount: number;
   /** CONFIRMED + COMPLETED. Draft and cancelled are not revenue. */
-  realisedRevenue: string;
+  realisedRevenueByCurrency: MoneyByCurrency;
   /** CONFIRMED only — committed but not yet shipped. */
-  openOrderValue: string;
+  openOrderValueByCurrency: MoneyByCurrency;
   recentOrders: RecentOrder[];
 }
 
@@ -143,6 +151,17 @@ export interface RecentOrder {
   status: string;
   customerName: string;
   total: string;
+  /**
+   * The currency this order was raised in, as recorded on the order itself.
+   *
+   * Carried because the total is meaningless without it, and because the
+   * alternative — letting the page label it with `AppSetting.defaultCurrency`
+   * — is the bug this whole change set exists to remove: yesterday's dollar
+   * order would silently become a rupee one the moment somebody changed the
+   * setting. Null for orders raised before the column existed, which is a fact
+   * the page states rather than papers over.
+   */
+  currency: Currency | null;
   createdAt: Date;
 }
 
@@ -152,9 +171,9 @@ export interface ProcurementSnapshot {
   receivedCount: number;
   cancelledCount: number;
   /** RECEIVED only. */
-  receivedSpend: string;
+  receivedSpendByCurrency: MoneyByCurrency;
   /** PENDING only — placed with a supplier, not yet arrived. */
-  committedSpend: string;
+  committedSpendByCurrency: MoneyByCurrency;
   recentPurchases: RecentPurchase[];
 }
 
@@ -164,6 +183,8 @@ export interface RecentPurchase {
   status: string;
   supplierName: string;
   total: string;
+  /** The currency this purchase was raised in. See `RecentOrder.currency`. */
+  currency: Currency | null;
   purchaseDate: Date;
 }
 
@@ -193,8 +214,15 @@ export interface CostingSnapshot {
   costedUnits: number;
   /** Units sold that have not shipped, so carry no cost of sale yet. */
   outstandingUnits: number;
-  /** Cost of the costed units. Null when none are costed. */
-  knownCogs: string | null;
+  /**
+   * Cost of the costed units, in the currency each lot was bought in.
+   *
+   * Empty when none are costed. Denominated in `OrderItem.costCurrency`,
+   * which is the *supplier's* currency and has no reason to match the one the
+   * customer was billed in — the two are only comparable when they happen to
+   * agree, which is what `marginByCurrency` below checks.
+   */
+  knownCogsByCurrency: MoneyByCurrency;
   /**
    * Costed sales at list price — `unitPrice × costedQuantity` summed per line,
    * covering only the units whose cost is known.
@@ -210,10 +238,24 @@ export interface CostingSnapshot {
    * (§20). Line prices are what the customer was charged, so this figure and
    * the Sales section are now on the same basis and do reconcile.
    */
-  costedRevenue: string | null;
-  /** `costedRevenue - knownCogs`. Null when nothing is costed. */
-  margin: string | null;
-  /** Percentage of costed sales at list price. Null when nothing is costed. */
+  costedRevenueByCurrency: MoneyByCurrency;
+  /**
+   * `costedRevenue - knownCogs`, and empty far more often than it used to be.
+   *
+   * A margin is a subtraction, and subtracting money is only meaningful inside
+   * one currency. This is therefore computed **only** when the costed revenue
+   * and the cost of those sales are each in exactly one currency and it is the
+   * same one. Sales billed in dollars against stock bought in rupees have no
+   * margin this application can state, and it says nothing rather than
+   * inventing a rate — the two figures are both on the snapshot, so anything
+   * that needs to explain the gap can compare them itself.
+   */
+  marginByCurrency: MoneyByCurrency;
+  /**
+   * Percentage of costed sales at list price. Null under exactly the same
+   * conditions as `marginByCurrency` being empty: a ratio of two figures in
+   * different currencies is no more defensible than their difference.
+   */
   marginPercent: number | null;
   /**
    * Every unit sold on a realised order, costed or not, at its line price.
@@ -223,7 +265,7 @@ export interface CostingSnapshot {
    * of `order_items.total`, which since the discount removal (§20) is also
    * `SUM(orders.total)` — so unlike before, it agrees with the Sales section.
    */
-  allRevenue: string;
+  allRevenueByCurrency: MoneyByCurrency;
   /** Stock on hand with no recorded cost, mirrored here for the section. */
   uncostedStockUnits: number;
 }
@@ -244,6 +286,17 @@ export interface RecentMovement {
   createdAt: Date;
   productName: string;
   productSku: string;
+}
+
+/**
+ * What every `GROUP BY <currency column>` in this file comes back as.
+ *
+ * Postgres has already summed within each currency; `currency` is null for
+ * rows that predate per-record currency, and that null stays its own bucket.
+ */
+interface MoneySqlRow {
+  currency: Currency | null;
+  amount: string;
 }
 
 const RECENT_LIMIT = 5;
@@ -412,12 +465,10 @@ async function loadCertificateAttention(): Promise<CertificateAttention> {
 interface InventoryRow {
   product_count: number;
   total_units: number;
-  stock_value: string;
   costed_units: number;
   uncosted_units: number;
   retired_product_count: number;
   retired_units: number;
-  retired_value: string;
   retired_uncosted_units: number;
 }
 
@@ -439,53 +490,70 @@ export async function loadInventory(): Promise<Result<InventorySnapshot>> {
      * what to write off needs to see it — but so is the distinction between
      * that and stock still on sale.
      */
-    const rows = await prisma.$queryRaw<InventoryRow[]>`
-      SELECT
-        COUNT(*)::int                                     AS product_count,
-        COALESCE(SUM(p.stock_quantity), 0)::int           AS total_units,
-        COUNT(*) FILTER (WHERE p.status <> 'ACTIVE')::int AS retired_product_count,
-        COALESCE(SUM(p.stock_quantity) FILTER (WHERE p.status <> 'ACTIVE'), 0)::int
-                                                          AS retired_units,
-        COALESCE(l.value, 0)::text                        AS stock_value,
-        COALESCE(l.costed_units, 0)::int                  AS costed_units,
-        COALESCE(l.uncosted_units, 0)::int                AS uncosted_units,
-        COALESCE(r.value, 0)::text                        AS retired_value,
-        COALESCE(r.uncosted_units, 0)::int                AS retired_uncosted_units
-      FROM products p
-      CROSS JOIN (
+    const [rows, value, retiredValue] = await Promise.all([
+      /*
+       * Counts only. The two valuations left this query when lots stopped
+       * sharing a currency: a single `SUM(quantity × unit_cost)` over the
+       * whole warehouse would be adding dollars to rupees.
+       */
+      prisma.$queryRaw<InventoryRow[]>`
         SELECT
-          SUM(sl.quantity_remaining * sl.unit_cost)
-            FILTER (WHERE sl.unit_cost IS NOT NULL)          AS value,
-          SUM(sl.quantity_remaining)
-            FILTER (WHERE sl.unit_cost IS NOT NULL)          AS costed_units,
-          SUM(sl.quantity_remaining)
-            FILTER (WHERE sl.unit_cost IS NULL)              AS uncosted_units
+          COUNT(*)::int                                     AS product_count,
+          COALESCE(SUM(p.stock_quantity), 0)::int           AS total_units,
+          COUNT(*) FILTER (WHERE p.status <> 'ACTIVE')::int AS retired_product_count,
+          COALESCE(SUM(p.stock_quantity) FILTER (WHERE p.status <> 'ACTIVE'), 0)::int
+                                                            AS retired_units,
+          COALESCE(l.costed_units, 0)::int                  AS costed_units,
+          COALESCE(l.uncosted_units, 0)::int                AS uncosted_units,
+          COALESCE(r.uncosted_units, 0)::int                AS retired_uncosted_units
+        FROM products p
+        CROSS JOIN (
+          SELECT
+            SUM(sl.quantity_remaining)
+              FILTER (WHERE sl.unit_cost IS NOT NULL)          AS costed_units,
+            SUM(sl.quantity_remaining)
+              FILTER (WHERE sl.unit_cost IS NULL)              AS uncosted_units
+          FROM stock_lots sl
+          WHERE sl.quantity_remaining > 0
+        ) l
+        CROSS JOIN (
+          SELECT
+            SUM(sl.quantity_remaining)
+              FILTER (WHERE sl.unit_cost IS NULL)              AS uncosted_units
+          FROM stock_lots sl
+          JOIN products rp ON rp.id = sl.product_id AND rp.status <> 'ACTIVE'
+          WHERE sl.quantity_remaining > 0
+        ) r
+        GROUP BY l.costed_units, l.uncosted_units, r.uncosted_units
+      `,
+      /* The warehouse, valued once per currency it was bought in. */
+      prisma.$queryRaw<MoneySqlRow[]>`
+        SELECT
+          sl.cost_currency                                 AS currency,
+          SUM(sl.quantity_remaining * sl.unit_cost)::text  AS amount
         FROM stock_lots sl
-        WHERE sl.quantity_remaining > 0
-      ) l
-      CROSS JOIN (
+        WHERE sl.quantity_remaining > 0 AND sl.unit_cost IS NOT NULL
+        GROUP BY sl.cost_currency
+      `,
+      /* The same, narrowed to products no longer sellable. */
+      prisma.$queryRaw<MoneySqlRow[]>`
         SELECT
-          SUM(sl.quantity_remaining * sl.unit_cost)
-            FILTER (WHERE sl.unit_cost IS NOT NULL)          AS value,
-          SUM(sl.quantity_remaining)
-            FILTER (WHERE sl.unit_cost IS NULL)              AS uncosted_units
+          sl.cost_currency                                 AS currency,
+          SUM(sl.quantity_remaining * sl.unit_cost)::text  AS amount
         FROM stock_lots sl
         JOIN products rp ON rp.id = sl.product_id AND rp.status <> 'ACTIVE'
-        WHERE sl.quantity_remaining > 0
-      ) r
-      GROUP BY l.value, l.costed_units, l.uncosted_units,
-               r.value, r.uncosted_units
-    `;
+        WHERE sl.quantity_remaining > 0 AND sl.unit_cost IS NOT NULL
+        GROUP BY sl.cost_currency
+      `,
+    ]);
 
     const totals = rows[0] ?? {
       product_count: 0,
       total_units: 0,
-      stock_value: "0",
       costed_units: 0,
       uncosted_units: 0,
       retired_product_count: 0,
       retired_units: 0,
-      retired_value: "0",
       retired_uncosted_units: 0,
     };
 
@@ -494,13 +562,13 @@ export async function loadInventory(): Promise<Result<InventorySnapshot>> {
       data: {
         productCount: totals.product_count,
         totalUnits: totals.total_units,
-        stockValue: totals.stock_value,
+        stockValueByCurrency: groupTotals(value),
         costedUnits: totals.costed_units,
         uncostedUnits: totals.uncosted_units,
         retired: {
           productCount: totals.retired_product_count,
           units: totals.retired_units,
-          value: totals.retired_value,
+          valueByCurrency: groupTotals(retiredValue),
           uncostedUnits: totals.retired_uncosted_units,
         },
       },
@@ -520,26 +588,49 @@ interface SalesRow {
   confirmed: number;
   completed: number;
   cancelled: number;
+}
+
+/**
+ * Order money on both bases, one row per currency.
+ *
+ * The counts guard the totals: a currency that produced no confirmed order
+ * must not appear in `openOrderValue` as a zero, which would read as "nothing
+ * outstanding in euros" when the truth is "no euro orders at all".
+ */
+interface SalesMoneyRow {
+  currency: Currency | null;
+  realised_n: number;
   realised_revenue: string;
+  open_n: number;
   open_value: string;
 }
 
 export async function loadSales(): Promise<Result<SalesSnapshot>> {
   try {
-    const [rows, recent] = await Promise.all([
+    const [rows, money, recent] = await Promise.all([
       prisma.$queryRaw<SalesRow[]>`
         SELECT
           COUNT(*) FILTER (WHERE status = 'DRAFT')::int     AS draft,
           COUNT(*) FILTER (WHERE status = 'PENDING')::int   AS pending,
           COUNT(*) FILTER (WHERE status = 'CONFIRMED')::int AS confirmed,
           COUNT(*) FILTER (WHERE status = 'COMPLETED')::int AS completed,
-          COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS cancelled,
+          COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS cancelled
+        FROM orders
+      `,
+      prisma.$queryRaw<SalesMoneyRow[]>`
+        SELECT
+          currency                                          AS currency,
+          COUNT(*) FILTER (
+            WHERE status IN ('CONFIRMED', 'COMPLETED')
+          )::int                                            AS realised_n,
           COALESCE(SUM(total) FILTER (
             WHERE status IN ('CONFIRMED', 'COMPLETED')
           ), 0)::text                                       AS realised_revenue,
+          COUNT(*) FILTER (WHERE status = 'CONFIRMED')::int  AS open_n,
           COALESCE(SUM(total) FILTER (WHERE status = 'CONFIRMED'), 0)::text
                                                             AS open_value
         FROM orders
+        GROUP BY currency
       `,
       prisma.order.findMany({
         take: RECENT_LIMIT,
@@ -549,6 +640,7 @@ export async function loadSales(): Promise<Result<SalesSnapshot>> {
           orderNumber: true,
           status: true,
           total: true,
+          currency: true,
           createdAt: true,
           customer: { select: { name: true } },
         },
@@ -561,8 +653,6 @@ export async function loadSales(): Promise<Result<SalesSnapshot>> {
       confirmed: 0,
       completed: 0,
       cancelled: 0,
-      realised_revenue: "0",
-      open_value: "0",
     };
 
     return {
@@ -573,14 +663,26 @@ export async function loadSales(): Promise<Result<SalesSnapshot>> {
         confirmedCount: totals.confirmed,
         completedCount: totals.completed,
         cancelledCount: totals.cancelled,
-        realisedRevenue: totals.realised_revenue,
-        openOrderValue: totals.open_value,
+        realisedRevenueByCurrency: groupTotals(
+          money
+            .filter((row) => row.realised_n > 0)
+            .map((row) => ({
+              currency: row.currency,
+              amount: row.realised_revenue,
+            })),
+        ),
+        openOrderValueByCurrency: groupTotals(
+          money
+            .filter((row) => row.open_n > 0)
+            .map((row) => ({ currency: row.currency, amount: row.open_value })),
+        ),
         recentOrders: recent.map((row) => ({
           id: row.id,
           orderNumber: row.orderNumber,
           status: row.status,
           customerName: row.customer.name,
           total: row.total.toString(),
+          currency: row.currency,
           createdAt: row.createdAt,
         })),
       },
@@ -599,24 +701,39 @@ interface ProcurementRow {
   pending: number;
   received: number;
   cancelled: number;
+}
+
+/** Purchase money on both bases, one row per currency. See `SalesMoneyRow`. */
+interface ProcurementMoneyRow {
+  currency: Currency | null;
+  received_n: number;
   received_spend: string;
+  committed_n: number;
   committed_spend: string;
 }
 
 export async function loadProcurement(): Promise<Result<ProcurementSnapshot>> {
   try {
-    const [rows, recent] = await Promise.all([
+    const [rows, money, recent] = await Promise.all([
       prisma.$queryRaw<ProcurementRow[]>`
         SELECT
           COUNT(*) FILTER (WHERE status = 'DRAFT')::int     AS draft,
           COUNT(*) FILTER (WHERE status = 'PENDING')::int   AS pending,
           COUNT(*) FILTER (WHERE status = 'RECEIVED')::int  AS received,
-          COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS cancelled,
+          COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS cancelled
+        FROM purchases
+      `,
+      prisma.$queryRaw<ProcurementMoneyRow[]>`
+        SELECT
+          currency                                           AS currency,
+          COUNT(*) FILTER (WHERE status = 'RECEIVED')::int    AS received_n,
           COALESCE(SUM(total) FILTER (WHERE status = 'RECEIVED'), 0)::text
-                                                            AS received_spend,
+                                                             AS received_spend,
+          COUNT(*) FILTER (WHERE status = 'PENDING')::int     AS committed_n,
           COALESCE(SUM(total) FILTER (WHERE status = 'PENDING'), 0)::text
                                                             AS committed_spend
         FROM purchases
+        GROUP BY currency
       `,
       prisma.purchase.findMany({
         take: RECENT_LIMIT,
@@ -626,6 +743,7 @@ export async function loadProcurement(): Promise<Result<ProcurementSnapshot>> {
           purchaseNumber: true,
           status: true,
           total: true,
+          currency: true,
           purchaseDate: true,
           supplier: { select: { name: true } },
         },
@@ -637,8 +755,6 @@ export async function loadProcurement(): Promise<Result<ProcurementSnapshot>> {
       pending: 0,
       received: 0,
       cancelled: 0,
-      received_spend: "0",
-      committed_spend: "0",
     };
 
     return {
@@ -648,14 +764,29 @@ export async function loadProcurement(): Promise<Result<ProcurementSnapshot>> {
         pendingCount: totals.pending,
         receivedCount: totals.received,
         cancelledCount: totals.cancelled,
-        receivedSpend: totals.received_spend,
-        committedSpend: totals.committed_spend,
+        receivedSpendByCurrency: groupTotals(
+          money
+            .filter((row) => row.received_n > 0)
+            .map((row) => ({
+              currency: row.currency,
+              amount: row.received_spend,
+            })),
+        ),
+        committedSpendByCurrency: groupTotals(
+          money
+            .filter((row) => row.committed_n > 0)
+            .map((row) => ({
+              currency: row.currency,
+              amount: row.committed_spend,
+            })),
+        ),
         recentPurchases: recent.map((row) => ({
           id: row.id,
           purchaseNumber: row.purchaseNumber,
           status: row.status,
           supplierName: row.supplier.name,
           total: row.total.toString(),
+          currency: row.currency,
           purchaseDate: row.purchaseDate,
         })),
       },
@@ -673,10 +804,21 @@ interface CostingRow {
   units_sold: number;
   fulfilled_units: number;
   costed_units: number;
-  known_cogs: string;
-  costed_revenue: string;
-  total_revenue: string;
   uncosted_stock_units: number;
+}
+
+/**
+ * Sales money, grouped by the currency the **order** was raised in.
+ *
+ * `costed_n` guards `costed_revenue` the way the counts guard the totals
+ * elsewhere: a currency whose lines are all uncosted must not contribute a
+ * zero to the costed basis.
+ */
+interface CostingRevenueRow {
+  currency: Currency | null;
+  costed_n: number;
+  costed_revenue: string;
+  all_revenue: string;
 }
 
 export async function loadCosting(): Promise<Result<CostingSnapshot>> {
@@ -697,32 +839,54 @@ export async function loadCosting(): Promise<Result<CostingSnapshot>> {
      * of the business the margin speaks for, rather than presenting a partial
      * figure as though it were the whole.
      */
-    const rows = await prisma.$queryRaw<CostingRow[]>`
-      SELECT
-        COALESCE(SUM(oi.quantity), 0)::int                   AS units_sold,
-        COALESCE(SUM(oi.fulfilled_quantity), 0)::int         AS fulfilled_units,
-        COALESCE(SUM(oi.costed_quantity), 0)::int            AS costed_units,
-        COALESCE(SUM(oi.cost_total), 0)::text                AS known_cogs,
-        COALESCE(SUM(oi.unit_price * oi.costed_quantity), 0)::text
-                                                             AS costed_revenue,
-        COALESCE(SUM(oi.total), 0)::text                     AS total_revenue,
-        COALESCE((
-          SELECT SUM(l.quantity_remaining)
-          FROM stock_lots l
-          WHERE l.quantity_remaining > 0 AND l.unit_cost IS NULL
-        ), 0)::int                                           AS uncosted_stock_units
-      FROM order_items oi
-      JOIN orders o ON o.id = oi.order_id
-      WHERE o.status = ANY(${revenueStatuses()}::"OrderStatus"[])
-    `;
+    const [rows, cogs, revenue] = await Promise.all([
+      prisma.$queryRaw<CostingRow[]>`
+        SELECT
+          COALESCE(SUM(oi.quantity), 0)::int                   AS units_sold,
+          COALESCE(SUM(oi.fulfilled_quantity), 0)::int         AS fulfilled_units,
+          COALESCE(SUM(oi.costed_quantity), 0)::int            AS costed_units,
+          COALESCE((
+            SELECT SUM(l.quantity_remaining)
+            FROM stock_lots l
+            WHERE l.quantity_remaining > 0 AND l.unit_cost IS NULL
+          ), 0)::int                                           AS uncosted_stock_units
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.status = ANY(${revenueStatuses()}::"OrderStatus"[])
+      `,
+      /*
+       * Cost of sale, grouped by the currency the stock was bought in — which
+       * lives on the order item, not on the order. A line billed in dollars
+       * can perfectly well have been filled from a lot bought in rupees.
+       */
+      prisma.$queryRaw<MoneySqlRow[]>`
+        SELECT
+          oi.cost_currency                      AS currency,
+          COALESCE(SUM(oi.cost_total), 0)::text AS amount
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.status = ANY(${revenueStatuses()}::"OrderStatus"[])
+          AND oi.cost_total IS NOT NULL
+        GROUP BY oi.cost_currency
+      `,
+      prisma.$queryRaw<CostingRevenueRow[]>`
+        SELECT
+          o.currency                                        AS currency,
+          COUNT(*) FILTER (WHERE oi.costed_quantity > 0)::int AS costed_n,
+          COALESCE(SUM(oi.unit_price * oi.costed_quantity), 0)::text
+                                                            AS costed_revenue,
+          COALESCE(SUM(oi.total), 0)::text                  AS all_revenue
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.status = ANY(${revenueStatuses()}::"OrderStatus"[])
+        GROUP BY o.currency
+      `,
+    ]);
 
     const totals = rows[0] ?? {
       units_sold: 0,
       fulfilled_units: 0,
       costed_units: 0,
-      known_cogs: "0",
-      costed_revenue: "0",
-      total_revenue: "0",
       uncosted_stock_units: 0,
     };
 
@@ -735,9 +899,38 @@ export async function loadCosting(): Promise<Result<CostingSnapshot>> {
      */
     const costed = totals.costed_units > 0;
 
-    const costedRevenue = Number(totals.costed_revenue);
-    const knownCogs = Number(totals.known_cogs);
-    const margin = costedRevenue - knownCogs;
+    const knownCogsByCurrency = costed ? groupTotals(cogs) : NO_MONEY;
+    const costedRevenueByCurrency = costed
+      ? groupTotals(
+          revenue
+            .filter((row) => row.costed_n > 0)
+            .map((row) => ({
+              currency: row.currency,
+              amount: row.costed_revenue,
+            })),
+        )
+      : NO_MONEY;
+
+    /*
+     * The margin exists only where the subtraction does.
+     *
+     * `soleAmount` yields a number solely when a total is in exactly one
+     * *known* currency, so this is null the moment either side is mixed,
+     * empty, or denominated in a currency that was never recorded. The final
+     * equality is the one that matters most: both sides can be perfectly
+     * unambiguous and still be different currencies.
+     */
+    const costedRevenueAmount = soleAmount(costedRevenueByCurrency);
+    const knownCogsAmount = soleAmount(knownCogsByCurrency);
+    const marginCurrency = soleCurrency(costedRevenueByCurrency);
+
+    const comparable =
+      costedRevenueAmount !== null &&
+      knownCogsAmount !== null &&
+      marginCurrency === soleCurrency(knownCogsByCurrency);
+
+    const costedRevenue = Number(costedRevenueAmount);
+    const margin = comparable ? costedRevenue - Number(knownCogsAmount) : null;
 
     return {
       ok: true,
@@ -749,12 +942,22 @@ export async function loadCosting(): Promise<Result<CostingSnapshot>> {
           0,
           totals.units_sold - totals.fulfilled_units,
         ),
-        knownCogs: costed ? totals.known_cogs : null,
-        costedRevenue: costed ? totals.costed_revenue : null,
-        margin: costed ? margin.toFixed(2) : null,
+        knownCogsByCurrency,
+        costedRevenueByCurrency,
+        marginByCurrency:
+          margin === null
+            ? NO_MONEY
+            : [{ currency: marginCurrency, amount: margin.toFixed(2) }],
         marginPercent:
-          costed && costedRevenue !== 0 ? (margin / costedRevenue) * 100 : null,
-        allRevenue: totals.total_revenue,
+          margin !== null && costedRevenue !== 0
+            ? (margin / costedRevenue) * 100
+            : null,
+        allRevenueByCurrency: groupTotals(
+          revenue.map((row) => ({
+            currency: row.currency,
+            amount: row.all_revenue,
+          })),
+        ),
         uncostedStockUnits: totals.uncosted_stock_units,
       },
     };

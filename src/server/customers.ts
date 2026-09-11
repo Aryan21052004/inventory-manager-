@@ -2,6 +2,7 @@ import "server-only";
 
 import type { Prisma } from "@/generated/prisma/client";
 import type { CustomerStatus, OrderStatus } from "@/generated/prisma/enums";
+import type { Currency } from "@/lib/currency";
 import type { CustomerListParams } from "@/lib/customer-query";
 import {
   AppError,
@@ -10,6 +11,12 @@ import {
   type SafeError,
 } from "@/lib/errors";
 import { REVENUE_STATUSES as REVENUE } from "@/lib/money-basis";
+import {
+  groupTotals,
+  NO_MONEY,
+  sumByCurrency,
+  type MoneyByCurrency,
+} from "@/lib/money-by-currency";
 import { prisma } from "@/lib/prisma";
 import {
   createCustomerSchema,
@@ -78,7 +85,7 @@ export interface CustomerListItem {
   /** Every order ever raised for them, whatever became of it. */
   orderCount: number;
   /** Sum of their CONFIRMED and COMPLETED order totals. */
-  lifetimeValue: string;
+  lifetimeValueByCurrency: MoneyByCurrency;
 }
 
 export interface CustomerListPage {
@@ -96,7 +103,7 @@ export interface CustomerStats {
   /** How many have ever ordered — the rest are contacts, not buyers yet. */
   withOrders: number;
   /** Revenue across every customer, on the same CONFIRMED + COMPLETED basis. */
-  lifetimeValue: string;
+  lifetimeValueByCurrency: MoneyByCurrency;
 }
 
 export interface CustomerOrderLine {
@@ -104,6 +111,8 @@ export interface CustomerOrderLine {
   orderNumber: string;
   status: OrderStatus;
   total: string;
+  /** The currency the order was raised in. Null on a legacy order. */
+  currency: Currency | null;
   itemCount: number;
   createdAt: Date;
 }
@@ -120,9 +129,9 @@ export interface CustomerDetail {
 
   orderCount: number;
   /** CONFIRMED + COMPLETED. */
-  lifetimeValue: string;
+  lifetimeValueByCurrency: MoneyByCurrency;
   /** DRAFT + PENDING — raised, not yet committed. */
-  openValue: string;
+  openValueByCurrency: MoneyByCurrency;
   /** How many orders sit in each status. */
   statusCounts: Record<OrderStatus, number>;
   lastOrderAt: Date | null;
@@ -216,11 +225,11 @@ function buildOrderBy(
  */
 async function revenueByCustomer(
   customerIds: string[],
-): Promise<Map<string, string>> {
+): Promise<Map<string, MoneyByCurrency>> {
   if (customerIds.length === 0) return new Map();
 
   const rows = await prisma.order.groupBy({
-    by: ["customerId"],
+    by: ["customerId", "currency"],
     where: {
       customerId: { in: customerIds },
       status: { in: [...REVENUE] },
@@ -228,8 +237,28 @@ async function revenueByCustomer(
     _sum: { total: true },
   });
 
+  /*
+   * One entry per customer, each holding a total per currency. Postgres has
+   * already grouped by (customer, currency), so a customer who has ordered in
+   * both dollars and euros comes back with two figures and no attempt is made
+   * to reconcile them.
+   */
+  const byCustomer = new Map<
+    string,
+    { currency: Currency | null; amount: string }[]
+  >();
+
+  for (const row of rows) {
+    const list = byCustomer.get(row.customerId) ?? [];
+    list.push({
+      currency: row.currency,
+      amount: row._sum.total?.toString() ?? "0",
+    });
+    byCustomer.set(row.customerId, list);
+  }
+
   return new Map(
-    rows.map((row) => [row.customerId, row._sum.total?.toString() ?? "0"]),
+    [...byCustomer].map(([id, list]) => [id, groupTotals(list)] as const),
   );
 }
 
@@ -273,7 +302,7 @@ export async function listCustomers(
           status: row.status,
           createdAt: row.createdAt,
           orderCount: row._count.orders,
-          lifetimeValue: revenue.get(row.id) ?? "0",
+          lifetimeValueByCurrency: revenue.get(row.id) ?? NO_MONEY,
         })),
         total,
         page: params.page,
@@ -291,6 +320,18 @@ interface CustomerStatsRow {
   active: number;
   archived: number;
   with_orders: number;
+}
+
+/**
+ * Revenue split by the currency the order was raised in.
+ *
+ * A second query rather than another subselect in the one above, because the
+ * counts produce exactly one row and this produces one row per currency. There
+ * is no exchange rate anywhere in this application, so the two cannot be
+ * flattened back into a single figure.
+ */
+interface CustomerRevenueRow {
+  currency: Currency | null;
   lifetime_value: string;
 }
 
@@ -303,28 +344,32 @@ interface CustomerStatsRow {
  */
 export async function loadCustomerStats(): Promise<Result<CustomerStats>> {
   try {
-    const rows = await prisma.$queryRaw<CustomerStatsRow[]>`
-      SELECT
-        COUNT(*)::int                                        AS total,
-        COUNT(*) FILTER (WHERE c.status = 'ACTIVE')::int     AS active,
-        COUNT(*) FILTER (WHERE c.status = 'INACTIVE')::int   AS archived,
-        COUNT(*) FILTER (
-          WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)
-        )::int                                               AS with_orders,
-        COALESCE((
-          SELECT SUM(o.total)
-          FROM orders o
-          WHERE o.status IN ('CONFIRMED', 'COMPLETED')
-        ), 0)::text                                          AS lifetime_value
-      FROM customers c
-    `;
+    const [rows, revenue] = await Promise.all([
+      prisma.$queryRaw<CustomerStatsRow[]>`
+        SELECT
+          COUNT(*)::int                                        AS total,
+          COUNT(*) FILTER (WHERE c.status = 'ACTIVE')::int     AS active,
+          COUNT(*) FILTER (WHERE c.status = 'INACTIVE')::int   AS archived,
+          COUNT(*) FILTER (
+            WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)
+          )::int                                               AS with_orders
+        FROM customers c
+      `,
+      prisma.$queryRaw<CustomerRevenueRow[]>`
+        SELECT
+          o.currency                AS currency,
+          SUM(o.total)::text        AS lifetime_value
+        FROM orders o
+        WHERE o.status IN ('CONFIRMED', 'COMPLETED')
+        GROUP BY o.currency
+      `,
+    ]);
 
     const totals = rows[0] ?? {
       total: 0,
       active: 0,
       archived: 0,
       with_orders: 0,
-      lifetime_value: "0",
     };
 
     return {
@@ -334,7 +379,12 @@ export async function loadCustomerStats(): Promise<Result<CustomerStats>> {
         active: totals.active,
         archived: totals.archived,
         withOrders: totals.with_orders,
-        lifetimeValue: totals.lifetime_value,
+        lifetimeValueByCurrency: groupTotals(
+          revenue.map((row) => ({
+            currency: row.currency,
+            amount: row.lifetime_value,
+          })),
+        ),
       },
     };
   } catch (error) {
@@ -363,7 +413,7 @@ export async function getCustomerDetail(
 
     const [byStatus, orders, orderCount] = await Promise.all([
       prisma.order.groupBy({
-        by: ["status"],
+        by: ["status", "currency"],
         where: { customerId: id },
         _count: { _all: true },
         _sum: { total: true },
@@ -377,6 +427,7 @@ export async function getCustomerDetail(
           orderNumber: true,
           status: true,
           total: true,
+          currency: true,
           createdAt: true,
           items: { select: { id: true } },
         },
@@ -384,19 +435,30 @@ export async function getCustomerDetail(
       prisma.order.count({ where: { customerId: id } }),
     ]);
 
+    /*
+     * Grouped by (status, currency) rather than by status alone. The counts
+     * still add up across the whole customer — a count of orders is a count
+     * whatever they were priced in — but the two money figures accumulate one
+     * bucket per currency and are never added together.
+     */
     const statusCounts = { ...NO_ORDERS };
-    let lifetime = 0;
-    let open = 0;
+    const lifetime: { currency: Currency | null; amount: string }[] = [];
+    const open: { currency: Currency | null; amount: string }[] = [];
 
     for (const group of byStatus) {
-      statusCounts[group.status] = group._count._all;
+      statusCounts[group.status] += group._count._all;
 
-      const sum = Number(group._sum.total?.toString() ?? "0");
+      const entry = {
+        currency: group.currency,
+        amount: group._sum.total?.toString() ?? "0",
+      };
 
       if ((REVENUE as readonly string[]).includes(group.status)) {
-        lifetime += sum;
-      } else if ((UNCOMMITTED_ORDER_STATUSES as readonly string[]).includes(group.status)) {
-        open += sum;
+        lifetime.push(entry);
+      } else if (
+        (UNCOMMITTED_ORDER_STATUSES as readonly string[]).includes(group.status)
+      ) {
+        open.push(entry);
       }
     }
 
@@ -413,8 +475,8 @@ export async function getCustomerDetail(
         updatedAt: customer.updatedAt,
 
         orderCount,
-        lifetimeValue: lifetime.toFixed(2),
-        openValue: open.toFixed(2),
+        lifetimeValueByCurrency: sumByCurrency(lifetime),
+        openValueByCurrency: sumByCurrency(open),
         statusCounts,
         lastOrderAt: orders[0]?.createdAt ?? null,
 
@@ -423,6 +485,7 @@ export async function getCustomerDetail(
           orderNumber: order.orderNumber,
           status: order.status,
           total: order.total.toString(),
+          currency: order.currency,
           itemCount: order.items.length,
           createdAt: order.createdAt,
         })),

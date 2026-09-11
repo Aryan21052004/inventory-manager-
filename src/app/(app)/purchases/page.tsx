@@ -7,10 +7,11 @@ import { PurchaseFilters } from "@/app/(app)/purchases/purchase-filters";
 import { PurchasesTable } from "@/app/(app)/purchases/purchases-table";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { MoneyLines } from "@/components/ui/money";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatCard } from "@/components/ui/stat-card";
 import { TableSkeleton } from "@/components/ui/skeleton";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import {
   parsePurchaseListParams,
   toPurchaseSearchParams,
@@ -18,7 +19,6 @@ import {
 } from "@/lib/purchase-query";
 import { loadPurchaseStats } from "@/server/purchases";
 import { loadSupplierFilterOptions } from "@/server/suppliers";
-import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Purchases" };
 
@@ -42,10 +42,9 @@ export default async function PurchasesPage({
 }) {
   const params = parsePurchaseListParams(await searchParams);
 
-  const [stats, suppliers, currency] = await Promise.all([
+  const [stats, suppliers] = await Promise.all([
     loadPurchaseStats(),
     loadSupplierFilterOptions(),
-    getCurrency(),
   ]);
 
   return (
@@ -79,14 +78,14 @@ export default async function PurchasesPage({
           />
           <StatCard
             label="On order"
-            value={formatCurrency(stats.data.pendingValue, currency)}
+            value={<MoneyLines total={stats.data.pendingValueByCurrency} stackedClassName="text-lg" />}
             hint={`${formatNumber(stats.data.pending)} awaiting delivery`}
             icon={Truck}
             tone={stats.data.pending > 0 ? "warning" : "default"}
           />
           <StatCard
             label="Received value"
-            value={formatCurrency(stats.data.receivedValue, currency)}
+            value={<MoneyLines total={stats.data.receivedValueByCurrency} stackedClassName="text-lg" />}
             hint="Goods booked into stock"
             icon={Wallet}
             tone="success"

@@ -11,6 +11,7 @@ import {
   transitionRefusal,
   type PurchaseStatus,
 } from "@/lib/purchase-status";
+import { groupTotals, type MoneyByCurrency } from "@/lib/money-by-currency";
 import { prisma } from "@/lib/prisma";
 import {
   calculatePurchaseTotal,
@@ -69,6 +70,11 @@ export interface PurchaseListItem {
   itemCount: number;
   unitCount: number;
   total: string;
+  /**
+   * What the total is denominated in, from the purchase's own row. Null on a
+   * purchase raised before the column existed.
+   */
+  currency: Currency | null;
   purchaseDate: Date;
   createdAt: Date;
   createdByName: string | null;
@@ -87,8 +93,8 @@ export interface PurchaseStats {
   draft: number;
   pending: number;
   /** Value of purchases placed but not yet arrived — money committed. */
-  pendingValue: string;
-  receivedValue: string;
+  pendingValueByCurrency: MoneyByCurrency;
+  receivedValueByCurrency: MoneyByCurrency;
 }
 
 export interface PurchaseDetailLine {
@@ -152,12 +158,14 @@ export interface SupplierSummary {
   /** Live figures, counted across every purchase from this supplier. */
   purchaseCount: number;
   receivedCount: number;
-  totalPurchased: string;
+  totalPurchasedByCurrency: MoneyByCurrency;
   recentPurchases: {
     id: string;
     purchaseNumber: string;
     status: PurchaseStatus;
     total: string;
+    /** The currency that purchase was raised in. Null on a legacy row. */
+    currency: Currency | null;
     purchaseDate: Date;
   }[];
 }
@@ -205,6 +213,11 @@ export interface PurchaseProductOption {
    * from a real one. What they type is what the lot ends up costing.
    */
   lastPaidUnitCost: string | null;
+  /**
+   * The currency that last payment was made in, from the batch it was read
+   * from. Null exactly when the cost is.
+   */
+  lastPaidCurrency: Currency | null;
   lastPaidAt: Date | null;
   stockQuantity: number;
   isActive: boolean;
@@ -292,6 +305,7 @@ export async function listPurchases(
           purchaseNumber: true,
           status: true,
           total: true,
+          currency: true,
           purchaseDate: true,
           createdAt: true,
           supplierId: true,
@@ -314,6 +328,7 @@ export async function listPurchases(
           itemCount: row.items.length,
           unitCount: row.items.reduce((sum, item) => sum + item.quantity, 0),
           total: row.total.toString(),
+          currency: row.currency,
           purchaseDate: row.purchaseDate,
           createdAt: row.createdAt,
           createdByName: row.createdByUser?.name ?? null,
@@ -333,30 +348,45 @@ interface PurchaseStatsRow {
   total: number;
   draft: number;
   pending: number;
+}
+
+/** Committed and received spend per currency. See `OrderStatsMoneyRow`. */
+interface PurchaseStatsMoneyRow {
+  currency: Currency | null;
+  pending_n: number;
   pending_value: string;
+  received_n: number;
   received_value: string;
 }
 
 export async function loadPurchaseStats(): Promise<Result<PurchaseStats>> {
   try {
-    const rows = await prisma.$queryRaw<PurchaseStatsRow[]>`
-      SELECT
-        COUNT(*)::int                                     AS total,
-        COUNT(*) FILTER (WHERE status = 'DRAFT')::int     AS draft,
-        COUNT(*) FILTER (WHERE status = 'PENDING')::int   AS pending,
-        COALESCE(SUM(total) FILTER (WHERE status = 'PENDING'), 0)::text
-                                                          AS pending_value,
-        COALESCE(SUM(total) FILTER (WHERE status = 'RECEIVED'), 0)::text
-                                                          AS received_value
-      FROM purchases
-    `;
+    const [rows, money] = await Promise.all([
+      prisma.$queryRaw<PurchaseStatsRow[]>`
+        SELECT
+          COUNT(*)::int                                     AS total,
+          COUNT(*) FILTER (WHERE status = 'DRAFT')::int     AS draft,
+          COUNT(*) FILTER (WHERE status = 'PENDING')::int   AS pending
+        FROM purchases
+      `,
+      prisma.$queryRaw<PurchaseStatsMoneyRow[]>`
+        SELECT
+          currency,
+          COUNT(*) FILTER (WHERE status = 'PENDING')::int   AS pending_n,
+          COALESCE(SUM(total) FILTER (WHERE status = 'PENDING'), 0)::text
+                                                            AS pending_value,
+          COUNT(*) FILTER (WHERE status = 'RECEIVED')::int  AS received_n,
+          COALESCE(SUM(total) FILTER (WHERE status = 'RECEIVED'), 0)::text
+                                                            AS received_value
+        FROM purchases
+        GROUP BY currency
+      `,
+    ]);
 
     const totals = rows[0] ?? {
       total: 0,
       draft: 0,
       pending: 0,
-      pending_value: "0",
-      received_value: "0",
     };
 
     return {
@@ -365,8 +395,22 @@ export async function loadPurchaseStats(): Promise<Result<PurchaseStats>> {
         total: totals.total,
         draft: totals.draft,
         pending: totals.pending,
-        pendingValue: totals.pending_value,
-        receivedValue: totals.received_value,
+        pendingValueByCurrency: groupTotals(
+          money
+            .filter((row) => row.pending_n > 0)
+            .map((row) => ({
+              currency: row.currency,
+              amount: row.pending_value,
+            })),
+        ),
+        receivedValueByCurrency: groupTotals(
+          money
+            .filter((row) => row.received_n > 0)
+            .map((row) => ({
+              currency: row.currency,
+              amount: row.received_value,
+            })),
+        ),
       },
     };
   } catch (error) {
@@ -405,15 +449,26 @@ export async function loadPurchaseStats(): Promise<Result<PurchaseStats>> {
  */
 async function lastPaidByProduct(
   productIds: readonly string[],
-): Promise<Map<string, { unitCost: string; receivedAt: Date }>> {
+): Promise<
+  Map<
+    string,
+    { unitCost: string; currency: Currency | null; receivedAt: Date }
+  >
+> {
   if (productIds.length === 0) return new Map();
 
   const rows = await prisma.$queryRaw<
-    { product_id: string; unit_cost: string; received_at: Date }[]
+    {
+      product_id: string;
+      unit_cost: string;
+      cost_currency: Currency | null;
+      received_at: Date;
+    }[]
   >`
     SELECT DISTINCT ON (l.product_id)
       l.product_id,
       l.unit_cost::text AS unit_cost,
+      l.cost_currency,
       l.received_at
     FROM stock_lots l
     WHERE l.product_id IN (${Prisma.join([...productIds])})
@@ -425,7 +480,11 @@ async function lastPaidByProduct(
   return new Map(
     rows.map((row) => [
       row.product_id,
-      { unitCost: row.unit_cost, receivedAt: row.received_at },
+      {
+        unitCost: row.unit_cost,
+        currency: row.cost_currency,
+        receivedAt: row.received_at,
+      },
     ]),
   );
 }
@@ -475,6 +534,7 @@ export async function searchPurchaseProducts(
       name: row.name,
       sku: row.sku,
       lastPaidUnitCost: lastPaid.get(row.id)?.unitCost ?? null,
+      lastPaidCurrency: lastPaid.get(row.id)?.currency ?? null,
       lastPaidAt: lastPaid.get(row.id)?.receivedAt ?? null,
       stockQuantity: row.stockQuantity,
       isActive: true,
@@ -559,12 +619,13 @@ async function loadSupplierSummary(supplierId: string): Promise<SupplierSummary>
     status: supplier.status,
     purchaseCount: supplier.purchaseCount,
     receivedCount: supplier.receivedCount,
-    totalPurchased: supplier.totalPurchased,
+    totalPurchasedByCurrency: supplier.totalPurchasedByCurrency,
     recentPurchases: supplier.purchases.slice(0, 5).map((row) => ({
       id: row.id,
       purchaseNumber: row.purchaseNumber,
       status: row.status,
       total: row.total,
+      currency: row.currency,
       purchaseDate: row.purchaseDate,
     })),
   };
@@ -1563,6 +1624,7 @@ export async function loadPurchaseProducts(
       name: row.name,
       sku: row.sku,
       lastPaidUnitCost: lastPaid.get(row.id)?.unitCost ?? null,
+      lastPaidCurrency: lastPaid.get(row.id)?.currency ?? null,
       lastPaidAt: lastPaid.get(row.id)?.receivedAt ?? null,
       stockQuantity: row.stockQuantity,
       isActive: row.status === "ACTIVE",

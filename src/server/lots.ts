@@ -2,6 +2,7 @@ import "server-only";
 
 import type { Prisma } from "@/generated/prisma/client";
 import type { LotStatus } from "@/generated/prisma/enums";
+import type { Currency } from "@/lib/currency";
 import { AppError, NotFoundError } from "@/lib/errors";
 import {
   LOT_STATUS_LABELS,
@@ -387,6 +388,8 @@ export interface QuarantinedLotRow {
   sku: string;
   quantityRemaining: number;
   unitCost: string | null;
+  /** What that cost is in, from the batch’s own row. Null when the cost is. */
+  costCurrency: Currency | null;
   receivedAt: Date;
 
   /**
@@ -436,6 +439,7 @@ export async function listQuarantinedLots(): Promise<QuarantinedLotRow[]> {
       productId: true,
       quantityRemaining: true,
       unitCost: true,
+      costCurrency: true,
       receivedAt: true,
       status: true,
       sourceType: true,
@@ -477,6 +481,7 @@ export async function listQuarantinedLots(): Promise<QuarantinedLotRow[]> {
     sku: lot.product.sku,
     quantityRemaining: lot.quantityRemaining,
     unitCost: lot.unitCost?.toString() ?? null,
+    costCurrency: lot.costCurrency,
     receivedAt: lot.receivedAt,
     status: lot.status,
     isReturn: lot.sourceType === "SALES_RETURN",

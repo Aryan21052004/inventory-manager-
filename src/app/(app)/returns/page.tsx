@@ -3,6 +3,7 @@ import { PackageOpen, ShieldAlert } from "lucide-react";
 
 import { LotActions } from "@/app/(app)/lots/lot-actions";
 import { EmptyState } from "@/components/ui/empty-state";
+import { RecordMoney } from "@/components/ui/money";
 import { PageHeader } from "@/components/ui/page-header";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -20,10 +21,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
+import { formatDate, formatNumber } from "@/lib/format";
 import { getCurrentUser } from "@/server/auth";
 import { listQuarantinedLots } from "@/server/lots";
-import { getCurrency } from "@/server/settings";
 
 export const metadata = { title: "Returned stock" };
 
@@ -75,9 +75,8 @@ export default async function ReturnsPage() {
     );
   }
 
-  const [lots, currency] = await Promise.all([
+  const [lots] = await Promise.all([
     listQuarantinedLots(),
-    getCurrency(),
   ]);
 
   const units = lots.reduce((sum, lot) => sum + lot.quantityRemaining, 0);
@@ -200,16 +199,19 @@ export default async function ReturnsPage() {
                       {lot.unitCost === null ? (
                         <span className="text-muted-foreground">Unknown</span>
                       ) : (
-                        formatCurrency(
-                          Number(lot.unitCost) * lot.quantityRemaining,
-                          currency,
-                        )
+                        <RecordMoney
+                          amount={(
+                            Number(lot.unitCost) * lot.quantityRemaining
+                          ).toFixed(2)}
+                          currency={lot.costCurrency}
+                        />
                       )}
                     </TableCell>
                     <TableCell className="text-right">
                       <LotActions
                         lot={{
                           lotId: lot.lotId,
+                          costCurrency: lot.costCurrency,
                           productName: lot.productName,
                           status: lot.status,
                           quantityRemaining: lot.quantityRemaining,

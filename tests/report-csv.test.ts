@@ -24,6 +24,7 @@ import { createPurchase, receivePurchase } from "@/server/purchases";
 import { setCurrency } from "@/server/settings";
 
 import { signOut } from "./clerk-mock";
+import { stringIn } from "./money";
 import {
   createSupplier,
   quoted,
@@ -300,7 +301,11 @@ describe("the CSV totals match the page totals", () => {
       await GET(request("valuation"), routeParams("valuation"))
     ).text();
 
-    expect(csv).toContain(page.data.totals.valueAtCost);
+    expect(csv).toContain(
+      stringIn(page.data.totals.valueAtCostByCurrency, "INR"),
+    );
+    // The amount alone is not enough: it must arrive with its currency.
+    expect(csv).toContain("600.00,INR");
     expect(csv).toContain(String(page.data.totals.uncostedUnits));
   });
 
@@ -313,7 +318,8 @@ describe("the CSV totals match the page totals", () => {
 
     const csv = await (await GET(request("sales"), routeParams("sales"))).text();
 
-    expect(csv).toContain(page.data.totals.revenue);
+    expect(csv).toContain(stringIn(page.data.totals.revenueByCurrency, "INR"));
+    expect(csv).toContain("500.00,INR");
     expect(csv).toContain(String(page.data.totals.units));
   });
 
@@ -328,7 +334,12 @@ describe("the CSV totals match the page totals", () => {
       await GET(request("purchases"), routeParams("purchases"))
     ).text();
 
-    expect(csv).toContain(page.data.totals.receivedSpend);
+    expect(csv).toContain(
+      stringIn(page.data.totals.receivedSpendByCurrency, "INR"),
+    );
+    // Spend is the whole delivery — 20 units at 40.00 — not the 15 still on
+    // the shelf that the valuation report reports.
+    expect(csv).toContain("800.00,INR");
     expect(csv).toContain("Spend is not cost of sales");
   });
 
@@ -506,16 +517,23 @@ describe("the stock movement summary export", () => {
 // ---------------------------------------------------------------------------
 
 /**
- * An export has to say what currency its numbers are in, and it has to say it
- * without spoiling the numbers.
+ * What an export says about the money in it.
  *
- * Both halves are load-bearing. A spreadsheet of bare decimals is ambiguous the
- * moment it leaves the application — 18104.96 of what? — so the active currency
- * goes into the metadata. But it goes in the *metadata*: a symbol inside a
- * numeric cell would turn a number column into a text column, and every sort,
- * sum and formula written against the export would stop working.
+ * This block used to assert the opposite of what it now asserts, and the
+ * change is the point. The file once carried a single preamble line — reading
+ * the installation default and declaring every number below to be in it — and
+ * that line was wrong twice over: wrong for history recorded while the setting
+ * said something else, and wrong for any business trading in more than one
+ * currency at a time. It was also the most convincing thing in the file,
+ * because it looked like metadata rather than a guess.
+ *
+ * So the claim is gone and each amount now carries its own currency in the
+ * column beside it. The other half of the old contract survives untouched: the
+ * amount itself stays a bare decimal, because a symbol inside a numeric cell
+ * turns a number column into a text column and breaks every sort, sum and
+ * formula written against the export.
  */
-describe("the CSV states its currency without formatting the numbers", () => {
+describe("the CSV names the currency of every amount", () => {
   beforeEach(async () => {
     await resetDatabase();
     signOut();
@@ -523,7 +541,7 @@ describe("the CSV states its currency without formatting the numbers", () => {
 
   /** A product with a costed batch, so the money columns are not all zero. */
   async function priced() {
-    await seedProduct({
+    return seedProduct({
       sku: "CSV-CUR",
       name: "Currency Fixture",
       sellingPrice: "1250.00",
@@ -532,78 +550,381 @@ describe("the CSV states its currency without formatting the numbers", () => {
     });
   }
 
-  it("names the active currency in the preamble", async () => {
-    const admin = await signInWithRole("ADMIN");
-    await setCurrency("USD");
+  /** Buys stock through the real path, in whatever the default is set to. */
+  async function buy(
+    productId: string,
+    supplierId: string,
+    quantity: number,
+    unitCost: string,
+    currency: "USD" | "INR" | "EUR",
+  ) {
+    await setCurrency(currency);
+    const purchase = await createPurchase({
+      supplierId,
+      items: [{ productId, quantity, unitCost }],
+    });
+    await receivePurchase(purchase.id);
+  }
+
+  /** The valuation row for a SKU, split into cells. */
+  function valuationRowsFor(csv: string, sku: string): string[][] {
+    return bodyRows(csv)
+      .map((row) => row.split(","))
+      .filter((cells) => cells[0] === sku);
+  }
+
+  async function valuationCsv(): Promise<string> {
+    return (await GET(request("valuation"), routeParams("valuation"))).text();
+  }
+
+  // -------------------------------------------------------------------------
+  // The claim that had to go
+  // -------------------------------------------------------------------------
+
+  it("no longer declares one currency for the whole file", async () => {
+    await signInWithRole("ADMIN");
+    await setCurrency("EUR");
     await priced();
 
-    const csv = await (
-      await GET(request("valuation"), routeParams("valuation"))
-    ).text();
+    const csv = await valuationCsv();
 
-    expect(csv).toContain("Currency: USD");
+    /*
+     * The old line, in every form it could take. The batch below was bought
+     * in dollars; a file headed "Currency: EUR" would have relabelled it.
+     */
+    for (const currency of ["USD", "INR", "EUR"]) {
+      expect(csv).not.toContain(`Currency: ${currency}`);
+    }
+    expect(csv).not.toContain("unconverted");
+  });
+
+  it("says instead that each column carries its own currency", async () => {
+    await signInWithRole("ADMIN");
+    await priced();
+
+    const csv = await valuationCsv();
+
+    expect(csv).toContain("carry their own currency in the column beside them");
+    expect(csv).toContain("converted between currencies");
+  });
+
+  it("does not change what it reports when the default setting moves", async () => {
+    const admin = await signInWithRole("ADMIN");
+    await priced();
+
+    await setCurrency("EUR");
+    const underEur = await valuationCsv();
+
+    await setCurrency("INR");
+    const underInr = await valuationCsv();
+
+    /*
+     * The setting seeds new documents; it says nothing about what has already
+     * happened. Two exports of the same unchanged data must agree, whatever
+     * the setting was when each was taken.
+     */
+    expect(valuationRowsFor(underInr, "CSV-CUR")).toEqual(
+      valuationRowsFor(underEur, "CSV-CUR"),
+    );
     expect(admin.role).toBe("ADMIN");
   });
 
-  it("follows the setting when it changes", async () => {
+  // -------------------------------------------------------------------------
+  // One currency
+  // -------------------------------------------------------------------------
+
+  it("names the currency beside a single-currency amount", async () => {
     await signInWithRole("ADMIN");
-    await priced();
-
-    await setCurrency("EUR");
-    const eur = await (
-      await GET(request("valuation"), routeParams("valuation"))
-    ).text();
-    expect(eur).toContain("Currency: EUR");
-
     await setCurrency("INR");
-    const inr = await (
-      await GET(request("valuation"), routeParams("valuation"))
-    ).text();
-    expect(inr).toContain("Currency: INR");
-  });
-
-  it("says INR by default, with no setting row", async () => {
-    await signInWithRole("STAFF");
     await priced();
 
-    const csv = await (
-      await GET(request("valuation"), routeParams("valuation"))
-    ).text();
+    const [row] = valuationRowsFor(await valuationCsv(), "CSV-CUR");
+    expect(row).toBeDefined();
 
-    expect(csv).toContain("Currency: INR");
+    // 40 units at 800.00 cost, at 1250.00 retail. The fixture buys and prices
+    // in dollars whatever the installation default says.
+    expect(row!.slice(8, 12)).toEqual(["32000.00", "USD", "50000.00", "USD"]);
   });
 
-  it("states the currency on every report", async () => {
+  // -------------------------------------------------------------------------
+  // Several currencies
+  // -------------------------------------------------------------------------
+
+  it("refuses a single figure for a product bought in two currencies", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier("Two Currency Supply");
+    const product = await seedProduct({
+      sku: "MIXED-1",
+      name: "Mixed Batch Part",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+
+    await buy(product.id, supplier.id, 10, "40.00", "USD");
+    await buy(product.id, supplier.id, 5, "3000.00", "INR");
+
+    const rows = valuationRowsFor(await valuationCsv(), "MIXED-1");
+
+    // The product row: quantities intact, no cost amount, and the currency
+    // cell saying why there is none.
+    expect(rows[0]!.slice(5, 10)).toEqual(["15", "15", "0", "", "mixed"]);
+
+    // Then one row per currency, each amount with its own code, quantities
+    // left blank so summing the units column is still correct.
+    expect(rows[1]!.slice(0, 10)).toEqual([
+      "MIXED-1",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "400.00",
+      "USD",
+    ]);
+    expect(rows[2]!.slice(8, 10)).toEqual(["15000.00", "INR"]);
+  });
+
+  it("never writes the two currencies added together", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier("No Conversion Supply");
+    const product = await seedProduct({
+      sku: "NOCONV-1",
+      name: "No Conversion Part",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+
+    await buy(product.id, supplier.id, 1, "100.00", "USD");
+    await buy(product.id, supplier.id, 1, "200.00", "EUR");
+
+    const csv = await valuationCsv();
+
+    // 300 is the number no exchange rate was consulted to produce, so it must
+    // appear nowhere — not in a cell, not in a total, not in the preamble.
+    expect(csv).not.toContain("300.00");
+    expect(csv).toContain("100.00,USD");
+    expect(csv).toContain("200.00,EUR");
+    expect(csv).not.toContain("300");
+  });
+
+  // -------------------------------------------------------------------------
+  // A currency that was never recorded
+  // -------------------------------------------------------------------------
+
+  it('calls an unrecorded currency "unknown" rather than the default', async () => {
     await signInWithRole("ADMIN");
     await setCurrency("EUR");
-    await priced();
+    const product = await priced();
 
-    for (const report of [
-      "valuation",
-      "sales",
-      "purchases",
-      "movements",
-      "certificates",
-    ]) {
-      const csv = await (await GET(request(report), routeParams(report))).text();
-      expect(csv, `${report} should name its currency`).toContain("Currency: EUR");
-    }
+    // Legacy-shaped data: a real amount whose currency predates the column.
+    await prisma.stockLot.updateMany({
+      where: { productId: product.id },
+      data: { costCurrency: null },
+    });
+    await prisma.product.update({
+      where: { id: product.id },
+      data: { priceCurrency: null },
+    });
+
+    const csv = await valuationCsv();
+    const [row] = valuationRowsFor(csv, "CSV-CUR");
+
+    expect(row!.slice(8, 12)).toEqual([
+      "32000.00",
+      "unknown",
+      "50000.00",
+      "unknown",
+    ]);
+
+    // The amounts are untouched and the setting has not been borrowed as a
+    // label for them.
+    expect(row!.slice(8, 12)).not.toContain("EUR");
+    expect(csv).toContain("no currency was ever recorded");
   });
 
-  /**
-   * The half that protects the spreadsheet. Money cells stay plain decimals —
-   * no symbol, no thousands separator, nothing that would make Excel read the
-   * column as text.
-   */
+  // -------------------------------------------------------------------------
+  // Cost and retail are separate concepts
+  // -------------------------------------------------------------------------
+
+  it("keeps cost and retail in their own currencies on one row", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier("Import Supply");
+
+    // Priced for sale in dollars by the fixture, bought in rupees.
+    const product = await seedProduct({
+      sku: "IMPORT-1",
+      name: "Imported Part",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+    await buy(product.id, supplier.id, 10, "3000.00", "INR");
+
+    const [row] = valuationRowsFor(await valuationCsv(), "IMPORT-1");
+
+    // Cost in one currency, retail in another, on the same row, neither
+    // converted and neither netted against the other.
+    expect(row!.slice(8, 12)).toEqual(["30000.00", "INR", "1000.00", "USD"]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Nothing to total is not a zero
+  // -------------------------------------------------------------------------
+
+  it("leaves an uncosted product's value blank rather than zero", async () => {
+    await signInWithRole("ADMIN");
+    await seedProduct({
+      sku: "UNCOSTED-1",
+      name: "Uncosted Part",
+      sellingPrice: "100.00",
+      stockQuantity: 12,
+      lotUnitCost: null,
+    });
+
+    const [row] = valuationRowsFor(await valuationCsv(), "UNCOSTED-1");
+
+    // No cost was ever recorded, so there is nothing to value — which is a
+    // different statement from valuing it at nothing.
+    expect(row!.slice(5, 12)).toEqual([
+      "12",
+      "0",
+      "12",
+      "",
+      "",
+      "1200.00",
+      "USD",
+    ]);
+    expect(row!.slice(8, 10)).not.toContain("0.00");
+  });
+
+  // -------------------------------------------------------------------------
+  // Totals
+  // -------------------------------------------------------------------------
+
+  it("gives the totals row its own currency", async () => {
+    await signInWithRole("ADMIN");
+    await setCurrency("INR");
+    await priced();
+
+    const total = bodyRows(await valuationCsv())
+      .map((row) => row.split(","))
+      .find((cells) => cells[0] === "TOTAL");
+
+    expect(total).toBeDefined();
+    expect(total!.slice(8, 12)).toEqual([
+      "32000.00",
+      "USD",
+      "50000.00",
+      "USD",
+    ]);
+  });
+
+  it("splits a mixed total across one row per currency", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier("Mixed Total Supply");
+    const first = await seedProduct({
+      sku: "TOT-1",
+      sellingPrice: "10.00",
+      stockQuantity: 0,
+    });
+    const second = await seedProduct({
+      sku: "TOT-2",
+      sellingPrice: "10.00",
+      stockQuantity: 0,
+    });
+
+    await buy(first.id, supplier.id, 2, "50.00", "USD");
+    await buy(second.id, supplier.id, 4, "900.00", "INR");
+
+    const cells = bodyRows(await valuationCsv()).map((row) => row.split(","));
+    const totalAt = cells.findIndex((row) => row[0] === "TOTAL");
+
+    expect(totalAt).toBeGreaterThanOrEqual(0);
+    // No single figure on the totals row itself...
+    expect(cells[totalAt]!.slice(8, 10)).toEqual(["", "mixed"]);
+    // ...and both currencies stated separately below it.
+    expect(cells[totalAt + 1]!.slice(8, 10)).toEqual(["100.00", "USD"]);
+    expect(cells[totalAt + 2]!.slice(8, 10)).toEqual(["3600.00", "INR"]);
+  });
+
+  it("names the currency on sales and purchase-spend totals too", async () => {
+    await signInWithRole("ADMIN");
+    await setCurrency("INR");
+
+    const supplier = await createSupplier("Totals Supply");
+    const buyer = await prisma.customer.create({ data: { name: "Contoso" } });
+    const product = await seedProduct({
+      sku: "TOTC-1",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+
+    await buy(product.id, supplier.id, 10, "40.00", "INR");
+
+    const order = await createOrder({
+      customerId: buyer.id,
+      items: await quoted([{ productId: product.id, quantity: 5 }]),
+    });
+    await confirmOrder(order.id);
+
+    const sales = await (
+      await GET(request("sales"), routeParams("sales"))
+    ).text();
+    expect(sales).toContain("Group,Detail,Orders,Units,Revenue,Revenue currency");
+    expect(sales).toContain("500.00,INR");
+
+    const purchases = await (
+      await GET(request("purchases"), routeParams("purchases"))
+    ).text();
+    expect(purchases).toContain(
+      "Group,Detail,Purchases,Units,Received spend,Spend currency",
+    );
+    expect(purchases).toContain("400.00,INR");
+  });
+
+  it("states committed spend per currency, or says there is none", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier("Committed Supply");
+    const product = await seedProduct({
+      sku: "COMM-1",
+      sellingPrice: "10.00",
+      stockQuantity: 0,
+    });
+
+    const empty = await (
+      await GET(request("purchases"), routeParams("purchases"))
+    ).text();
+    expect(empty).toContain("Committed (pending, not yet received): none");
+
+    await setCurrency("EUR");
+    const purchase = await createPurchase({
+      supplierId: supplier.id,
+      items: [{ productId: product.id, quantity: 2, unitCost: "25.00" }],
+    });
+    await prisma.purchase.update({
+      where: { id: purchase.id },
+      data: { status: "PENDING" },
+    });
+
+    const committed = await (
+      await GET(request("purchases"), routeParams("purchases"))
+    ).text();
+    expect(committed).toContain(
+      "Committed (pending, not yet received): 50.00 EUR",
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // The numbers themselves stay arithmetic
+  // -------------------------------------------------------------------------
+
   it("leaves monetary cells as raw decimals", async () => {
     await signInWithRole("ADMIN");
     await setCurrency("INR");
     await priced();
 
-    const csv = await (
-      await GET(request("valuation"), routeParams("valuation"))
-    ).text();
-
+    const csv = await valuationCsv();
     const rows = bodyRows(csv);
     const product = rows.find((row) => row.startsWith("CSV-CUR,"));
     expect(product).toBeDefined();
@@ -634,24 +955,22 @@ describe("the CSV states its currency without formatting the numbers", () => {
   });
 
   /**
-   * The column structure is unchanged by the currency work. The preamble grew a
-   * line; the header and the cells did not move.
+   * The column structure grew a currency column beside each money column, and
+   * nothing else moved. The quantity columns are in the same places they were.
    */
-  it("keeps the existing column structure", async () => {
+  it("keeps the existing column structure, plus a currency per money column", async () => {
     await signInWithRole("ADMIN");
     await setCurrency("USD");
     await priced();
 
-    const csv = await (
-      await GET(request("valuation"), routeParams("valuation"))
-    ).text();
-
-    const lines = csv.replace(/^\ufeff/, "").split("\r\n").filter(Boolean);
+    const csv = await valuationCsv();
+    const lines = csv.replace(/^﻿/, "").split("\r\n").filter(Boolean);
     const header = lines.find((line) => line.startsWith("SKU,"));
 
     expect(header).toBe(
       "SKU,Product,Category,Supplier,Status,Units on hand,Costed units," +
-        "Uncosted units,Value at cost,Value at retail,Cost coverage %",
+        "Uncosted units,Value at cost,Cost currency,Value at retail," +
+        "Retail currency,Cost coverage %",
     );
   });
 });

@@ -9,6 +9,7 @@ import {
 
 import { CustomerRowActions } from "@/app/(app)/customers/customer-row-actions";
 import { Badge } from "@/components/ui/badge";
+import { MoneyLines } from "@/components/ui/money";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { Pagination } from "@/components/ui/pagination";
@@ -27,10 +28,9 @@ import {
   type CustomerListParams,
   type CustomerSortKey,
 } from "@/lib/customer-query";
-import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
+import { formatDate, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { listCustomers } from "@/server/customers";
-import { getCurrency } from "@/server/settings";
 
 /**
  * The customers table.
@@ -58,10 +58,7 @@ async function CustomersTable({
    * than taking it as a prop costs no extra query — the page above has already
    * resolved it.
    */
-  const [result, currency] = await Promise.all([
-    listCustomers(params),
-    getCurrency(),
-  ]);
+  const result = await listCustomers(params);
 
   if (!result.ok) {
     return (
@@ -167,7 +164,7 @@ async function CustomersTable({
               </TableCell>
 
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(customer.lifetimeValue, currency)}
+                <MoneyLines total={customer.lifetimeValueByCurrency} />
               </TableCell>
 
               <TableCell className="hidden text-muted-foreground xl:table-cell">

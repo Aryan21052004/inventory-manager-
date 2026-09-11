@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/card";
 import { CertificateStatusBadge } from "@/components/ui/certificate-status-badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { MoneyLines, RecordMoney } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { PurchaseStatusBadge } from "@/components/ui/purchase-status-badge";
@@ -39,10 +40,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatCurrency, formatDate, formatDateTime, formatNumber } from "@/lib/format";
+import { formatDate, formatDateTime, formatNumber } from "@/lib/format";
 import { isEditable } from "@/lib/purchase-status";
 import { getPurchaseDetail, type PurchaseDetail } from "@/server/purchases";
-import { getCurrency } from "@/server/settings";
 import { listSupplyLinksForPurchase } from "@/server/supply-links";
 import { cn } from "@/lib/utils";
 
@@ -78,9 +78,8 @@ export default async function PurchaseDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [result, currency] = await Promise.all([
+  const [result] = await Promise.all([
     getPurchaseDetail(id),
-    getCurrency(),
   ]);
 
   if (!result.ok) {
@@ -251,10 +250,10 @@ export default async function PurchaseDetailPage({
                       ))}
                     </TableCell>
                     <TableCell className="tabular text-right">
-                      {formatCurrency(line.unitCost, currency)}
+                      <RecordMoney amount={line.unitCost} currency={purchase.currency} />
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
-                      {formatCurrency(line.total, currency)}
+                      <RecordMoney amount={line.total} currency={purchase.currency} />
                     </TableCell>
                   </TableRow>
                 ))}
@@ -269,7 +268,7 @@ export default async function PurchaseDetailPage({
               <div className="flex items-center justify-between">
                 <dt className="font-semibold">Grand total</dt>
                 <dd className="tabular text-lg font-semibold">
-                  {formatCurrency(purchase.total, currency)}
+                  <RecordMoney amount={purchase.total} currency={purchase.currency} />
                 </dd>
               </div>
             </dl>
@@ -326,7 +325,7 @@ export default async function PurchaseDetailPage({
                     Total spent
                   </dt>
                   <dd className="tabular mt-0.5 text-lg font-semibold">
-                    {formatCurrency(purchase.supplier.totalPurchased, currency)}
+                    <MoneyLines total={purchase.supplier.totalPurchasedByCurrency} />
                   </dd>
                   <dd className="mt-0.5 text-xs text-muted-foreground">
                     across {formatNumber(purchase.supplier.receivedCount)}{" "}
@@ -381,7 +380,7 @@ export default async function PurchaseDetailPage({
                         </span>
                         <PurchaseStatusBadge status={entry.status} />
                         <span className="tabular shrink-0 text-sm font-medium">
-                          {formatCurrency(entry.total, currency)}
+                          <RecordMoney amount={entry.total} currency={entry.currency} />
                         </span>
                       </Link>
                     </li>

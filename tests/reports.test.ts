@@ -17,6 +17,7 @@ import { cancelOrder, completeOrder, confirmOrder, createOrder } from "@/server/
 import { cancelPurchase, createPurchase, receivePurchase } from "@/server/purchases";
 
 import { signOut } from "./clerk-mock";
+import { amountIn } from "./money";
 import {
   createSupplier,
   quoted,
@@ -119,7 +120,7 @@ describe("stock valuation", () => {
 
     const report = unwrap(await loadValuationReport(params()));
 
-    expect(Number(report.totals.valueAtCost)).toBe(800);
+    expect(amountIn(report.totals.valueAtCostByCurrency, "USD")).toBe(800);
     expect(report.totals.costedUnits).toBe(10);
     expect(report.totals.uncostedUnits).toBe(5);
     expect(report.totals.units).toBe(15);
@@ -137,9 +138,9 @@ describe("stock valuation", () => {
     });
 
     const report = unwrap(await loadValuationReport(params()));
-    expect(Number(report.totals.valueAtCost)).toBe(0);
+    expect(report.totals.valueAtCostByCurrency).toEqual([]);
     expect(report.totals.uncostedUnits).toBe(10);
-    expect(report.rows[0]!.valueAtCost).not.toContain("999");
+    expect(report.rows[0]!.valueAtCostByCurrency).toEqual([]);
   });
 
   it("reports cost and retail as different bases", async () => {
@@ -152,8 +153,8 @@ describe("stock valuation", () => {
     });
 
     const report = unwrap(await loadValuationReport(params()));
-    expect(Number(report.totals.valueAtCost)).toBe(800);
-    expect(Number(report.totals.valueAtRetail)).toBe(1_500);
+    expect(amountIn(report.totals.valueAtCostByCurrency, "USD")).toBe(800);
+    expect(amountIn(report.totals.valueAtRetailByCurrency, "USD")).toBe(1_500);
   });
 
   it("omits products holding no stock", async () => {
@@ -176,10 +177,12 @@ describe("stock valuation", () => {
     });
 
     const report = unwrap(await loadValuationReport(params()));
-    expect(Number(report.totals.valueAtCost)).toBe(600);
+    expect(amountIn(report.totals.valueAtCostByCurrency, "USD")).toBe(600);
     expect(report.totals.retiredProducts).toBe(1);
     expect(report.totals.retiredUnits).toBe(4);
-    expect(Number(report.totals.retiredValueAtCost)).toBe(100);
+    expect(amountIn(report.totals.retiredValueAtCostByCurrency, "USD")).toBe(
+      100,
+    );
   });
 
   it("filters by supplier, category and search", async () => {
@@ -269,7 +272,7 @@ describe("sales report", () => {
     const report = unwrap(await loadSalesReport(params()));
     expect(report.totals.orders).toBe(2);
     expect(report.totals.units).toBe(5);
-    expect(Number(report.totals.revenue)).toBe(500);
+    expect(amountIn(report.totals.revenueByCurrency, "INR")).toBe(500);
   });
 
   it("excludes drafts, pending and cancelled orders", async () => {
@@ -293,7 +296,7 @@ describe("sales report", () => {
     const report = unwrap(await loadSalesReport(params()));
     expect(report.totals.orders).toBe(1);
     expect(report.totals.units).toBe(3);
-    expect(Number(report.totals.revenue)).toBe(300);
+    expect(amountIn(report.totals.revenueByCurrency, "INR")).toBe(300);
   });
 
   it("reports one revenue basis, equal to the order totals", async () => {
@@ -313,7 +316,7 @@ describe("sales report", () => {
     await sell(buyer.id, [{ productId: a.id, quantity: 10 }]);
 
     const report = unwrap(await loadSalesReport(params()));
-    expect(Number(report.totals.revenue)).toBe(1_000);
+    expect(amountIn(report.totals.revenueByCurrency, "INR")).toBe(1_000);
 
     const order = await prisma.order.findFirstOrThrow({
       where: { status: "CONFIRMED" },
@@ -338,8 +341,8 @@ describe("sales report", () => {
 
     for (const grouping of ["product", "category", "customer", "period"] as const) {
       const report = unwrap(await loadSalesReport(params({ grouping })));
-      expect(Number(report.rows[0]!.revenue)).toBe(500);
-      expect(Number(report.totals.revenue)).toBe(500);
+      expect(amountIn(report.rows[0]!.revenueByCurrency, "INR")).toBe(500);
+      expect(amountIn(report.totals.revenueByCurrency, "INR")).toBe(500);
     }
   });
 
@@ -359,7 +362,7 @@ describe("sales report", () => {
 
     const report = unwrap(await loadSalesReport(params()));
     // 2×100 + 2×50 = 300, counted once, not once per line.
-    expect(Number(report.totals.revenue)).toBe(300);
+    expect(amountIn(report.totals.revenueByCurrency, "INR")).toBe(300);
     expect(report.totals.orders).toBe(1);
   });
 
@@ -467,7 +470,7 @@ describe("purchase spend report", () => {
 
     const report = unwrap(await loadPurchaseSpendReport(params()));
     expect(report.totals.purchases).toBe(1);
-    expect(Number(report.totals.receivedSpend)).toBe(250);
+    expect(amountIn(report.totals.receivedSpendByCurrency, "INR")).toBe(250);
   });
 
   it("excludes drafts and cancellations from spend", async () => {
@@ -490,7 +493,7 @@ describe("purchase spend report", () => {
 
     const report = unwrap(await loadPurchaseSpendReport(params()));
     expect(report.totals.purchases).toBe(1);
-    expect(Number(report.totals.receivedSpend)).toBe(50);
+    expect(amountIn(report.totals.receivedSpendByCurrency, "INR")).toBe(50);
   });
 
   it("reports pending purchases as committed, never as spend", async () => {
@@ -508,8 +511,8 @@ describe("purchase spend report", () => {
     });
 
     const report = unwrap(await loadPurchaseSpendReport(params()));
-    expect(Number(report.totals.receivedSpend)).toBe(0);
-    expect(Number(report.totals.committedSpend)).toBe(200);
+    expect(report.totals.receivedSpendByCurrency).toEqual([]);
+    expect(amountIn(report.totals.committedSpendByCurrency, "INR")).toBe(200);
     expect(report.totals.committedPurchases).toBe(1);
   });
 
@@ -529,13 +532,13 @@ describe("purchase spend report", () => {
         params({ from: "2020-03-01", to: "2020-03-31" }),
       ),
     );
-    expect(Number(byPlacement.totals.receivedSpend)).toBe(0);
+    expect(byPlacement.totals.receivedSpendByCurrency).toEqual([]);
 
     const today = new Date().toISOString().slice(0, 10);
     const byReceipt = unwrap(
       await loadPurchaseSpendReport(params({ from: today, to: today })),
     );
-    expect(Number(byReceipt.totals.receivedSpend)).toBe(100);
+    expect(amountIn(byReceipt.totals.receivedSpendByCurrency, "INR")).toBe(100);
   });
 
   it("groups by supplier, product, category and period", async () => {
@@ -573,7 +576,7 @@ describe("purchase spend report", () => {
       await loadPurchaseSpendReport(params({ grouping: "period" })),
     );
     expect(byPeriod.rows).toHaveLength(1);
-    expect(Number(byPeriod.totals.receivedSpend)).toBe(200);
+    expect(amountIn(byPeriod.totals.receivedSpendByCurrency, "INR")).toBe(200);
   });
 });
 
@@ -597,8 +600,8 @@ describe("reports agree with the dashboard", () => {
 
     const valuation = unwrap(await loadValuationReport(params()));
     const inventory = unwrap(await loadInventory());
-    expect(Number(valuation.totals.valueAtCost)).toBe(
-      Number(inventory.stockValue),
+    expect(valuation.totals.valueAtCostByCurrency).toEqual(
+      inventory.stockValueByCurrency,
     );
     expect(valuation.totals.uncostedUnits).toBe(inventory.uncostedUnits);
     expect(valuation.totals.units).toBe(inventory.totalUnits);
@@ -612,24 +615,22 @@ describe("reports agree with the dashboard", () => {
      */
     const sales = unwrap(await loadSalesReport(params()));
     const dashSales = unwrap(await loadSales());
-    expect(Number(sales.totals.revenue)).toBeCloseTo(
-      Number(dashSales.realisedRevenue),
-      2,
+    expect(sales.totals.revenueByCurrency).toEqual(
+      dashSales.realisedRevenueByCurrency,
     );
 
     const costing = unwrap(await loadCosting());
-    expect(Number(sales.totals.revenue)).toBeCloseTo(
-      Number(costing.allRevenue),
-      2,
+    expect(sales.totals.revenueByCurrency).toEqual(
+      costing.allRevenueByCurrency,
     );
 
     const spend = unwrap(await loadPurchaseSpendReport(params()));
     const dashProcurement = unwrap(await loadProcurement());
-    expect(Number(spend.totals.receivedSpend)).toBe(
-      Number(dashProcurement.receivedSpend),
+    expect(spend.totals.receivedSpendByCurrency).toEqual(
+      dashProcurement.receivedSpendByCurrency,
     );
-    expect(Number(spend.totals.committedSpend)).toBe(
-      Number(dashProcurement.committedSpend),
+    expect(spend.totals.committedSpendByCurrency).toEqual(
+      dashProcurement.committedSpendByCurrency,
     );
   });
 
@@ -668,11 +669,11 @@ describe("an empty database", () => {
     const spend = unwrap(await loadPurchaseSpendReport(params()));
 
     expect(valuation.rows).toHaveLength(0);
-    expect(Number(valuation.totals.valueAtCost)).toBe(0);
+    expect(valuation.totals.valueAtCostByCurrency).toEqual([]);
     expect(valuation.totals.coverage).toBe(0);
     expect(sales.rows).toHaveLength(0);
-    expect(Number(sales.totals.revenue)).toBe(0);
+    expect(sales.totals.revenueByCurrency).toEqual([]);
     expect(spend.rows).toHaveLength(0);
-    expect(Number(spend.totals.receivedSpend)).toBe(0);
+    expect(spend.totals.receivedSpendByCurrency).toEqual([]);
   });
 });

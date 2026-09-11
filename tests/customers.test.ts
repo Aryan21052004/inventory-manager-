@@ -10,6 +10,7 @@ import {
   parseCustomerListParams,
   type CustomerListParams,
 } from "@/lib/customer-query";
+import type { Currency } from "@/lib/currency";
 import { prisma } from "@/lib/prisma";
 import {
   createCustomer,
@@ -23,6 +24,7 @@ import {
 import { createOrder, loadCustomers, updateOrder } from "@/server/orders";
 
 import { signOut } from "./clerk-mock";
+import { amountIn, stringIn } from "./money";
 import {
   quoted,
   resetDatabase,
@@ -87,6 +89,7 @@ async function seedOrder(
   status: "DRAFT" | "PENDING" | "CONFIRMED" | "COMPLETED" | "CANCELLED",
   total: string,
   orderNumber = `ORD-${Math.random().toString(36).slice(2, 10)}`,
+  currency: Currency | null = "INR",
 ) {
   return prisma.order.create({
     data: {
@@ -95,6 +98,7 @@ async function seedOrder(
       status,
       subtotal: total,
       total,
+      currency,
     },
   });
 }
@@ -457,7 +461,7 @@ describe("archiving a customer", () => {
     if (!detail.ok || !detail.data) throw new Error("expected a customer");
 
     // Archiving is not a soft delete. The history is still theirs.
-    expect(detail.data.lifetimeValue).toBe("500.00");
+    expect(stringIn(detail.data.lifetimeValueByCurrency, "INR")).toBe("500.00");
     expect(detail.data.orderCount).toBe(1);
   });
 });
@@ -736,7 +740,9 @@ describe("lifetime value", () => {
     const result = await listCustomers(listParams());
     if (!result.ok) throw new Error("expected a page");
 
-    expect(Number(result.data.items[0]?.lifetimeValue)).toBe(300);
+    expect(amountIn(result.data.items[0]!.lifetimeValueByCurrency, "INR")).toBe(
+      300,
+    );
   });
 
   it("counts every order towards the order count", async () => {
@@ -753,7 +759,7 @@ describe("lifetime value", () => {
     // worth" is revenue, and a cancelled order is one of the first but not the
     // second.
     expect(result.data.items[0]?.orderCount).toBe(2);
-    expect(Number(result.data.items[0]?.lifetimeValue)).toBe(0);
+    expect(result.data.items[0]?.lifetimeValueByCurrency).toEqual([]);
   });
 
   it("is zero for a customer who has never ordered", async () => {
@@ -763,7 +769,7 @@ describe("lifetime value", () => {
     const result = await listCustomers(listParams());
     if (!result.ok) throw new Error("expected a page");
 
-    expect(Number(result.data.items[0]?.lifetimeValue)).toBe(0);
+    expect(result.data.items[0]?.lifetimeValueByCurrency).toEqual([]);
     expect(result.data.items[0]?.orderCount).toBe(0);
   });
 
@@ -778,8 +784,12 @@ describe("lifetime value", () => {
     const result = await listCustomers(listParams());
     if (!result.ok) throw new Error("expected a page");
 
-    expect(Number(result.data.items[0]?.lifetimeValue)).toBe(100);
-    expect(Number(result.data.items[1]?.lifetimeValue)).toBe(250);
+    expect(amountIn(result.data.items[0]!.lifetimeValueByCurrency, "INR")).toBe(
+      100,
+    );
+    expect(amountIn(result.data.items[1]!.lifetimeValueByCurrency, "INR")).toBe(
+      250,
+    );
   });
 });
 
@@ -945,7 +955,7 @@ describe("the figures above the list", () => {
     const result = await loadCustomerStats();
     if (!result.ok) throw new Error("expected stats");
 
-    expect(Number(result.data.lifetimeValue)).toBe(150);
+    expect(amountIn(result.data.lifetimeValueByCurrency, "INR")).toBe(150);
   });
 
   it("reports zeroes for an empty directory", async () => {
@@ -955,7 +965,7 @@ describe("the figures above the list", () => {
     if (!result.ok) throw new Error("expected stats");
 
     expect(result.data.total).toBe(0);
-    expect(Number(result.data.lifetimeValue)).toBe(0);
+    expect(result.data.lifetimeValueByCurrency).toEqual([]);
   });
 });
 
@@ -985,10 +995,10 @@ describe("customer detail", () => {
     expect(result.data.phone).toBe("+1 555 0100");
     expect(result.data.address).toBe("Hangar 4");
     expect(result.data.orderCount).toBe(4);
-    expect(Number(result.data.lifetimeValue)).toBe(300);
+    expect(amountIn(result.data.lifetimeValueByCurrency, "INR")).toBe(300);
     // Raised but not committed — kept apart from revenue rather than added to
     // it, so the two numbers never quietly merge.
-    expect(Number(result.data.openValue)).toBe(50);
+    expect(amountIn(result.data.openValueByCurrency, "INR")).toBe(50);
   });
 
   it("breaks the orders down by status", async () => {

@@ -20,6 +20,7 @@ import { attachCertificate } from "@/server/certificates";
 import { confirmOrder, createOrder } from "@/server/orders";
 
 import { signOut } from "./clerk-mock";
+import { amountIn } from "./money";
 import {
   createSupplier,
   quoted,
@@ -1184,7 +1185,7 @@ describe("supplier history", () => {
     expect(summary.name).toBe("Aviation Spares Ltd");
     expect(summary.purchaseCount).toBe(3);
     expect(summary.receivedCount).toBe(1);
-    expect(Number(summary.totalPurchased)).toBe(100);
+    expect(amountIn(summary.totalPurchasedByCurrency, "INR")).toBe(100);
     expect(summary.recentPurchases).toHaveLength(3);
   });
 });

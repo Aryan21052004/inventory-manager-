@@ -18,6 +18,7 @@ import { adjustStock } from "@/server/products";
 import { loadProductStats } from "@/server/products";
 
 import { signOut } from "./clerk-mock";
+import { amountIn } from "./money";
 import {
   createSupplier,
   expectConsumptionsReconcile,
@@ -453,7 +454,7 @@ describe("stock with no known cost", () => {
     const stats = await loadProductStats();
     if (!stats.ok) throw new Error("expected stats");
 
-    expect(Number(stats.data.stockValue)).toBe(80_000);
+    expect(amountIn(stats.data.stockValueByCurrency, "USD")).toBe(80_000);
     expect(stats.data.uncostedUnits).toBe(5);
   });
 });

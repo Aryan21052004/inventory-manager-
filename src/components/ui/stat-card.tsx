@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -27,7 +28,16 @@ function StatCard({
   className,
 }: {
   label: string;
-  value: string;
+  /**
+   * Usually one formatted figure.
+   *
+   * Widened from `string` for money that spans currencies: a total in dollars
+   * and rupees is two figures, and there is no rate here to make it one, so
+   * the tile stacks them. Anything phrasing-level is safe — the value renders
+   * inside a paragraph, so a caller stacking lines uses block `span`s rather
+   * than divs.
+   */
+  value: ReactNode;
   hint?: string;
   icon: LucideIcon;
   tone?: Tone;

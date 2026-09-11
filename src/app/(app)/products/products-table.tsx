@@ -11,6 +11,7 @@ import { ProductRowActions } from "@/app/(app)/products/product-row-actions";
 import type { SupplierOption } from "@/app/(app)/products/product-form-dialog";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { RecordMoney } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { Pagination } from "@/components/ui/pagination";
 import {
@@ -21,7 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import {
   hasActiveFilters,
   productsHref,
@@ -30,7 +31,6 @@ import {
   type ProductSortKey,
 } from "@/lib/product-query";
 import { listProducts } from "@/server/products";
-import { getCurrency } from "@/server/settings";
 import { cn } from "@/lib/utils";
 
 /**
@@ -59,10 +59,7 @@ async function ProductsTable({
    * than taking it as a prop costs no extra query — the page above has already
    * resolved it.
    */
-  const [result, currency] = await Promise.all([
-    listProducts(params),
-    getCurrency(),
-  ]);
+  const result = await listProducts(params);
 
   if (!result.ok) {
     return (
@@ -161,7 +158,10 @@ async function ProductsTable({
                 {product.sellingPrice === null ? (
                   <span className="text-muted-foreground">—</span>
                 ) : (
-                  formatCurrency(product.sellingPrice, currency)
+                  <RecordMoney
+                    amount={product.sellingPrice}
+                    currency={product.priceCurrency}
+                  />
                 )}
               </TableCell>
 

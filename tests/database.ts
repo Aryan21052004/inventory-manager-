@@ -329,6 +329,13 @@ export async function seedProduct(overrides: {
       category: overrides.category ?? "General",
       sellingPrice:
         overrides.sellingPrice === undefined ? "12.50" : overrides.sellingPrice,
+      /*
+       * Priced in the same currency the lot below is costed in. A fixture
+       * whose catalogue price carried no currency would be legacy-shaped
+       * data, which is a thing worth testing deliberately and not worth
+       * every unrelated test inheriting by accident.
+       */
+      priceCurrency: overrides.sellingPrice === null ? null : "USD",
       stockQuantity,
       status: overrides.status ?? "ACTIVE",
       supplierId: overrides.supplierId ?? null,

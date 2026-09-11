@@ -22,6 +22,7 @@ import {
 } from "@/server/products";
 
 import { signOut } from "./clerk-mock";
+import { amountIn } from "./money";
 import {
   createSupplier,
   resetDatabase,
@@ -551,7 +552,7 @@ describe("stock quantity", () => {
     expect(result.data.total).toBe(3);
     // Valued from the lots, not from a catalogue column: 40 × 2.00 + 10 × 3.00.
     // T-3 holds nothing, so its cost contributes nothing.
-    expect(Number(result.data.stockValue)).toBe(110);
+    expect(amountIn(result.data.stockValueByCurrency, "USD")).toBe(110);
     expect(result.data.uncostedUnits).toBe(0);
     // And no threshold counts survive on the tiles.
     expect(result.data).not.toHaveProperty("lowStock");
@@ -576,7 +577,7 @@ describe("stock quantity", () => {
     const result = await loadProductStats();
     if (!result.ok) throw new Error("expected stats to load");
 
-    expect(Number(result.data.stockValue)).toBe(80_000);
+    expect(amountIn(result.data.stockValueByCurrency, "USD")).toBe(80_000);
     expect(result.data.uncostedUnits).toBe(5);
   });
 });

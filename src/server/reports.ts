@@ -8,6 +8,12 @@ import {
   revenueStatuses,
   spendStatuses,
 } from "@/lib/money-basis";
+import type { Currency } from "@/lib/currency";
+import {
+  groupTotals,
+  NO_MONEY,
+  type MoneyByCurrency,
+} from "@/lib/money-by-currency";
 import { prisma } from "@/lib/prisma";
 import type { ReportParams } from "@/lib/report-query";
 import {
@@ -97,6 +103,19 @@ function orderBy(
   return Prisma.raw(`${column} ${direction === "asc" ? "ASC" : "DESC"} NULLS LAST`);
 }
 
+/**
+ * What every `GROUP BY <currency column>` in this file comes back as.
+ *
+ * One row per currency, already summed by Postgres. `currency` is null for
+ * rows recorded before per-record currency existed, and that null is a bucket
+ * of its own — never folded into a named currency, never filled in from the
+ * installation default.
+ */
+interface MoneySqlRow {
+  currency: Currency | null;
+  amount: string;
+}
+
 // ---------------------------------------------------------------------------
 // R1 · Stock valuation
 // ---------------------------------------------------------------------------
@@ -112,9 +131,9 @@ export interface ValuationRow {
   costedUnits: number;
   uncostedUnits: number;
   /** Value of the costed units, at what was actually paid for them. */
-  valueAtCost: string;
+  valueAtCostByCurrency: MoneyByCurrency;
   /** `stockQuantity × sellingPrice`. A different basis — see the note below. */
-  valueAtRetail: string;
+  valueAtRetailByCurrency: MoneyByCurrency;
   /** Percentage of units on hand whose cost is known. */
   coverage: number;
 }
@@ -124,15 +143,15 @@ export interface ValuationTotals {
   units: number;
   costedUnits: number;
   uncostedUnits: number;
-  valueAtCost: string;
-  valueAtRetail: string;
+  valueAtCostByCurrency: MoneyByCurrency;
+  valueAtRetailByCurrency: MoneyByCurrency;
   /** Units whose product carries no reference price. Excluded from retail. */
   unpricedUnits: number;
   coverage: number;
   /** Retired products still holding stock, so it can be told apart. */
   retiredProducts: number;
   retiredUnits: number;
-  retiredValueAtCost: string;
+  retiredValueAtCostByCurrency: MoneyByCurrency;
 }
 
 const VALUATION_SORTS: Record<string, string> = {
@@ -156,8 +175,22 @@ interface ValuationSqlRow {
   units: number;
   costed_units: number;
   uncosted_units: number;
-  value_at_cost: string;
-  value_at_retail: string;
+  /**
+   * The costed lots behind this product, one entry per currency they were
+   * bought in. Aggregated in the database, so nothing here has been added
+   * across two currencies. Null when the product holds no costed stock.
+   */
+  value_by_currency: { currency: Currency | null; amount: string }[] | null;
+  /** `stockQuantity × sellingPrice`, null when the product has no price. */
+  retail_value: string | null;
+  retail_currency: Currency | null;
+  /**
+   * Sort keys only, never displayed. Null when no single defensible number
+   * exists — several currencies, or one that was never recorded — which the
+   * `NULLS LAST` in `orderBy` then pushes to the end in both directions.
+   */
+  value_at_cost: string | null;
+  value_at_retail: string | null;
   unpriced_units: number;
   coverage: number;
 }
@@ -213,98 +246,170 @@ export async function loadValuationReport(
      * Lots are aggregated per product in a subquery rather than joined
      * directly: joining would multiply the product row by its lot count and
      * make `stock_quantity × selling_price` sum once per lot.
+     *
+     * Two levels, because a product's lots no longer share a currency. The
+     * inner grouping is by (product, currency) and is where the money is
+     * actually added; the outer one collects those subtotals into a JSON list
+     * and adds up only the unit counts, which are currency-agnostic. The
+     * scalar `value` that survives is deliberately null unless the product
+     * has exactly one known currency — it is the sort key, and there is no
+     * defensible single figure to sort a mixed row by.
      */
     const lotAggregate = Prisma.sql`
       SELECT
-        l.product_id,
-        SUM(l.quantity_remaining)                                      AS units,
-        SUM(l.quantity_remaining) FILTER (WHERE l.unit_cost IS NOT NULL) AS costed,
-        SUM(l.quantity_remaining) FILTER (WHERE l.unit_cost IS NULL)     AS uncosted,
-        SUM(l.quantity_remaining * l.unit_cost)
-          FILTER (WHERE l.unit_cost IS NOT NULL)                       AS value
-      FROM stock_lots l
-      WHERE l.quantity_remaining > 0
-      GROUP BY l.product_id
+        pc.product_id,
+        SUM(pc.units)::int                                             AS units,
+        SUM(pc.costed)::int                                            AS costed,
+        SUM(pc.uncosted)::int                                          AS uncosted,
+        JSONB_AGG(
+          JSONB_BUILD_OBJECT('currency', pc.cost_currency, 'amount', pc.value::text)
+          ORDER BY pc.cost_currency
+        ) FILTER (WHERE pc.value IS NOT NULL)                          AS value_by_currency,
+        CASE
+          WHEN COUNT(*) FILTER (WHERE pc.value IS NOT NULL) = 1
+           AND COUNT(*) FILTER (
+                 WHERE pc.value IS NOT NULL AND pc.cost_currency IS NULL
+               ) = 0
+          THEN MAX(pc.value) FILTER (WHERE pc.value IS NOT NULL)
+        END                                                            AS value
+      FROM (
+        SELECT
+          l.product_id,
+          l.cost_currency,
+          SUM(l.quantity_remaining)                                        AS units,
+          SUM(l.quantity_remaining) FILTER (WHERE l.unit_cost IS NOT NULL)  AS costed,
+          SUM(l.quantity_remaining) FILTER (WHERE l.unit_cost IS NULL)      AS uncosted,
+          SUM(l.quantity_remaining * l.unit_cost)
+            FILTER (WHERE l.unit_cost IS NOT NULL)                         AS value
+        FROM stock_lots l
+        WHERE l.quantity_remaining > 0
+        GROUP BY l.product_id, l.cost_currency
+      ) pc
+      GROUP BY pc.product_id
     `;
 
-    const [rows, totals, countRows] = await Promise.all([
-      prisma.$queryRaw<ValuationSqlRow[]>`
-        SELECT
-          p.id                                        AS product_id,
-          p.sku,
-          p.name,
-          p.category,
-          s.name                                      AS supplier_name,
-          p.status::text                              AS product_status,
-          COALESCE(lots.units, 0)::int                AS units,
-          COALESCE(lots.costed, 0)::int               AS costed_units,
-          COALESCE(lots.uncosted, 0)::int             AS uncosted_units,
-          COALESCE(lots.value, 0)::text               AS value_at_cost,
-          COALESCE(p.stock_quantity * p.selling_price, 0)::text AS value_at_retail,
-          CASE WHEN p.selling_price IS NULL THEN p.stock_quantity ELSE 0 END::int
-                                                      AS unpriced_units,
-          CASE
-            WHEN COALESCE(lots.units, 0) = 0 THEN 0
-            ELSE ROUND(COALESCE(lots.costed, 0)::numeric * 100 / lots.units, 1)
-          END::float8                                 AS coverage
-        FROM products p
-        LEFT JOIN suppliers s ON s.id = p.supplier_id
-        LEFT JOIN (${lotAggregate}) lots ON lots.product_id = p.id
-        WHERE ${where} AND p.stock_quantity > 0
-        ORDER BY ${orderBy(VALUATION_SORTS, params.sort, params.direction, "value")}, p.sku ASC
-        LIMIT ${params.pageSize} OFFSET ${(params.page - 1) * params.pageSize}
+    /* Only the products this report is looking at, for the money queries. */
+    const scope = Prisma.sql`${where} AND p.stock_quantity > 0`;
+
+    const [rows, totals, countRows, costMoney, retailMoney, retiredMoney] =
+      await Promise.all([
+        prisma.$queryRaw<ValuationSqlRow[]>`
+          SELECT
+            p.id                                        AS product_id,
+            p.sku,
+            p.name,
+            p.category,
+            s.name                                      AS supplier_name,
+            p.status::text                              AS product_status,
+            COALESCE(lots.units, 0)::int                AS units,
+            COALESCE(lots.costed, 0)::int               AS costed_units,
+            COALESCE(lots.uncosted, 0)::int             AS uncosted_units,
+            lots.value_by_currency                      AS value_by_currency,
+            (p.stock_quantity * p.selling_price)::text  AS retail_value,
+            CASE WHEN p.selling_price IS NULL THEN NULL ELSE p.price_currency END
+                                                        AS retail_currency,
+            lots.value::text                            AS value_at_cost,
+            CASE
+              WHEN p.selling_price IS NOT NULL AND p.price_currency IS NOT NULL
+              THEN (p.stock_quantity * p.selling_price)::text
+            END                                         AS value_at_retail,
+            CASE WHEN p.selling_price IS NULL THEN p.stock_quantity ELSE 0 END::int
+                                                        AS unpriced_units,
+            CASE
+              WHEN COALESCE(lots.units, 0) = 0 THEN 0
+              ELSE ROUND(COALESCE(lots.costed, 0)::numeric * 100 / lots.units, 1)
+            END::float8                                 AS coverage
+          FROM products p
+          LEFT JOIN suppliers s ON s.id = p.supplier_id
+          LEFT JOIN (${lotAggregate}) lots ON lots.product_id = p.id
+          WHERE ${where} AND p.stock_quantity > 0
+          ORDER BY ${orderBy(VALUATION_SORTS, params.sort, params.direction, "value")}, p.sku ASC
+          LIMIT ${params.pageSize} OFFSET ${(params.page - 1) * params.pageSize}
       `,
-      prisma.$queryRaw<
-        {
-          products: number;
-          units: number;
-          costed_units: number;
-          uncosted_units: number;
-          value_at_cost: string;
-          value_at_retail: string;
-          unpriced_units: number;
-          retired_products: number;
-          retired_units: number;
-          retired_value: string;
-        }[]
-      >`
-        SELECT
-          COUNT(*)::int                                            AS products,
-          COALESCE(SUM(COALESCE(lots.units, 0)), 0)::int           AS units,
-          COALESCE(SUM(COALESCE(lots.costed, 0)), 0)::int          AS costed_units,
-          COALESCE(SUM(COALESCE(lots.uncosted, 0)), 0)::int        AS uncosted_units,
-          COALESCE(SUM(COALESCE(lots.value, 0)), 0)::text          AS value_at_cost,
-          COALESCE(SUM(p.stock_quantity * p.selling_price)
-            FILTER (WHERE p.selling_price IS NOT NULL), 0)::text  AS value_at_retail,
-          COALESCE(SUM(p.stock_quantity)
-            FILTER (WHERE p.selling_price IS NULL), 0)::int       AS unpriced_units,
-          COUNT(*) FILTER (WHERE p.status <> 'ACTIVE')::int        AS retired_products,
-          COALESCE(SUM(COALESCE(lots.units, 0))
-            FILTER (WHERE p.status <> 'ACTIVE'), 0)::int           AS retired_units,
-          COALESCE(SUM(COALESCE(lots.value, 0))
-            FILTER (WHERE p.status <> 'ACTIVE'), 0)::text          AS retired_value
-        FROM products p
-        LEFT JOIN (${lotAggregate}) lots ON lots.product_id = p.id
-        WHERE ${where} AND p.stock_quantity > 0
+        /*
+         * Counts only. The three money figures that used to live here have
+         * moved into the grouped queries below, because summing `lots.value`
+           * over the whole page would add currencies together — which is the one
+           * thing this application must never do.
+           */
+          prisma.$queryRaw<
+            {
+              products: number;
+              units: number;
+              costed_units: number;
+              uncosted_units: number;
+              unpriced_units: number;
+              retired_products: number;
+              retired_units: number;
+            }[]
+          >`
+          SELECT
+            COUNT(*)::int                                            AS products,
+            COALESCE(SUM(COALESCE(lots.units, 0)), 0)::int           AS units,
+            COALESCE(SUM(COALESCE(lots.costed, 0)), 0)::int          AS costed_units,
+            COALESCE(SUM(COALESCE(lots.uncosted, 0)), 0)::int        AS uncosted_units,
+            COALESCE(SUM(p.stock_quantity)
+              FILTER (WHERE p.selling_price IS NULL), 0)::int       AS unpriced_units,
+            COUNT(*) FILTER (WHERE p.status <> 'ACTIVE')::int        AS retired_products,
+            COALESCE(SUM(COALESCE(lots.units, 0))
+              FILTER (WHERE p.status <> 'ACTIVE'), 0)::int           AS retired_units
+          FROM products p
+          LEFT JOIN (${lotAggregate}) lots ON lots.product_id = p.id
+          WHERE ${scope}
       `,
-      prisma.$queryRaw<{ n: number }[]>`
-        SELECT COUNT(*)::int AS n
-        FROM products p
-        WHERE ${where} AND p.stock_quantity > 0
+        prisma.$queryRaw<{ n: number }[]>`
+          SELECT COUNT(*)::int AS n
+          FROM products p
+          WHERE ${scope}
       `,
-    ]);
+        /*
+         * Cost value across the report, per currency. Joined to the lots rather
+         * than to the per-product aggregate so the grouping key is the lot's own
+         * currency.
+         */
+        prisma.$queryRaw<MoneySqlRow[]>`
+          SELECT
+            l.cost_currency                                AS currency,
+            SUM(l.quantity_remaining * l.unit_cost)::text  AS amount
+          FROM stock_lots l
+          JOIN products p ON p.id = l.product_id
+          WHERE ${scope}
+            AND l.quantity_remaining > 0
+            AND l.unit_cost IS NOT NULL
+          GROUP BY l.cost_currency
+      `,
+        /* Retail value, per the currency the catalogue price is quoted in. */
+        prisma.$queryRaw<MoneySqlRow[]>`
+          SELECT
+            p.price_currency                               AS currency,
+            SUM(p.stock_quantity * p.selling_price)::text  AS amount
+          FROM products p
+          WHERE ${scope} AND p.selling_price IS NOT NULL
+          GROUP BY p.price_currency
+      `,
+        /* The same cost basis, narrowed to products no longer active. */
+        prisma.$queryRaw<MoneySqlRow[]>`
+          SELECT
+            l.cost_currency                                AS currency,
+            SUM(l.quantity_remaining * l.unit_cost)::text  AS amount
+          FROM stock_lots l
+          JOIN products p ON p.id = l.product_id
+          WHERE ${scope}
+            AND p.status <> 'ACTIVE'
+            AND l.quantity_remaining > 0
+            AND l.unit_cost IS NOT NULL
+          GROUP BY l.cost_currency
+      `,
+      ]);
 
     const t = totals[0] ?? {
       products: 0,
       units: 0,
       costed_units: 0,
       uncosted_units: 0,
-      value_at_cost: "0",
-      value_at_retail: "0",
       unpriced_units: 0,
       retired_products: 0,
       retired_units: 0,
-      retired_value: "0",
     };
 
     const count = countRows[0]?.n ?? 0;
@@ -322,8 +427,13 @@ export async function loadValuationReport(
           units: row.units,
           costedUnits: row.costed_units,
           uncostedUnits: row.uncosted_units,
-          valueAtCost: row.value_at_cost,
-          valueAtRetail: row.value_at_retail,
+          valueAtCostByCurrency: groupTotals(row.value_by_currency ?? []),
+          valueAtRetailByCurrency:
+            row.retail_value === null
+              ? NO_MONEY
+              : groupTotals([
+                  { currency: row.retail_currency, amount: row.retail_value },
+                ]),
           unpricedUnits: row.unpriced_units,
           coverage: row.coverage,
         })),
@@ -332,8 +442,8 @@ export async function loadValuationReport(
           units: t.units,
           costedUnits: t.costed_units,
           uncostedUnits: t.uncosted_units,
-          valueAtCost: t.value_at_cost,
-          valueAtRetail: t.value_at_retail,
+          valueAtCostByCurrency: groupTotals(costMoney),
+          valueAtRetailByCurrency: groupTotals(retailMoney),
           unpricedUnits: t.unpriced_units,
           coverage:
             t.units === 0
@@ -341,7 +451,7 @@ export async function loadValuationReport(
               : Math.round((t.costed_units / t.units) * 1000) / 10,
           retiredProducts: t.retired_products,
           retiredUnits: t.retired_units,
-          retiredValueAtCost: t.retired_value,
+          retiredValueAtCostByCurrency: groupTotals(retiredMoney),
         },
         total: count,
         page: params.page,
@@ -374,13 +484,13 @@ export interface SalesRow {
    * constraint, so the distinction described a difference that can no longer
    * exist.
    */
-  revenue: string;
+  revenueByCurrency: MoneyByCurrency;
 }
 
 export interface SalesTotals {
   orders: number;
   units: number;
-  revenue: string;
+  revenueByCurrency: MoneyByCurrency;
 }
 
 const SALES_SORTS: Record<string, string> = {
@@ -397,7 +507,10 @@ interface SalesSqlRow {
   sublabel: string | null;
   orders: number;
   units: number;
-  revenue: string;
+  /** One entry per currency the group's orders were raised in. */
+  revenue_by_currency: { currency: Currency | null; amount: string }[] | null;
+  /** Sort key only. Null unless the group is in one known currency. */
+  revenue: string | null;
 }
 
 /**
@@ -502,27 +615,49 @@ export async function loadSalesReport(
       WHERE ${where}
     `;
 
-    const [rows, totals, countRows] = await Promise.all([
+    const [rows, totals, countRows, revenueMoney] = await Promise.all([
+      /*
+       * Grouped twice: by (group, currency) inside, where the money is added,
+       * and by the group alone outside, where the per-currency subtotals are
+       * collected into a list. An order carries exactly one currency, so
+       * `COUNT(DISTINCT o.id)` never counts the same order in two buckets and
+       * the order and unit counts add up across them safely.
+       */
       prisma.$queryRaw<SalesSqlRow[]>`
         SELECT
-          ${grouped.key}::text                        AS key,
-          ${grouped.label}::text                      AS label,
-          ${grouped.sublabel}                         AS sublabel,
-          COUNT(DISTINCT o.id)::int                   AS orders,
-          COALESCE(SUM(oi.quantity), 0)::int          AS units,
-          COALESCE(SUM(oi.total), 0)::text            AS revenue
-        ${base}
-        GROUP BY ${grouped.key}, ${grouped.label}, ${grouped.sublabel}
+          g.key,
+          g.label,
+          g.sublabel,
+          SUM(g.orders)::int                          AS orders,
+          SUM(g.units)::int                           AS units,
+          JSONB_AGG(
+            JSONB_BUILD_OBJECT('currency', g.currency, 'amount', g.revenue::text)
+            ORDER BY g.currency
+          )                                           AS revenue_by_currency,
+          CASE
+            WHEN COUNT(*) = 1 AND COUNT(*) FILTER (WHERE g.currency IS NULL) = 0
+            THEN MAX(g.revenue)::text
+          END                                         AS revenue
+        FROM (
+          SELECT
+            ${grouped.key}::text                        AS key,
+            ${grouped.label}::text                      AS label,
+            ${grouped.sublabel}                         AS sublabel,
+            o.currency                                  AS currency,
+            COUNT(DISTINCT o.id)::int                   AS orders,
+            COALESCE(SUM(oi.quantity), 0)::int          AS units,
+            COALESCE(SUM(oi.total), 0)                  AS revenue
+          ${base}
+          GROUP BY ${grouped.key}, ${grouped.label}, ${grouped.sublabel}, o.currency
+        ) g
+        GROUP BY g.key, g.label, g.sublabel
         ORDER BY ${orderBy(SALES_SORTS, params.sort, params.direction, "value")}, label ASC
         LIMIT ${params.pageSize} OFFSET ${(params.page - 1) * params.pageSize}
       `,
-      prisma.$queryRaw<
-        { orders: number; units: number; revenue: string }[]
-      >`
+      prisma.$queryRaw<{ orders: number; units: number }[]>`
         SELECT
           COUNT(DISTINCT o.id)::int          AS orders,
-          COALESCE(SUM(oi.quantity), 0)::int AS units,
-          COALESCE(SUM(oi.total), 0)::text   AS revenue
+          COALESCE(SUM(oi.quantity), 0)::int AS units
         ${base}
       `,
       prisma.$queryRaw<{ n: number }[]>`
@@ -530,9 +665,17 @@ export async function loadSalesReport(
           SELECT ${grouped.key} ${base} GROUP BY ${grouped.key}
         ) g
       `,
+      /* Revenue across the whole report, split by the order's currency. */
+      prisma.$queryRaw<MoneySqlRow[]>`
+        SELECT
+          o.currency                        AS currency,
+          COALESCE(SUM(oi.total), 0)::text  AS amount
+        ${base}
+        GROUP BY o.currency
+      `,
     ]);
 
-    const t = totals[0] ?? { orders: 0, units: 0, revenue: "0" };
+    const t = totals[0] ?? { orders: 0, units: 0 };
     const count = countRows[0]?.n ?? 0;
 
     return {
@@ -544,12 +687,12 @@ export async function loadSalesReport(
           sublabel: row.sublabel,
           orders: row.orders,
           units: row.units,
-          revenue: row.revenue,
+          revenueByCurrency: groupTotals(row.revenue_by_currency ?? []),
         })),
         totals: {
           orders: t.orders,
           units: t.units,
-          revenue: t.revenue,
+          revenueByCurrency: groupTotals(revenueMoney),
         },
         total: count,
         page: params.page,
@@ -573,15 +716,15 @@ export interface PurchaseSpendRow {
   purchases: number;
   units: number;
   /** RECEIVED only — goods actually delivered. */
-  receivedSpend: string;
+  receivedSpendByCurrency: MoneyByCurrency;
 }
 
 export interface PurchaseSpendTotals {
   purchases: number;
   units: number;
-  receivedSpend: string;
+  receivedSpendByCurrency: MoneyByCurrency;
   /** PENDING — placed with a supplier, not yet arrived. Never counted as spend. */
-  committedSpend: string;
+  committedSpendByCurrency: MoneyByCurrency;
   committedPurchases: number;
 }
 
@@ -598,7 +741,11 @@ interface PurchaseSqlRow {
   sublabel: string | null;
   purchases: number;
   units: number;
-  received_spend: string;
+  /** One entry per currency the group's purchases were raised in. */
+  received_spend_by_currency:
+    { currency: Currency | null; amount: string }[] | null;
+  /** Sort key only. Null unless the group is in one known currency. */
+  received_spend: string | null;
 }
 
 /**
@@ -679,49 +826,83 @@ export async function loadPurchaseSpendReport(
       WHERE ${where}
     `;
 
-    const [rows, totals, committed, countRows] = await Promise.all([
+    const [rows, totals, committed, countRows, spendMoney] = await Promise.all([
+      /*
+       * The same two-level grouping the sales report uses: (group, currency)
+       * inside where the money is added, group alone outside where the
+       * subtotals are gathered. A purchase has one currency, so the purchase
+       * and unit counts still add up across the buckets.
+       */
       prisma.$queryRaw<PurchaseSqlRow[]>`
         SELECT
-          ${grouped.key}::text               AS key,
-          ${grouped.label}::text             AS label,
-          ${grouped.sublabel}                AS sublabel,
-          COUNT(DISTINCT p.id)::int          AS purchases,
-          COALESCE(SUM(pi.quantity), 0)::int AS units,
-          COALESCE(SUM(pi.total), 0)::text   AS received_spend
-        ${base}
-        GROUP BY ${grouped.key}, ${grouped.label}, ${grouped.sublabel}
+          g.key,
+          g.label,
+          g.sublabel,
+          SUM(g.purchases)::int              AS purchases,
+          SUM(g.units)::int                  AS units,
+          JSONB_AGG(
+            JSONB_BUILD_OBJECT('currency', g.currency, 'amount', g.spend::text)
+            ORDER BY g.currency
+          )                                  AS received_spend_by_currency,
+          CASE
+            WHEN COUNT(*) = 1 AND COUNT(*) FILTER (WHERE g.currency IS NULL) = 0
+            THEN MAX(g.spend)::text
+          END                                AS received_spend
+        FROM (
+          SELECT
+            ${grouped.key}::text               AS key,
+            ${grouped.label}::text             AS label,
+            ${grouped.sublabel}                AS sublabel,
+            p.currency                         AS currency,
+            COUNT(DISTINCT p.id)::int          AS purchases,
+            COALESCE(SUM(pi.quantity), 0)::int AS units,
+            COALESCE(SUM(pi.total), 0)         AS spend
+          ${base}
+          GROUP BY ${grouped.key}, ${grouped.label}, ${grouped.sublabel}, p.currency
+        ) g
+        GROUP BY g.key, g.label, g.sublabel
         ORDER BY ${orderBy(PURCHASE_SORTS, params.sort, params.direction, "value")}, label ASC
         LIMIT ${params.pageSize} OFFSET ${(params.page - 1) * params.pageSize}
       `,
-      prisma.$queryRaw<{ purchases: number; units: number; spend: string }[]>`
+      prisma.$queryRaw<{ purchases: number; units: number }[]>`
         SELECT
           COUNT(DISTINCT p.id)::int          AS purchases,
-          COALESCE(SUM(pi.quantity), 0)::int AS units,
-          COALESCE(SUM(pi.total), 0)::text   AS spend
+          COALESCE(SUM(pi.quantity), 0)::int AS units
         ${base}
       `,
       /*
        * Committed spend is dated by `purchase_date`, not `received_at` —
        * nothing has been received, so there is no receipt date to filter on.
        */
-      prisma.$queryRaw<{ n: number; total: string }[]>`
+      prisma.$queryRaw<
+        { n: number; currency: Currency | null; amount: string }[]
+      >`
         SELECT
-          COUNT(*)::int                  AS n,
-          COALESCE(SUM(p.total), 0)::text AS total
+          COUNT(*)::int                   AS n,
+          p.currency                      AS currency,
+          COALESCE(SUM(p.total), 0)::text AS amount
         FROM purchases p
         WHERE p.status = ANY(${committedSpendStatuses()}::"PurchaseStatus"[])
           AND ${dateFilter(Prisma.sql`p.purchase_date`, params.from, params.to)}
           ${params.supplierId ? Prisma.sql`AND p.supplier_id = ${params.supplierId}` : Prisma.empty}
+        GROUP BY p.currency
       `,
       prisma.$queryRaw<{ n: number }[]>`
         SELECT COUNT(*)::int AS n FROM (
           SELECT ${grouped.key} ${base} GROUP BY ${grouped.key}
         ) g
       `,
+      /* Received spend across the whole report, split by purchase currency. */
+      prisma.$queryRaw<MoneySqlRow[]>`
+        SELECT
+          p.currency                       AS currency,
+          COALESCE(SUM(pi.total), 0)::text AS amount
+        ${base}
+        GROUP BY p.currency
+      `,
     ]);
 
-    const t = totals[0] ?? { purchases: 0, units: 0, spend: "0" };
-    const c = committed[0] ?? { n: 0, total: "0" };
+    const t = totals[0] ?? { purchases: 0, units: 0 };
     const count = countRows[0]?.n ?? 0;
 
     return {
@@ -733,14 +914,16 @@ export async function loadPurchaseSpendReport(
           sublabel: row.sublabel,
           purchases: row.purchases,
           units: row.units,
-          receivedSpend: row.received_spend,
+          receivedSpendByCurrency: groupTotals(
+            row.received_spend_by_currency ?? [],
+          ),
         })),
         totals: {
           purchases: t.purchases,
           units: t.units,
-          receivedSpend: t.spend,
-          committedSpend: c.total,
-          committedPurchases: c.n,
+          receivedSpendByCurrency: groupTotals(spendMoney),
+          committedSpendByCurrency: groupTotals(committed),
+          committedPurchases: committed.reduce((n, row) => n + row.n, 0),
         },
         total: count,
         page: params.page,

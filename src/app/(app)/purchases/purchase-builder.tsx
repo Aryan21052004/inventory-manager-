@@ -48,6 +48,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { CurrencySelect } from "@/components/ui/currency-select";
+import { formatEntry } from "@/components/ui/money";
 import { useCurrency } from "@/components/layout/currency-provider";
 import type { Currency } from "@/lib/currency";
 import {
@@ -90,6 +91,8 @@ export interface ProductOption {
    * never been received on a purchase.
    */
   lastPaidUnitCost: string | null;
+  /** What that payment was made in. Null together with the cost. */
+  lastPaidCurrency: Currency | null;
   lastPaidAt: Date | null;
   stockQuantity: number;
   isActive: boolean;
@@ -507,7 +510,10 @@ function PurchaseBuilder({
                             ) : (
                               <>
                                 <span className="font-medium">
-                                  {formatCurrency(option.lastPaidUnitCost, currency)}
+                                  {formatEntry({
+                                    currency: option.lastPaidCurrency,
+                                    amount: option.lastPaidUnitCost,
+                                  })}
                                 </span>
                                 {option.lastPaidAt ? (
                                   <span className="block text-xs font-normal text-muted-foreground">

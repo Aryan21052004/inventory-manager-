@@ -6,6 +6,7 @@ import { CustomerFilters } from "@/app/(app)/customers/customer-filters";
 import { CustomersTable } from "@/app/(app)/customers/customers-table";
 import { NewCustomerButton } from "@/app/(app)/customers/new-customer-button";
 import { Card, CardContent } from "@/components/ui/card";
+import { MoneyLines } from "@/components/ui/money";
 import { PageHeader } from "@/components/ui/page-header";
 import { TableSkeleton } from "@/components/ui/skeleton";
 import { StatCard } from "@/components/ui/stat-card";
@@ -14,10 +15,9 @@ import {
   toCustomerSearchParams,
   type RawSearchParams,
 } from "@/lib/customer-query";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import { getCurrentUser } from "@/server/auth";
 import { loadCustomerStats } from "@/server/customers";
-import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Customers" };
 
@@ -47,10 +47,9 @@ export default async function CustomersPage({
 }) {
   const params = parseCustomerListParams(await searchParams);
 
-  const [user, stats, currency] = await Promise.all([
+  const [user, stats] = await Promise.all([
     getCurrentUser(),
     loadCustomerStats(),
-    getCurrency(),
   ]);
 
   const canManage = user?.role === "ADMIN";
@@ -86,7 +85,7 @@ export default async function CustomersPage({
           />
           <StatCard
             label="Lifetime value"
-            value={formatCurrency(stats.data.lifetimeValue, currency)}
+            value={<MoneyLines total={stats.data.lifetimeValueByCurrency} stackedClassName="text-lg" />}
             hint="Confirmed and completed orders"
             icon={Wallet}
             tone="success"

@@ -9,6 +9,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
+import { RecordMoney } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { Pagination } from "@/components/ui/pagination";
 import { PurchaseStatusBadge } from "@/components/ui/purchase-status-badge";
@@ -20,7 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
+import { formatDate, formatNumber } from "@/lib/format";
 import {
   hasActivePurchaseFilters,
   purchasesHref,
@@ -29,7 +30,6 @@ import {
   type PurchaseSortKey,
 } from "@/lib/purchase-query";
 import { listPurchases } from "@/server/purchases";
-import { getCurrency } from "@/server/settings";
 import { cn } from "@/lib/utils";
 
 /**
@@ -47,10 +47,7 @@ async function PurchasesTable({ params }: { params: PurchaseListParams }) {
    * than taking it as a prop costs no extra query — the page above has already
    * resolved it.
    */
-  const [result, currency] = await Promise.all([
-    listPurchases(params),
-    getCurrency(),
-  ]);
+  const result = await listPurchases(params);
 
   if (!result.ok) {
     return (
@@ -142,7 +139,7 @@ async function PurchasesTable({ params }: { params: PurchaseListParams }) {
               </TableCell>
 
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(purchase.total, currency)}
+                <RecordMoney amount={purchase.total} currency={purchase.currency} />
               </TableCell>
 
               <TableCell>

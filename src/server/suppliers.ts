@@ -4,6 +4,12 @@ import type { Prisma } from "@/generated/prisma/client";
 import type { PurchaseStatus, SupplierStatus } from "@/generated/prisma/enums";
 import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/errors";
 import { SPEND_STATUSES } from "@/lib/money-basis";
+import type { Currency } from "@/lib/currency";
+import {
+  groupTotals,
+  NO_MONEY,
+  type MoneyByCurrency,
+} from "@/lib/money-by-currency";
 import { prisma } from "@/lib/prisma";
 import type { SupplierListParams, SupplierSortKey } from "@/lib/supplier-query";
 import {
@@ -64,7 +70,7 @@ export interface SupplierListItem {
   /** Every purchase ever raised with them, whatever became of it. */
   purchaseCount: number;
   /** Sum of their RECEIVED purchase totals — money actually spent. */
-  totalPurchased: string;
+  totalPurchasedByCurrency: MoneyByCurrency;
 }
 
 export interface SupplierListPage {
@@ -81,8 +87,8 @@ export interface SupplierStats {
   archived: number;
   /** How many have ever been bought from — the rest are contacts, not vendors yet. */
   withPurchases: number;
-  /** Procurement spend across every supplier, on the same RECEIVED basis. */
-  totalPurchased: string;
+  /** Procurement spend across every supplier, on the RECEIVED basis, per currency. */
+  totalPurchasedByCurrency: MoneyByCurrency;
 }
 
 export interface SupplierPurchaseLine {
@@ -90,6 +96,8 @@ export interface SupplierPurchaseLine {
   purchaseNumber: string;
   status: PurchaseStatus;
   total: string;
+  /** The currency the purchase was raised in. Null on a legacy purchase. */
+  currency: Currency | null;
   itemCount: number;
   purchaseDate: Date;
   receivedAt: Date | null;
@@ -114,8 +122,8 @@ export interface SupplierProductLine {
 export interface SupplierStockOnHand {
   /** Units remaining across every lot traceable to this supplier. */
   units: number;
-  /** Value of the units whose acquisition cost is known. */
-  value: string;
+  /** Value of the units whose acquisition cost is known, per currency. */
+  valueByCurrency: MoneyByCurrency;
   /** Units the value above covers. */
   costedUnits: number;
   /** Units with no established cost — excluded from the value, never guessed. */
@@ -139,7 +147,7 @@ export interface SupplierDetail {
 
   purchaseCount: number;
   receivedCount: number;
-  totalPurchased: string;
+  totalPurchasedByCurrency: MoneyByCurrency;
   firstPurchaseAt: Date | null;
   lastPurchaseAt: Date | null;
 
@@ -277,11 +285,11 @@ function buildOrderBy(
  */
 async function spendBySupplier(
   supplierIds: string[],
-): Promise<Map<string, string>> {
+): Promise<Map<string, MoneyByCurrency>> {
   if (supplierIds.length === 0) return new Map();
 
   const rows = await prisma.purchase.groupBy({
-    by: ["supplierId"],
+    by: ["supplierId", "currency"],
     where: {
       supplierId: { in: supplierIds },
       status: { in: [...SPEND_STATUSES] },
@@ -289,8 +297,28 @@ async function spendBySupplier(
     _sum: { total: true },
   });
 
+  /*
+   * One entry per supplier, each holding a total per currency. Grouped in the
+   * database by (supplier, currency), so nothing is ever added across two of
+   * them on the way out — a supplier invoiced in both dollars and euros has
+   * two figures, not one meaningless sum.
+   */
+  const bySupplier = new Map<
+    string,
+    { currency: Currency | null; amount: string }[]
+  >();
+
+  for (const row of rows) {
+    const list = bySupplier.get(row.supplierId) ?? [];
+    list.push({
+      currency: row.currency,
+      amount: row._sum.total?.toString() ?? "0",
+    });
+    bySupplier.set(row.supplierId, list);
+  }
+
   return new Map(
-    rows.map((row) => [row.supplierId, row._sum.total?.toString() ?? "0"]),
+    [...bySupplier].map(([id, list]) => [id, groupTotals(list)] as const),
   );
 }
 
@@ -341,7 +369,7 @@ export async function listSuppliers(
           createdAt: row.createdAt,
           productCount: row._count.products,
           purchaseCount: row._count.purchases,
-          totalPurchased: spend.get(row.id) ?? "0",
+          totalPurchasedByCurrency: spend.get(row.id) ?? NO_MONEY,
         })),
         total,
         page: params.page,
@@ -363,7 +391,7 @@ interface SupplierStatsRow {
 
 export async function loadSupplierStats(): Promise<Result<SupplierStats>> {
   try {
-    const [rows, spend] = await Promise.all([
+    const [rows, spendByCurrency] = await Promise.all([
       /*
        * One pass over suppliers for the four counts. `with_purchases` is an
        * EXISTS rather than a join so a supplier with fifty purchases still
@@ -381,7 +409,9 @@ export async function loadSupplierStats(): Promise<Result<SupplierStats>> {
           )::int                                                 AS with_purchases
         FROM suppliers
       `,
-      prisma.purchase.aggregate({
+      /* Spend per currency — never one figure spanning several. */
+      prisma.purchase.groupBy({
+        by: ["currency"],
         where: { status: { in: [...SPEND_STATUSES] } },
         _sum: { total: true },
       }),
@@ -401,7 +431,12 @@ export async function loadSupplierStats(): Promise<Result<SupplierStats>> {
         active: totals.active,
         archived: totals.archived,
         withPurchases: totals.with_purchases,
-        totalPurchased: spend._sum.total?.toString() ?? "0",
+        totalPurchasedByCurrency: groupTotals(
+          spendByCurrency.map((row) => ({
+            currency: row.currency,
+            amount: row._sum.total?.toString() ?? "0",
+          })),
+        ),
       },
     };
   } catch (error) {
@@ -428,22 +463,20 @@ interface StockOnHandRow {
   units: number;
   costed_units: number;
   uncosted_units: number;
-  value: string;
   product_count: number;
 }
 
 async function loadStockOnHand(
   supplierId: string,
 ): Promise<SupplierStockOnHand> {
-  const rows = await prisma.$queryRaw<StockOnHandRow[]>`
+  const [rows, value] = await Promise.all([
+    prisma.$queryRaw<StockOnHandRow[]>`
     SELECT
       COALESCE(SUM(l.quantity_remaining), 0)::int                   AS units,
       COALESCE(SUM(l.quantity_remaining)
         FILTER (WHERE l.unit_cost IS NOT NULL), 0)::int             AS costed_units,
       COALESCE(SUM(l.quantity_remaining)
         FILTER (WHERE l.unit_cost IS NULL), 0)::int                 AS uncosted_units,
-      COALESCE(SUM(l.quantity_remaining * l.unit_cost)
-        FILTER (WHERE l.unit_cost IS NOT NULL), 0)::text            AS value,
       COUNT(DISTINCT l.product_id)::int                             AS product_count
     FROM stock_lots l
     JOIN purchases p
@@ -451,19 +484,37 @@ async function loadStockOnHand(
      AND l.source_type = 'PURCHASE'
     WHERE p.supplier_id = ${supplierId}
       AND l.quantity_remaining > 0
-  `;
+  `,
+    /*
+     * Valued once per currency the stock was bought in. Lots from one supplier
+     * usually agree, but nothing guarantees it — a supplier invoicing in two
+     * currencies would otherwise have had them added together here.
+     */
+    prisma.$queryRaw<{ currency: Currency | null; amount: string }[]>`
+      SELECT
+        l.cost_currency                                AS currency,
+        SUM(l.quantity_remaining * l.unit_cost)::text  AS amount
+      FROM stock_lots l
+      JOIN purchases p
+        ON p.id = l.source_id
+       AND l.source_type = 'PURCHASE'
+      WHERE p.supplier_id = ${supplierId}
+        AND l.quantity_remaining > 0
+        AND l.unit_cost IS NOT NULL
+      GROUP BY l.cost_currency
+    `,
+  ]);
 
   const row = rows[0] ?? {
     units: 0,
     costed_units: 0,
     uncosted_units: 0,
-    value: "0",
     product_count: 0,
   };
 
   return {
     units: row.units,
-    value: row.value,
+    valueByCurrency: groupTotals(value),
     costedUnits: row.costed_units,
     uncostedUnits: row.uncosted_units,
     productCount: row.product_count,
@@ -481,6 +532,7 @@ export async function getSupplierDetail(
     const [
       aggregate,
       received,
+      receivedByCurrency,
       bounds,
       purchases,
       purchaseCount,
@@ -495,6 +547,11 @@ export async function getSupplierDetail(
       prisma.purchase.aggregate({
         where: { supplierId: id, status: { in: [...SPEND_STATUSES] } },
         _count: { _all: true },
+      }),
+      /* The same received purchases, totalled per currency. */
+      prisma.purchase.groupBy({
+        by: ["currency"],
+        where: { supplierId: id, status: { in: [...SPEND_STATUSES] } },
         _sum: { total: true },
       }),
       prisma.purchase.aggregate({
@@ -511,6 +568,7 @@ export async function getSupplierDetail(
           purchaseNumber: true,
           status: true,
           total: true,
+          currency: true,
           purchaseDate: true,
           receivedAt: true,
           _count: { select: { items: true } },
@@ -551,7 +609,12 @@ export async function getSupplierDetail(
 
         purchaseCount: aggregate._count._all,
         receivedCount: received._count._all,
-        totalPurchased: received._sum.total?.toString() ?? "0",
+        totalPurchasedByCurrency: groupTotals(
+          receivedByCurrency.map((row) => ({
+            currency: row.currency,
+            amount: row._sum.total?.toString() ?? "0",
+          })),
+        ),
         firstPurchaseAt: bounds._min.purchaseDate,
         lastPurchaseAt: bounds._max.purchaseDate,
 
@@ -560,6 +623,7 @@ export async function getSupplierDetail(
           purchaseNumber: row.purchaseNumber,
           status: row.status,
           total: row.total.toString(),
+          currency: row.currency,
           itemCount: row._count.items,
           purchaseDate: row.purchaseDate,
           receivedAt: row.receivedAt,
@@ -683,7 +747,13 @@ function isMissingRecord(error: unknown): boolean {
 }
 
 function parseOrThrow<T>(
-  schema: { safeParse: (input: unknown) => { success: boolean; data?: T; error?: unknown } },
+  schema: {
+    safeParse: (input: unknown) => {
+      success: boolean;
+      data?: T;
+      error?: unknown;
+    };
+  },
   input: unknown,
 ): T {
   const parsed = schema.safeParse(input);
@@ -692,8 +762,7 @@ function parseOrThrow<T>(
     const error = parsed.error as Parameters<typeof toSupplierFieldErrors>[0];
     const errors = toSupplierFieldErrors(error);
     const field = Object.keys(errors)[0] as
-      | keyof SupplierFieldErrors
-      | undefined;
+      keyof SupplierFieldErrors | undefined;
 
     throw new AppError("BAD_REQUEST", firstSupplierIssue(error), { field });
   }

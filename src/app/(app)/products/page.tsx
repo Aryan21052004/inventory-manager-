@@ -6,10 +6,11 @@ import { NewProductButton } from "@/app/(app)/products/new-product-button";
 import { ProductFilters } from "@/app/(app)/products/product-filters";
 import { ProductsTable } from "@/app/(app)/products/products-table";
 import { Card, CardContent } from "@/components/ui/card";
+import { MoneyLines } from "@/components/ui/money";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatCard } from "@/components/ui/stat-card";
 import { TableSkeleton } from "@/components/ui/skeleton";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import {
   parseProductListParams,
   toSearchParams,
@@ -18,7 +19,6 @@ import {
 import { getCurrentUser } from "@/server/auth";
 import { loadCategories, loadProductStats } from "@/server/products";
 import { loadSupplierOptions } from "@/server/suppliers";
-import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Products" };
 
@@ -48,12 +48,11 @@ export default async function ProductsPage({
 }) {
   const params = parseProductListParams(await searchParams);
 
-  const [user, stats, categories, suppliers, currency] = await Promise.all([
+  const [user, stats, categories, suppliers] = await Promise.all([
     getCurrentUser(),
     loadProductStats(),
     loadCategories(),
     loadSupplierOptions(),
-    getCurrency(),
   ]);
 
   const canManage = user?.role === "ADMIN";
@@ -80,7 +79,7 @@ export default async function ProductsPage({
           />
           <StatCard
             label="Stock value"
-            value={formatCurrency(stats.data.stockValue, currency)}
+            value={<MoneyLines total={stats.data.stockValueByCurrency} stackedClassName="text-lg" />}
             hint={
               stats.data.uncostedUnits > 0
                 ? `Excludes ${formatNumber(stats.data.uncostedUnits)} ${stats.data.uncostedUnits === 1 ? "unit" : "units"} of unknown cost`

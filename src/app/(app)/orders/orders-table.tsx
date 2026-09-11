@@ -9,6 +9,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
+import { RecordMoney } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { OrderStatusBadge } from "@/components/ui/order-status-badge";
 import { Pagination } from "@/components/ui/pagination";
@@ -20,7 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatCurrency, formatDateTime, formatNumber } from "@/lib/format";
+import { formatDateTime, formatNumber } from "@/lib/format";
 import {
   hasActiveOrderFilters,
   ordersHref,
@@ -30,7 +31,6 @@ import {
 } from "@/lib/order-query";
 import { canFulfilOutstanding } from "@/lib/order-status";
 import { listOrders } from "@/server/orders";
-import { getCurrency } from "@/server/settings";
 import { cn } from "@/lib/utils";
 
 /**
@@ -48,10 +48,7 @@ async function OrdersTable({ params }: { params: OrderListParams }) {
    * than taking it as a prop costs no extra query — the page above has already
    * resolved it.
    */
-  const [result, currency] = await Promise.all([
-    listOrders(params),
-    getCurrency(),
-  ]);
+  const result = await listOrders(params);
 
   if (!result.ok) {
     return (
@@ -145,7 +142,7 @@ async function OrdersTable({ params }: { params: OrderListParams }) {
               </TableCell>
 
               <TableCell className="tabular text-right font-medium">
-                {formatCurrency(order.total, currency)}
+                <RecordMoney amount={order.total} currency={order.currency} />
               </TableCell>
 
               <TableCell>

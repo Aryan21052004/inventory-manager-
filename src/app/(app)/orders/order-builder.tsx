@@ -49,6 +49,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { CurrencySelect } from "@/components/ui/currency-select";
+import { formatEntry } from "@/components/ui/money";
 import { useCurrency } from "@/components/layout/currency-provider";
 import type { Currency } from "@/lib/currency";
 import {
@@ -111,6 +112,8 @@ export interface ProductOption {
    * more: once a line exists, its price lives in `OrderLine.unitPrice`.
    */
   sellingPrice: string | null;
+  /** What that price is quoted in. Null when it was never recorded. */
+  priceCurrency: Currency | null;
   stockQuantity: number;
   /**
    * False only for a line already on an order whose product has since been
@@ -585,7 +588,10 @@ function OrderBuilder({
                             {option.sellingPrice === null ? (
                               <span className="text-muted-foreground">—</span>
                             ) : (
-                              formatCurrency(option.sellingPrice, currency)
+                              formatEntry({
+                                currency: option.priceCurrency,
+                                amount: option.sellingPrice,
+                              })
                             )}
                           </TableCell>
                           <TableCell className="text-right">

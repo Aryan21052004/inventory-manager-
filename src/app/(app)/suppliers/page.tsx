@@ -6,10 +6,11 @@ import { NewSupplierButton } from "@/app/(app)/suppliers/new-supplier-button";
 import { SupplierFilters } from "@/app/(app)/suppliers/supplier-filters";
 import { SuppliersTable } from "@/app/(app)/suppliers/suppliers-table";
 import { Card, CardContent } from "@/components/ui/card";
+import { MoneyLines } from "@/components/ui/money";
 import { PageHeader } from "@/components/ui/page-header";
 import { TableSkeleton } from "@/components/ui/skeleton";
 import { StatCard } from "@/components/ui/stat-card";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import {
   parseSupplierListParams,
   toSupplierSearchParams,
@@ -17,7 +18,6 @@ import {
 } from "@/lib/supplier-query";
 import { getCurrentUser } from "@/server/auth";
 import { loadSupplierStats } from "@/server/suppliers";
-import { getCurrency } from "@/server/settings";
 
 export const metadata: Metadata = { title: "Suppliers" };
 
@@ -48,10 +48,9 @@ export default async function SuppliersPage({
 }) {
   const params = parseSupplierListParams(await searchParams);
 
-  const [user, stats, currency] = await Promise.all([
+  const [user, stats] = await Promise.all([
     getCurrentUser(),
     loadSupplierStats(),
-    getCurrency(),
   ]);
 
   const canManage = user?.role === "ADMIN";
@@ -86,7 +85,7 @@ export default async function SuppliersPage({
           />
           <StatCard
             label="Total purchased"
-            value={formatCurrency(stats.data.totalPurchased, currency)}
+            value={<MoneyLines total={stats.data.totalPurchasedByCurrency} stackedClassName="text-lg" />}
             hint="Received purchases only"
             icon={Wallet}
             tone="success"

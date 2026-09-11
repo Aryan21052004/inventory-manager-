@@ -26,6 +26,7 @@ import {
 import { NO_SUPPLIER } from "@/lib/validation/product";
 
 import { signOut } from "./clerk-mock";
+import { amountIn } from "./money";
 import {
   createSupplier as seedSupplier,
   expectLotsReconcile,
@@ -1111,7 +1112,7 @@ describe("the suppliers list", () => {
     const row = result.data.items[0]!;
     expect(row.productCount).toBe(1);
     expect(row.purchaseCount).toBe(2);
-    expect(Number(row.totalPurchased)).toBe(100);
+    expect(amountIn(row.totalPurchasedByCurrency, "INR")).toBe(100);
   });
 });
 
@@ -1136,7 +1137,7 @@ describe("supplier statistics", () => {
     expect(stats.data.active).toBe(2);
     expect(stats.data.archived).toBe(1);
     expect(stats.data.withPurchases).toBe(1);
-    expect(Number(stats.data.totalPurchased)).toBe(100);
+    expect(amountIn(stats.data.totalPurchasedByCurrency, "INR")).toBe(100);
   });
 
   it("counts a supplier with many purchases once", async () => {
@@ -1179,7 +1180,7 @@ describe("supplier detail", () => {
     const stock = result.data.stockOnHand;
     // 10 × 8000 + 5 × 300 = 81,500
     expect(stock.units).toBe(15);
-    expect(Number(stock.value)).toBe(81_500);
+    expect(amountIn(stock.valueByCurrency, "INR")).toBe(81_500);
     expect(stock.costedUnits).toBe(15);
     expect(stock.uncostedUnits).toBe(0);
     expect(stock.productCount).toBe(2);
@@ -1212,7 +1213,9 @@ describe("supplier detail", () => {
 
     // The pre-existing 40 units are not traceable to this supplier at all.
     expect(result.data.stockOnHand.units).toBe(10);
-    expect(Number(result.data.stockOnHand.value)).toBe(80_000);
+    expect(amountIn(result.data.stockOnHand.valueByCurrency, "INR")).toBe(
+      80_000,
+    );
     expect(result.data.stockOnHand.uncostedUnits).toBe(0);
   });
 

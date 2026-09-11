@@ -56,6 +56,8 @@ export interface ReturnedLotSummary {
   lotId: string;
   quantity: number;
   unitCost: string | null;
+  /** What that cost is in, carried back from the draw. Null when it is. */
+  costCurrency: Currency | null;
   originLotId: string;
 }
 
@@ -455,6 +457,7 @@ export async function recordSalesReturn(
             layer.unitCostCents === null
               ? null
               : (layer.unitCostCents / 100).toFixed(2),
+          costCurrency: layer.costCurrency,
           originLotId: layer.lotId,
         });
       }

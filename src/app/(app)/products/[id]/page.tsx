@@ -25,6 +25,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import { MoneyLines, RecordMoney, formatEntry } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { PageHeader } from "@/components/ui/page-header";
 import {
@@ -35,9 +36,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { Currency } from "@/lib/currency";
 import {
-  formatCurrency,
   formatDate,
   formatDateTime,
   formatDelta,
@@ -48,6 +47,8 @@ import {
   QUARANTINED_LOT_STATUS,
   SALEABLE_LOT_STATUS,
 } from "@/lib/lot-status";
+import type { Currency } from "@/lib/currency";
+import type { MoneyByCurrency } from "@/lib/money-by-currency";
 import { LotActions } from "@/app/(app)/lots/lot-actions";
 import { getCurrentUser } from "@/server/auth";
 import {
@@ -55,7 +56,6 @@ import {
   loadCategories,
   type ProductDetail,
 } from "@/server/products";
-import { getCurrency } from "@/server/settings";
 import { loadSupplierOptions } from "@/server/suppliers";
 import { cn } from "@/lib/utils";
 
@@ -90,10 +90,9 @@ export default async function ProductDetailPage({
 }) {
   const { id } = await params;
 
-  const [result, user, currency] = await Promise.all([
+  const [result, user] = await Promise.all([
     getProductDetail(id),
     getCurrentUser(),
-    getCurrency(),
   ]);
 
   if (!result.ok) {
@@ -162,7 +161,7 @@ export default async function ProductDetailPage({
         />
       </div>
 
-      <StockSummary product={product} currency={currency} />
+      <StockSummary product={product} />
 
       {/*
         One panel per open batch, because that is where paperwork lives now.
@@ -258,10 +257,9 @@ export default async function ProductDetailPage({
             </DetailRow>
             <DetailRow label="Average cost on hand">
               <AverageCost
-                value={product.stockValue}
+                total={product.stockValueByCurrency}
                 costedUnits={product.costedUnits}
                 uncostedUnits={product.uncostedUnits}
-                currency={currency}
               />
             </DetailRow>
             <DetailRow label="Reference price">
@@ -271,17 +269,20 @@ export default async function ProductDetailPage({
                 </span>
               ) : (
                 <span className="tabular text-sm font-medium">
-                  {formatCurrency(product.sellingPrice, currency)}
+                  <RecordMoney
+                    amount={product.sellingPrice}
+                    currency={product.priceCurrency}
+                  />
                 </span>
               )}
             </DetailRow>
             <DetailRow label="Margin">
               <Margin
-                stockValue={product.stockValue}
+                total={product.stockValueByCurrency}
                 costedUnits={product.costedUnits}
                 uncostedUnits={product.uncostedUnits}
                 price={product.sellingPrice}
-                currency={currency}
+                priceCurrency={product.priceCurrency}
               />
             </DetailRow>
             <DetailRow label="Status">
@@ -377,7 +378,10 @@ export default async function ProductDetailPage({
                         {lot.unitCost === null ? (
                           <span className="text-muted-foreground">Unknown</span>
                         ) : (
-                          formatCurrency(lot.unitCost, currency)
+                          <RecordMoney
+                            amount={lot.unitCost}
+                            currency={lot.costCurrency}
+                          />
                         )}
                       </TableCell>
                       <TableCell className="tabular text-right text-sm">
@@ -390,10 +394,12 @@ export default async function ProductDetailPage({
                         {lot.unitCost === null ? (
                           <span className="text-muted-foreground">—</span>
                         ) : (
-                          formatCurrency(
-                            Number(lot.unitCost) * lot.quantityRemaining,
-                            currency,
-                          )
+                          <RecordMoney
+                            amount={(
+                              Number(lot.unitCost) * lot.quantityRemaining
+                            ).toFixed(2)}
+                            currency={lot.costCurrency}
+                          />
                         )}
                       </TableCell>
                       <TableCell>
@@ -429,6 +435,7 @@ export default async function ProductDetailPage({
                           <LotActions
                             lot={{
                               lotId: lot.id,
+                            costCurrency: lot.costCurrency,
                               productName: product.name,
                               status: lot.status,
                               quantityRemaining: lot.quantityRemaining,
@@ -556,7 +563,10 @@ export default async function ProductDetailPage({
                         {formatNumber(line.quantity)}
                       </TableCell>
                       <TableCell className="tabular text-right font-medium">
-                        {formatCurrency(line.total, currency)}
+                        <RecordMoney
+                          amount={line.total}
+                          currency={line.currency}
+                        />
                       </TableCell>
                       <TableCell>
                         <Badge variant="muted">{line.status}</Badge>
@@ -605,7 +615,10 @@ export default async function ProductDetailPage({
                         {formatNumber(line.quantity)}
                       </TableCell>
                       <TableCell className="tabular text-right font-medium">
-                        {formatCurrency(line.total, currency)}
+                        <RecordMoney
+                          amount={line.total}
+                          currency={line.currency}
+                        />
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {formatDate(line.purchaseDate)}
@@ -630,13 +643,7 @@ export default async function ProductDetailPage({
  * four units, and one holding none holds none. What the stock is worth is a
  * separate question, answered from the lots rather than from the count.
  */
-function StockSummary({
-  product,
-  currency,
-}: {
-  product: ProductDetail;
-  currency: Currency;
-}) {
+function StockSummary({ product }: { product: ProductDetail }) {
   return (
     <Card>
       <CardContent>
@@ -654,7 +661,7 @@ function StockSummary({
               Value at cost
             </p>
             <p className="tabular mt-1 text-3xl font-semibold tracking-tight">
-              {formatCurrency(product.stockValue, currency)}
+              <MoneyLines total={product.stockValueByCurrency} />
             </p>
             {product.uncostedUnits > 0 ? (
               <p className="mt-1 text-xs text-muted-foreground">
@@ -700,15 +707,13 @@ function DetailRow({
  * Covers the costed units only, and says so whenever some units are not.
  */
 function AverageCost({
-  value,
+  total,
   costedUnits,
   uncostedUnits,
-  currency,
 }: {
-  value: string;
+  total: MoneyByCurrency;
   costedUnits: number;
   uncostedUnits: number;
-  currency: Currency;
 }) {
   if (costedUnits === 0) {
     return (
@@ -718,11 +723,35 @@ function AverageCost({
     );
   }
 
-  const average = Number(value) / costedUnits;
+  const only = total.length === 1 ? total[0] : undefined;
+
+  /*
+   * An average needs one currency and one unit count.
+   *
+   * `costedUnits` counts every costed unit on the shelf, whatever it was
+   * bought in, so dividing a single currency's subtotal by it would answer
+   * neither "what did the dollar stock cost per unit" nor "what did all of it
+   * cost per unit". The figure only exists when every costed unit shares one
+   * currency, and saying so is better than dividing anyway.
+   */
+  if (only === undefined) {
+    return (
+      <span className="text-sm text-muted-foreground">
+        Bought in more than one currency — no single average
+      </span>
+    );
+  }
+
+  const average = Number(only.amount) / costedUnits;
 
   return (
     <span className="tabular text-sm font-medium">
-      {formatCurrency(average, currency)}
+      {formatEntry({ currency: only.currency, amount: average.toFixed(2) })}
+      {only.currency === null ? (
+        <span className="ml-1.5 text-xs text-muted-foreground">
+          currency unknown
+        </span>
+      ) : null}
       {uncostedUnits > 0 ? (
         <span className="ml-1.5 text-xs text-muted-foreground">
           (over {formatNumber(costedUnits)} costed{" "}
@@ -745,18 +774,19 @@ function AverageCost({
  * confident wrong answer this redesign set out to remove.
  */
 function Margin({
-  stockValue,
+  total,
   costedUnits,
   uncostedUnits,
   price,
-  currency,
+  priceCurrency,
 }: {
-  stockValue: string;
+  total: MoneyByCurrency;
   costedUnits: number;
   uncostedUnits: number;
   /** The reference price. Null when the product is only ever quoted. */
   price: string | null;
-  currency: Currency;
+  /** What that price is quoted in. Null when it was never recorded. */
+  priceCurrency: Currency | null;
 }) {
   /*
    * No reference price, no indicative margin.
@@ -784,7 +814,50 @@ function Margin({
     );
   }
 
-  const averageCost = Number(stockValue) / costedUnits;
+  /*
+   * A margin is a subtraction, and money only subtracts inside one currency.
+   *
+   * Both halves now say what they are: the batches carry `costCurrency` and
+   * the catalogue price carries `priceCurrency`. So the figure exists only
+   * when the stock is in exactly one currency, the price records one, and the
+   * two are the same — an importer buying in rupees and selling in dollars has
+   * no margin this page can state, and there is no rate here to invent one.
+   *
+   * The refusals are worded apart on purpose. "Bought in two currencies" and
+   * "priced in a different one from the stock" send somebody to two different
+   * places, and a single vague message would send them to neither.
+   */
+  const cost = total.length === 1 ? total[0] : undefined;
+
+  if (cost === undefined) {
+    return (
+      <span className="text-sm text-muted-foreground">
+        Stock was bought in more than one currency — no single cost to measure
+        against
+      </span>
+    );
+  }
+
+  if (cost.currency === null || priceCurrency === null) {
+    return (
+      <span className="text-sm text-muted-foreground">
+        {cost.currency === null
+          ? "The stock's currency was never recorded, so the price cannot be measured against it"
+          : "The reference price's currency was never recorded, so it cannot be measured against the stock"}
+      </span>
+    );
+  }
+
+  if (cost.currency !== priceCurrency) {
+    return (
+      <span className="text-sm text-muted-foreground">
+        Priced in {priceCurrency}, bought in {cost.currency} — no exchange rate
+        here, so the two cannot be subtracted
+      </span>
+    );
+  }
+
+  const averageCost = Number(cost.amount) / costedUnits;
   const priceValue = Number(price);
   const difference = priceValue - averageCost;
   const percentage = priceValue === 0 ? 0 : (difference / priceValue) * 100;
@@ -797,7 +870,10 @@ function Margin({
           difference < 0 ? "text-destructive" : "text-foreground",
         )}
       >
-        {formatCurrency(difference, currency)}
+        {formatEntry({
+          currency: priceCurrency,
+          amount: difference.toFixed(2),
+        })}
         <span className="ml-1.5 text-xs text-muted-foreground">
           ({percentage.toFixed(1)}%)
         </span>

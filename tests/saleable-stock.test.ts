@@ -12,6 +12,7 @@ import { confirmOrder, createOrder, fulfilOrder } from "@/server/orders";
 import { loadValuationReport } from "@/server/reports";
 
 import { signOut } from "./clerk-mock";
+import { amountIn } from "./money";
 import {
   expectConsumptionsReconcile,
   expectLotsReconcile,
@@ -528,7 +529,7 @@ describe("physical accounting is unaffected by status", () => {
      */
     expect(row).toBeDefined();
     expect(row!.units).toBe(15);
-    expect(Number(row!.valueAtCost)).toBe(3000);
+    expect(amountIn(row!.valueAtCostByCurrency, "USD")).toBe(3000);
   });
 
   it("counts blocked units in the movement summary, which is physical", async () => {

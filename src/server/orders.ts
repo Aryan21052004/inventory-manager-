@@ -23,6 +23,7 @@ import {
   transitionRefusal,
   type OrderStatus,
 } from "@/lib/order-status";
+import { groupTotals, type MoneyByCurrency } from "@/lib/money-by-currency";
 import { prisma } from "@/lib/prisma";
 import {
   calculateTotals,
@@ -97,6 +98,15 @@ export interface OrderListItem {
   outstandingUnits: number;
   subtotal: string;
   total: string;
+  /**
+   * What both figures above are denominated in, from the order's own row.
+   *
+   * One currency for the document, so `subtotal` and `total` share it. Null on
+   * an order raised before the column existed; the screen says so rather than
+   * borrowing today's installation default, which would relabel history every
+   * time somebody changed the setting.
+   */
+  currency: Currency | null;
   createdAt: Date;
   createdByName: string | null;
 }
@@ -115,7 +125,7 @@ export interface OrderStats {
   pending: number;
   confirmed: number;
   /** Value of orders that are live commitments — confirmed but not completed. */
-  openValue: string;
+  openValueByCurrency: MoneyByCurrency;
 }
 
 export interface OrderDetailLine {
@@ -225,6 +235,14 @@ export interface OrderDetail {
     orderNumber: string;
     status: OrderStatus;
     total: string;
+    /**
+     * The currency that order was raised in, from its own row.
+     *
+     * These are other people’s past orders, not this one — each carries its
+     * own currency and none of them need share it with the order being
+     * viewed. Null on an order raised before the column existed.
+     */
+    currency: Currency | null;
     createdAt: Date;
   }[];
 }
@@ -259,6 +277,8 @@ export interface OrderProductOption {
    * the re-pricing defect.
    */
   sellingPrice: string | null;
+  /** What the catalogue price is quoted in. Null when never recorded. */
+  priceCurrency: Currency | null;
   stockQuantity: number;
   /**
    * Always true for search results, which only return ACTIVE products. It can
@@ -352,6 +372,7 @@ export async function listOrders(
           status: true,
           subtotal: true,
           total: true,
+          currency: true,
           createdAt: true,
           customerId: true,
           customer: { select: { name: true } },
@@ -378,6 +399,7 @@ export async function listOrders(
           ),
           subtotal: row.subtotal.toString(),
           total: row.total.toString(),
+          currency: row.currency,
           createdAt: row.createdAt,
           createdByName: row.createdByUser?.name ?? null,
         })),
@@ -397,28 +419,50 @@ interface OrderStatsRow {
   draft: number;
   pending: number;
   confirmed: number;
+}
+
+/**
+ * Open commitment per currency.
+ *
+ * Separate from the counts because they answer to different keys: there is one
+ * order count, and one open value per currency in use. The count beside each
+ * sum is what keeps a currency out of the total when it has no confirmed
+ * orders — `SUM(...) FILTER (...)` over such a group yields null, coalesced to
+ * "0", which is indistinguishable from a real zero.
+ */
+interface OrderStatsMoneyRow {
+  currency: Currency | null;
+  open_n: number;
   open_value: string;
 }
 
 export async function loadOrderStats(): Promise<Result<OrderStats>> {
   try {
-    const rows = await prisma.$queryRaw<OrderStatsRow[]>`
-      SELECT
-        COUNT(*)::int                                          AS total,
-        COUNT(*) FILTER (WHERE status = 'DRAFT')::int          AS draft,
-        COUNT(*) FILTER (WHERE status = 'PENDING')::int        AS pending,
-        COUNT(*) FILTER (WHERE status = 'CONFIRMED')::int      AS confirmed,
-        COALESCE(SUM(total) FILTER (WHERE status = 'CONFIRMED'), 0)::text
-                                                               AS open_value
-      FROM orders
-    `;
+    const [rows, money] = await Promise.all([
+      prisma.$queryRaw<OrderStatsRow[]>`
+        SELECT
+          COUNT(*)::int                                          AS total,
+          COUNT(*) FILTER (WHERE status = 'DRAFT')::int          AS draft,
+          COUNT(*) FILTER (WHERE status = 'PENDING')::int        AS pending,
+          COUNT(*) FILTER (WHERE status = 'CONFIRMED')::int      AS confirmed
+        FROM orders
+      `,
+      prisma.$queryRaw<OrderStatsMoneyRow[]>`
+        SELECT
+          currency,
+          COUNT(*) FILTER (WHERE status = 'CONFIRMED')::int      AS open_n,
+          COALESCE(SUM(total) FILTER (WHERE status = 'CONFIRMED'), 0)::text
+                                                                 AS open_value
+        FROM orders
+        GROUP BY currency
+      `,
+    ]);
 
     const totals = rows[0] ?? {
       total: 0,
       draft: 0,
       pending: 0,
       confirmed: 0,
-      open_value: "0",
     };
 
     return {
@@ -428,7 +472,11 @@ export async function loadOrderStats(): Promise<Result<OrderStats>> {
         draft: totals.draft,
         pending: totals.pending,
         confirmed: totals.confirmed,
-        openValue: totals.open_value,
+        openValueByCurrency: groupTotals(
+          money
+            .filter((row) => row.open_n > 0)
+            .map((row) => ({ currency: row.currency, amount: row.open_value })),
+        ),
       },
     };
   } catch (error) {
@@ -506,6 +554,7 @@ export async function searchOrderProducts(
         name: true,
         sku: true,
         sellingPrice: true,
+        priceCurrency: true,
         stockQuantity: true,
       },
     });
@@ -515,6 +564,7 @@ export async function searchOrderProducts(
       name: row.name,
       sku: row.sku,
       sellingPrice: row.sellingPrice?.toString() ?? null,
+      priceCurrency: row.priceCurrency,
       stockQuantity: row.stockQuantity,
       isActive: true,
     }));
@@ -546,6 +596,7 @@ export async function loadOrderProducts(
         name: true,
         sku: true,
         sellingPrice: true,
+        priceCurrency: true,
         stockQuantity: true,
         status: true,
       },
@@ -556,6 +607,7 @@ export async function loadOrderProducts(
       name: row.name,
       sku: row.sku,
       sellingPrice: row.sellingPrice?.toString() ?? null,
+      priceCurrency: row.priceCurrency,
       stockQuantity: row.stockQuantity,
       isActive: row.status === "ACTIVE",
     }));
@@ -742,6 +794,7 @@ export async function getOrderDetail(
           orderNumber: true,
           status: true,
           total: true,
+          currency: true,
           createdAt: true,
         },
       }),
@@ -806,6 +859,7 @@ export async function getOrderDetail(
           orderNumber: row.orderNumber,
           status: row.status,
           total: row.total.toString(),
+          currency: row.currency,
           createdAt: row.createdAt,
         })),
       },
