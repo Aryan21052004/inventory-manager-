@@ -144,6 +144,20 @@ export interface OrderDetailLine {
    * note on `OrderItem.costedQuantity` in the schema.
    */
   costTotal: string | null;
+  /**
+   * What `costTotal` is denominated in, from the line's own row.
+   *
+   * **Not derivable from `Order.currency`.** Stock bought in dollars can be
+   * sold in rupees; the cost side and the revenue side of one line are
+   * independent facts, and a screen that labels the cost with the order's
+   * currency — or with the installation default — is asserting one it has no
+   * grounds for.
+   *
+   * At most one currency, guaranteed: a line drawing from lots that disagree
+   * is degraded to uncosted by the allocator rather than blended, so this is
+   * paired-null with `costTotal` and with a zero `costedQuantity`.
+   */
+  costCurrency: Currency | null;
   costedQuantity: number;
   /**
    * How many of `quantity` have physically shipped.
@@ -829,6 +843,7 @@ export async function getOrderDetail(
           unitPrice: item.unitPrice.toString(),
           total: item.total.toString(),
           costTotal: item.costTotal?.toString() ?? null,
+          costCurrency: item.costCurrency,
           costedQuantity: item.costedQuantity,
           fulfilledQuantity: item.fulfilledQuantity,
           returnedQuantity: item.returnedQuantity,

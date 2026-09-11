@@ -6,7 +6,13 @@ vi.mock("@clerk/nextjs/server", async () => {
 });
 
 import { prisma } from "@/lib/prisma";
-import { cancelOrder, confirmOrder, createOrder, fulfilOrder } from "@/server/orders";
+import {
+  cancelOrder,
+  confirmOrder,
+  createOrder,
+  fulfilOrder,
+  getOrderDetail,
+} from "@/server/orders";
 import { createPurchase, receivePurchase } from "@/server/purchases";
 import { setCurrency } from "@/server/settings";
 
@@ -487,5 +493,343 @@ describe("cancellation", () => {
 
     await expectCostPairingHolds();
     await expectConsumptionsReconcile();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What the order detail exposes about the cost side
+// ---------------------------------------------------------------------------
+
+/**
+ * The cost currency reaching the order page.
+ *
+ * `OrderItem` already refuses to blend currencies — a line drawing from lots
+ * that disagree degrades to uncosted rather than summing them — so the value
+ * here is always at most one currency. What was missing was the *label*:
+ * `OrderDetailLine` carried the total and not what it was denominated in, so
+ * the page fell back on the installation default and asserted a currency it
+ * had no grounds for.
+ *
+ * These tests pin the label, and pin the two facts that must stay independent:
+ * the currency an order was *sold* in and the currency its stock was *bought*
+ * in are unrelated, and physical fulfilment is unaffected by either.
+ */
+describe("the cost currency on an order line", () => {
+  async function detailLines(orderId: string) {
+    const result = await getOrderDetail(orderId);
+    if (!result.ok || !result.data) throw new Error("expected the order");
+    return result.data;
+  }
+
+  it("names the currency when the sale and the stock agree", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const customer = await seedCustomer({ name: "Same Currency Ltd" });
+    const part = await seedProduct({
+      sku: "OC-SAME",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+
+    await receiveStock({
+      productId: part.id,
+      supplierId: supplier.id,
+      quantity: 10,
+      unitCost: "40.00",
+      currency: "USD",
+    });
+
+    await setCurrency("USD");
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 5, unitPrice: "100.00" }],
+    });
+    await confirmOrder(order.id);
+
+    const detail = await detailLines(order.id);
+    const line = detail.lines[0]!;
+
+    expect(detail.currency).toBe("USD");
+    expect(line.costTotal).toBe("200");
+    expect(line.costCurrency).toBe("USD");
+    expect(line.costedQuantity).toBe(5);
+
+    // Physical facts, unchanged by any of this.
+    expect(line.quantity).toBe(5);
+    expect(line.fulfilledQuantity).toBe(5);
+
+    await expectCostPairingHolds();
+  });
+
+  it("keeps the sale and the stock currencies independent", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const customer = await seedCustomer({ name: "Importer Ltd" });
+    const part = await seedProduct({
+      sku: "OC-DIFF",
+      sellingPrice: "9000.00",
+      stockQuantity: 0,
+    });
+
+    // Bought in dollars, sold in rupees — an ordinary importer.
+    await receiveStock({
+      productId: part.id,
+      supplierId: supplier.id,
+      quantity: 10,
+      unitCost: "40.00",
+      currency: "USD",
+    });
+
+    await setCurrency("INR");
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 4, unitPrice: "9000.00" }],
+    });
+    await confirmOrder(order.id);
+
+    const detail = await detailLines(order.id);
+    const line = detail.lines[0]!;
+
+    /*
+     * Both facts survive, separately. Neither is blended into the other, and
+     * the page has everything it needs to refuse a margin rather than invent
+     * one by subtracting across them.
+     */
+    expect(detail.currency).toBe("INR");
+    expect(line.total).toBe("36000");
+    expect(line.costTotal).toBe("160");
+    expect(line.costCurrency).toBe("USD");
+    expect(line.costedQuantity).toBe(4);
+    expect(line.fulfilledQuantity).toBe(4);
+
+    await expectCostPairingHolds();
+  });
+
+  it("gives each line of one order its own cost currency", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const customer = await seedCustomer({ name: "Two Sources Ltd" });
+    const dollarPart = await seedProduct({
+      sku: "OC-USD",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+    const rupeePart = await seedProduct({
+      sku: "OC-INR",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+
+    await receiveStock({
+      productId: dollarPart.id,
+      supplierId: supplier.id,
+      quantity: 10,
+      unitCost: "40.00",
+      currency: "USD",
+    });
+    await receiveStock({
+      productId: rupeePart.id,
+      supplierId: supplier.id,
+      quantity: 10,
+      unitCost: "3000.00",
+      currency: "INR",
+    });
+
+    await setCurrency("USD");
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [
+        { productId: dollarPart.id, quantity: 2, unitPrice: "100.00" },
+        { productId: rupeePart.id, quantity: 3, unitPrice: "100.00" },
+      ],
+    });
+    await confirmOrder(order.id);
+
+    const detail = await detailLines(order.id);
+    const bySku = new Map(detail.lines.map((line) => [line.sku, line]));
+
+    /*
+     * One order, two cost currencies. This is where an order first becomes
+     * multi-currency: each line is internally consistent, and no single figure
+     * describes the pair.
+     */
+    expect(bySku.get("OC-USD")!.costCurrency).toBe("USD");
+    expect(bySku.get("OC-USD")!.costTotal).toBe("80");
+    expect(bySku.get("OC-INR")!.costCurrency).toBe("INR");
+    expect(bySku.get("OC-INR")!.costTotal).toBe("9000");
+
+    // Both lines shipped in full, whatever their money says.
+    expect(bySku.get("OC-USD")!.fulfilledQuantity).toBe(2);
+    expect(bySku.get("OC-USD")!.costedQuantity).toBe(2);
+    expect(bySku.get("OC-INR")!.fulfilledQuantity).toBe(3);
+    expect(bySku.get("OC-INR")!.costedQuantity).toBe(3);
+
+    await expectCostPairingHolds();
+  });
+
+  it("reports no currency on a line whose batches disagreed", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const customer = await seedCustomer({ name: "Mixed Batches Ltd" });
+    const part = await seedProduct({
+      sku: "OC-MIX",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+
+    await receiveStock({
+      productId: part.id,
+      supplierId: supplier.id,
+      quantity: 5,
+      unitCost: "40.00",
+      currency: "USD",
+    });
+    await receiveStock({
+      productId: part.id,
+      supplierId: supplier.id,
+      quantity: 5,
+      unitCost: "3000.00",
+      currency: "INR",
+    });
+
+    await setCurrency("USD");
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 8, unitPrice: "100.00" }],
+    });
+    await confirmOrder(order.id);
+
+    const detail = await detailLines(order.id);
+    const line = detail.lines[0]!;
+
+    /*
+     * The established behaviour, unchanged: rather than blend, the line gives
+     * up its total entirely. The label now goes null with it.
+     */
+    expect(line.costTotal).toBeNull();
+    expect(line.costCurrency).toBeNull();
+    expect(line.costedQuantity).toBe(0);
+
+    // The goods still shipped. Refusing a cost is not refusing a delivery.
+    expect(line.fulfilledQuantity).toBe(8);
+    expect(line.quantity).toBe(8);
+
+    await expectCostPairingHolds();
+  });
+
+  it("reports no currency on a line drawn from stock nobody priced", async () => {
+    await signInWithRole("ADMIN");
+    const customer = await seedCustomer({ name: "Legacy Stock Ltd" });
+    // `lotUnitCost: null` seeds stock that predates cost tracking.
+    const part = await seedProduct({
+      sku: "OC-NONE",
+      sellingPrice: "100.00",
+      stockQuantity: 10,
+      lotUnitCost: null,
+    });
+
+    await setCurrency("USD");
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 6, unitPrice: "100.00" }],
+    });
+    await confirmOrder(order.id);
+
+    const line = (await detailLines(order.id)).lines[0]!;
+
+    expect(line.costTotal).toBeNull();
+    expect(line.costCurrency).toBeNull();
+    expect(line.costedQuantity).toBe(0);
+    expect(line.fulfilledQuantity).toBe(6);
+
+    await expectCostPairingHolds();
+  });
+
+  it("keeps a free delivery costed at a real zero, with its currency", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const customer = await seedCustomer({ name: "Free Sample Ltd" });
+    const part = await seedProduct({
+      sku: "OC-ZERO",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+
+    await receiveStock({
+      productId: part.id,
+      supplierId: supplier.id,
+      quantity: 10,
+      unitCost: "0.00",
+      currency: "EUR",
+    });
+
+    await setCurrency("EUR");
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 4, unitPrice: "100.00" }],
+    });
+    await confirmOrder(order.id);
+
+    const line = (await detailLines(order.id)).lines[0]!;
+
+    /*
+     * Nothing was paid, which is a fact — and a different one from nobody
+     * having recorded what was paid. A zero total keeps its currency and its
+     * costed quantity, so the margin over it is real rather than refused.
+     */
+    expect(Number(line.costTotal)).toBe(0);
+    expect(line.costTotal).not.toBeNull();
+    expect(line.costCurrency).toBe("EUR");
+    expect(line.costedQuantity).toBe(4);
+    expect(line.fulfilledQuantity).toBe(4);
+
+    await expectCostPairingHolds();
+  });
+
+  it("leaves coverage intact when the currency is the only thing missing", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const customer = await seedCustomer({ name: "Partial Ltd" });
+    const part = await seedProduct({
+      sku: "OC-COVER",
+      sellingPrice: "100.00",
+      stockQuantity: 0,
+    });
+
+    // Five costed units in dollars, then five more in rupees: the line goes
+    // indeterminate, but every physical number must survive it.
+    await receiveStock({
+      productId: part.id,
+      supplierId: supplier.id,
+      quantity: 5,
+      unitCost: "40.00",
+      currency: "USD",
+    });
+    await receiveStock({
+      productId: part.id,
+      supplierId: supplier.id,
+      quantity: 5,
+      unitCost: "3000.00",
+      currency: "INR",
+    });
+
+    await setCurrency("USD");
+    const order = await createOrder({
+      customerId: customer.id,
+      items: [{ productId: part.id, quantity: 10, unitPrice: "100.00" }],
+    });
+    await confirmOrder(order.id);
+
+    const line = (await detailLines(order.id)).lines[0]!;
+
+    expect(line.costCurrency).toBeNull();
+
+    // Quantity, fulfilment, returns and the returnable window all stand.
+    expect(line.quantity).toBe(10);
+    expect(line.fulfilledQuantity).toBe(10);
+    expect(line.returnedQuantity).toBe(0);
+    expect(line.returnableQuantity).toBe(10);
+
+    await expectCostPairingHolds();
   });
 });

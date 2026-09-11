@@ -26,7 +26,11 @@ import {
 } from "@/components/ui/card";
 import { CertificateStatusBadge } from "@/components/ui/certificate-status-badge";
 import { EmptyState } from "@/components/ui/empty-state";
-import { RecordMoney } from "@/components/ui/money";
+import {
+  formatEntry,
+  MoneyLines,
+  RecordMoney,
+} from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { OrderStatusBadge } from "@/components/ui/order-status-badge";
 import { PageHeader } from "@/components/ui/page-header";
@@ -39,7 +43,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { Currency } from "@/lib/currency";
-import { formatCurrency, formatDateTime, formatNumber } from "@/lib/format";
+import { formatDateTime, formatNumber } from "@/lib/format";
 import {
   canFulfilOutstanding,
   isEditable,
@@ -54,11 +58,15 @@ import {
   type OrderDetailLine,
 } from "@/server/orders";
 import { listOrderItemImages } from "@/server/order-item-images";
-import { getCurrency } from "@/server/settings";
 import {
   listLinkablePurchaseLines,
   listSupplyLinksForOrder,
 } from "@/server/supply-links";
+import {
+  soleCurrency,
+  sumByCurrency,
+  type MoneyByCurrency,
+} from "@/lib/money-by-currency";
 import { cn } from "@/lib/utils";
 
 /**
@@ -95,10 +103,7 @@ export default async function OrderDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [result, currency] = await Promise.all([
-    getOrderDetail(id),
-    getCurrency(),
-  ]);
+  const result = await getOrderDetail(id);
 
   if (!result.ok) {
     return (
@@ -381,7 +386,7 @@ export default async function OrderDetailPage({
                       <RecordMoney amount={line.unitPrice} currency={order.currency} />
                     </TableCell>
                     <TableCell className="tabular hidden text-right text-sm md:table-cell">
-                      <LineCost line={line} currency={currency} />
+                      <LineCost line={line} />
                     </TableCell>
                     <TableCell className="tabular text-right font-medium">
                       <RecordMoney amount={line.total} currency={order.currency} />
@@ -411,7 +416,7 @@ export default async function OrderDetailPage({
               <OrderMargin
                 lines={order.lines}
                 status={order.status}
-                currency={currency}
+                orderCurrency={order.currency}
               />
             </dl>
           </CardContent>
@@ -650,13 +655,7 @@ function Timeline({ order }: { order: OrderDetail }) {
  * could be read as free. And a line straddling both shows what it can vouch
  * for, with the shortfall named underneath.
  */
-function LineCost({
-  line,
-  currency,
-}: {
-  line: OrderDetailLine;
-  currency: Currency;
-}) {
+function LineCost({ line }: { line: OrderDetailLine }) {
   if (line.costTotal === null) {
     return <span className="text-muted-foreground">—</span>;
   }
@@ -671,7 +670,14 @@ function LineCost({
 
   return (
     <span className="inline-flex flex-col items-end">
-      <span>{formatCurrency(line.costTotal, currency)}</span>
+      {/*
+        The line's own cost currency, never the order's and never the
+        installation default. A null currency beside a real cost cannot arise
+        through the allocator — it degrades such a line to uncosted — but no
+        check constraint enforces that yet, so `RecordMoney` says "currency
+        unknown" rather than this page inventing one.
+      */}
+      <RecordMoney amount={line.costTotal} currency={line.costCurrency} />
       {partial ? (
         <span className="text-xs text-muted-foreground">
           {formatNumber(line.costedQuantity)} of{" "}
@@ -699,11 +705,12 @@ function LineCost({
 function OrderMargin({
   lines,
   status,
-  currency,
+  orderCurrency,
 }: {
   lines: OrderDetailLine[];
   status: OrderStatus;
-  currency: Currency;
+  /** What the order was raised in. Null on an order that predates the column. */
+  orderCurrency: Currency | null;
 }) {
   const results = lines.map((line) =>
     marginOf({
@@ -721,6 +728,23 @@ function OrderMargin({
   const cost = results.reduce((sum, result) => sum + result.cost, 0);
   const revenue = results.reduce((sum, result) => sum + result.revenue, 0);
   const margin = revenue - cost;
+
+  /*
+   * Cost of sale, per currency the stock was actually bought in.
+   *
+   * A single line can only ever carry one currency — the allocator degrades a
+   * line drawing from lots that disagree to uncosted rather than blending it.
+   * But two *different* lines on one order can each carry their own, so this
+   * is where an order first becomes multi-currency, and `sumByCurrency` adds
+   * only the lines that agree.
+   */
+  const cogs = sumByCurrency(
+    lines.flatMap((line, index) =>
+      line.costTotal === null || results[index]!.costedQuantity === 0
+        ? []
+        : [{ currency: line.costCurrency, amount: line.costTotal }],
+    ),
+  );
 
   /*
    * Nothing costed, and there are now three reasons for that. They are not
@@ -764,31 +788,98 @@ function OrderMargin({
 
   const note = coverageNote(coverage);
 
+  /*
+   * A margin is a subtraction, and money only subtracts inside one currency.
+   *
+   * The revenue half is denominated in the order's currency; the cost half in
+   * whatever the stock was bought in, which the schema is explicit is not
+   * derivable from it. So the figure exists only when the cost is in exactly
+   * one known currency, the order records one, and the two are the same.
+   *
+   * Every refusal below keeps the money it *can* vouch for on screen, and
+   * leaves coverage untouched: an order whose margin cannot be stated has
+   * still shipped exactly as many units as it shipped.
+   */
+  const costCurrency = soleCurrency(cogs);
+  const comparable =
+    orderCurrency !== null &&
+    costCurrency !== null &&
+    costCurrency === orderCurrency;
+
   return (
     <div className="flex flex-col gap-1 border-t border-border pt-3">
       <div className="flex items-center justify-between">
         <dt className="text-muted-foreground">Cost of goods sold</dt>
-        <dd className="tabular font-medium">{formatCurrency(cost, currency)}</dd>
-      </div>
-      <div className="flex items-center justify-between">
-        <dt className="text-muted-foreground">Gross margin</dt>
-        <dd
-          className={cn(
-            "tabular font-medium",
-            margin < 0 ? "text-destructive" : "text-success",
-          )}
-        >
-          {formatCurrency(margin, currency)}
-          {revenue > 0 ? (
-            <span className="ml-1.5 text-xs text-muted-foreground">
-              ({((margin / revenue) * 100).toFixed(1)}%)
-            </span>
-          ) : null}
+        <dd className="tabular font-medium text-right">
+          <MoneyLines total={cogs} />
         </dd>
+      </div>
+      <div className="flex items-center justify-between gap-6">
+        <dt className="text-muted-foreground">Gross margin</dt>
+        {comparable ? (
+          <dd
+            className={cn(
+              "tabular font-medium",
+              margin < 0 ? "text-destructive" : "text-success",
+            )}
+          >
+            {formatEntry({
+              currency: costCurrency,
+              amount: margin.toFixed(2),
+            })}
+            {revenue > 0 ? (
+              <span className="ml-1.5 text-xs text-muted-foreground">
+                ({((margin / revenue) * 100).toFixed(1)}%)
+              </span>
+            ) : null}
+          </dd>
+        ) : (
+          <dd className="text-right text-xs text-muted-foreground">
+            {marginRefusal(cogs, orderCurrency)}
+          </dd>
+        )}
       </div>
       {note ? (
         <p className="pt-1 text-xs text-muted-foreground">{note}</p>
       ) : null}
     </div>
   );
+}
+
+/**
+ * Why a margin cannot be stated, in the reader's terms.
+ *
+ * Three reasons, and they send somebody to three different places — a mixed
+ * purchase history, an unlabelled legacy batch, or an ordinary import sold at
+ * home. Collapsing them into one message would leave all three unactionable.
+ *
+ * Reached only when the cost of sale exists but cannot be measured against the
+ * sale; an order with no cost at all is answered earlier, in its own terms.
+ */
+function marginRefusal(
+  cogs: MoneyByCurrency,
+  orderCurrency: Currency | null,
+): string {
+  const unknown = cogs.some((entry) => entry.currency === null);
+  const known = cogs
+    .filter((entry) => entry.currency !== null)
+    .map((entry) => entry.currency);
+
+  if (unknown && known.length > 0) {
+    return "Part of this order's stock has no recorded currency, so its cost cannot be measured against the sale";
+  }
+
+  if (unknown) {
+    return "This order's stock has no recorded currency, so its cost cannot be measured against the sale";
+  }
+
+  if (known.length > 1) {
+    return `This order's stock was bought in ${known.join(" and ")} — no single cost to measure against`;
+  }
+
+  if (orderCurrency === null) {
+    return "This order records no currency, so its cost cannot be measured against the sale";
+  }
+
+  return `Sold in ${orderCurrency}, bought in ${known[0]} — no exchange rate here, so the two cannot be subtracted`;
 }
