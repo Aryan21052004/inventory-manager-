@@ -5,7 +5,9 @@ import type {
   StockReferenceType,
   StockTransactionType,
 } from "@/generated/prisma/enums";
+import type { Currency } from "@/lib/currency";
 import { toSafeError, type SafeError } from "@/lib/errors";
+import { sumByCurrency, type MoneyByCurrency } from "@/lib/money-by-currency";
 import { prisma } from "@/lib/prisma";
 import type {
   MovementListParams,
@@ -49,14 +51,21 @@ export interface MovementListItem {
   createdByName: string | null;
 
   /**
-   * What this movement cost, where a cost is known.
+   * What this movement cost, per currency the batches were bought in.
    *
-   * Inflows carry the price the batch was booked in at; outflows carry the sum
-   * of what they drew from the batches they consumed. Null means the movement
-   * touched stock whose acquisition cost was never established — not zero, and
-   * not a figure inferred from the catalogue.
+   * Inflows carry the price the batch was booked in at; outflows carry what
+   * they drew from the batches they consumed. **One entry per currency**,
+   * because FIFO takes the oldest batches and does not reorder to chase a
+   * tidier answer — so a single sale can legitimately draw from a batch bought
+   * in dollars and one bought in rupees. There is no exchange rate in this
+   * application, so those two are reported side by side rather than added.
+   *
+   * Empty means the movement touched stock whose acquisition cost was never
+   * established — not zero, and not a figure inferred from the catalogue. An
+   * entry with a null currency is different again: the amount is real, but
+   * what it is denominated in was never recorded.
    */
-  costTotal: string | null;
+  costTotalByCurrency: MoneyByCurrency;
   /**
    * How many of `change` the cost covers. A movement can be partly costed when
    * FIFO draws across both costed and uncosted batches, and the coverage has to
@@ -235,6 +244,7 @@ export async function listMovements(
             select: {
               id: true,
               unitCost: true,
+              costCurrency: true,
               quantityReceived: true,
               sourceType: true,
               sourceId: true,
@@ -245,6 +255,7 @@ export async function listMovements(
               lotId: true,
               quantity: true,
               unitCost: true,
+              costCurrency: true,
               lot: { select: { sourceType: true, sourceId: true } },
             },
           },
@@ -335,6 +346,7 @@ function movementCost(
     originatedLot: {
       id: string;
       unitCost: Prisma.Decimal | null;
+      costCurrency: Currency | null;
       quantityReceived: number;
       sourceType: StockReferenceType;
       sourceId: string | null;
@@ -343,11 +355,16 @@ function movementCost(
       lotId: string;
       quantity: number;
       unitCost: Prisma.Decimal | null;
+      costCurrency: Currency | null;
       lot: { sourceType: StockReferenceType; sourceId: string | null };
     }[];
   },
   purchaseNumbers: Map<string, string>,
-): { costTotal: string | null; costedQuantity: number; lots: MovementLot[] } {
+): {
+  costTotalByCurrency: MoneyByCurrency;
+  costedQuantity: number;
+  lots: MovementLot[];
+} {
   const numberFor = (
     sourceType: StockReferenceType,
     sourceId: string | null,
@@ -360,10 +377,19 @@ function movementCost(
     const lot = row.originatedLot;
 
     return {
-      costTotal:
+      /*
+       * One batch, so at most one currency — the one frozen onto the lot when
+       * it was received, never today's installation default.
+       */
+      costTotalByCurrency:
         lot.unitCost === null
-          ? null
-          : (Number(lot.unitCost) * row.quantity).toFixed(2),
+          ? []
+          : [
+              {
+                currency: lot.costCurrency,
+                amount: (Number(lot.unitCost) * row.quantity).toFixed(2),
+              },
+            ],
       costedQuantity: lot.unitCost === null ? 0 : row.quantity,
       lots: [
         {
@@ -377,22 +403,41 @@ function movementCost(
   }
 
   if (row.lotConsumptions.length === 0) {
-    return { costTotal: null, costedQuantity: 0, lots: [] };
+    return { costTotalByCurrency: [], costedQuantity: 0, lots: [] };
   }
 
-  let cents = 0;
+  /*
+   * One figure per currency, never one figure across them.
+   *
+   * Each layer is priced at its own frozen rate in its own frozen currency,
+   * and `sumByCurrency` adds only the layers that agree. Summing the lot
+   * straight into one scalar — which this did — produced a number in no
+   * currency at all whenever FIFO crossed a boundary.
+   */
+  const layers: { currency: Currency | null; amount: string }[] = [];
   let costedQuantity = 0;
 
   for (const consumption of row.lotConsumptions) {
-    // Signed, so a reversal's negative rows net against the draws they undo.
+    /*
+     * Unsigned, deliberately. A reversal is its own transaction carrying only
+     * negative rows, so there is nothing here to net against; taking the
+     * magnitude is what makes a reversal read as the value of the stock it
+     * put back rather than as a negative.
+     */
     const quantity = Math.abs(consumption.quantity);
     if (consumption.unitCost === null) continue;
-    cents += Math.round(Number(consumption.unitCost) * 100) * quantity;
+
+    const cents = Math.round(Number(consumption.unitCost) * 100) * quantity;
+
+    layers.push({
+      currency: consumption.costCurrency,
+      amount: (cents / 100).toFixed(2),
+    });
     costedQuantity += quantity;
   }
 
   return {
-    costTotal: costedQuantity === 0 ? null : (cents / 100).toFixed(2),
+    costTotalByCurrency: sumByCurrency(layers),
     costedQuantity,
     lots: row.lotConsumptions.map((consumption) => ({
       lotId: consumption.lotId,

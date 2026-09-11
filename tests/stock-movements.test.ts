@@ -16,10 +16,17 @@ import {
   loadMovementProducts,
   loadMovementStats,
 } from "@/server/stock-movements";
+import { createPurchase, receivePurchase } from "@/server/purchases";
+import { setCurrency } from "@/server/settings";
 import { recordStockMovement } from "@/server/stock";
 
 import { signOut } from "./clerk-mock";
-import { resetDatabase, seedProduct, signInWithRole } from "./database";
+import {
+  createSupplier,
+  resetDatabase,
+  seedProduct,
+  signInWithRole,
+} from "./database";
 
 /**
  * The stock movements read model.
@@ -1310,5 +1317,346 @@ describe("parameter parsing", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.data.total).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Movement cost, per currency
+// ---------------------------------------------------------------------------
+
+/**
+ * What a movement cost, when its batches disagree about the currency.
+ *
+ * FIFO draws oldest-first and never reorders to chase a tidier answer, so one
+ * outflow can legitimately consume a batch bought in dollars and a batch
+ * bought in rupees. This read model used to add those together into a single
+ * scalar — a number in no currency at all, which the table then labelled with
+ * the installation default. These tests pin the replacement: one figure per
+ * currency, and never one figure across them.
+ *
+ * Written through the real engine rather than hand-built rows, because the
+ * per-layer currency is frozen onto `StockLotConsumption` at the moment of the
+ * draw. A fixture that wrote those rows itself would be testing the fixture.
+ *
+ * Physical movement semantics are the control group throughout: `change`,
+ * `previousStock`, `newStock` and `costedQuantity` must be untouched by the
+ * currency split.
+ */
+describe("movement cost, per currency", () => {
+  /** Receives `quantity` at `unitCost`, in whatever the default is set to. */
+  async function receive(input: {
+    supplierId: string;
+    productId: string;
+    quantity: number;
+    unitCost: string;
+    currency: "USD" | "INR" | "EUR";
+  }) {
+    await setCurrency(input.currency);
+
+    const purchase = await createPurchase({
+      supplierId: input.supplierId,
+      items: [
+        {
+          productId: input.productId,
+          quantity: input.quantity,
+          unitCost: input.unitCost,
+        },
+      ],
+    });
+
+    await receivePurchase(purchase.id);
+    return purchase;
+  }
+
+  /** The most recent movement, which is the one each test just made. */
+  async function latest() {
+    const result = await listMovements(params());
+    if (!result.ok) throw new Error("expected the list to load");
+    return result.data.items[0]!;
+  }
+
+  /** Blanks the currency on every lot, leaving the cost — the legacy shape. */
+  async function forgetCurrencies(productId: string) {
+    await prisma.stockLot.updateMany({
+      where: { productId },
+      data: { costCurrency: null },
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // A — one known currency
+  // -------------------------------------------------------------------------
+
+  it("reports one figure when every batch drawn shares a currency", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const part = await seedProduct({ sku: "COST-A", stockQuantity: 0 });
+
+    await receive({
+      supplierId: supplier.id,
+      productId: part.id,
+      quantity: 10,
+      unitCost: "40.00",
+      currency: "USD",
+    });
+    await receive({
+      supplierId: supplier.id,
+      productId: part.id,
+      quantity: 10,
+      unitCost: "60.00",
+      currency: "USD",
+    });
+
+    // FIFO: all ten of the first batch, then five of the second.
+    await recordStockMovement({
+      productId: part.id,
+      type: "STOCK_OUT",
+      quantity: 15,
+      reference: { type: "MANUAL" },
+    });
+
+    const movement = await latest();
+
+    // 10 x 40.00 + 5 x 60.00, both in dollars.
+    expect(movement.costTotalByCurrency).toEqual([
+      { currency: "USD", amount: "700.00" },
+    ]);
+
+    // The control: the physical movement is untouched by the split.
+    expect(movement.change).toBe(-15);
+    expect(movement.previousStock).toBe(20);
+    expect(movement.newStock).toBe(5);
+    expect(movement.costedQuantity).toBe(15);
+  });
+
+  // -------------------------------------------------------------------------
+  // B — several known currencies
+  // -------------------------------------------------------------------------
+
+  it("refuses a single figure when the batches drawn disagree", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const part = await seedProduct({ sku: "COST-B", stockQuantity: 0 });
+
+    await receive({
+      supplierId: supplier.id,
+      productId: part.id,
+      quantity: 10,
+      unitCost: "40.00",
+      currency: "USD",
+    });
+    await receive({
+      supplierId: supplier.id,
+      productId: part.id,
+      quantity: 10,
+      unitCost: "3000.00",
+      currency: "INR",
+    });
+
+    await recordStockMovement({
+      productId: part.id,
+      type: "STOCK_OUT",
+      quantity: 15,
+      reference: { type: "MANUAL" },
+    });
+
+    const movement = await latest();
+
+    // Two figures, each in its own currency: 10 x 40.00 and 5 x 3000.00.
+    expect(movement.costTotalByCurrency).toEqual([
+      { currency: "USD", amount: "400.00" },
+      { currency: "INR", amount: "15000.00" },
+    ]);
+
+    /*
+     * The defect this replaced: 400 + 15000 added straight together. No
+     * exchange rate was consulted to produce 15400, so it must appear nowhere.
+     */
+    expect(
+      movement.costTotalByCurrency.map((entry) => entry.amount),
+    ).not.toContain("15400.00");
+
+    // And the units are one number however the money splits.
+    expect(movement.change).toBe(-15);
+    expect(movement.previousStock).toBe(20);
+    expect(movement.newStock).toBe(5);
+    expect(movement.costedQuantity).toBe(15);
+  });
+
+  // -------------------------------------------------------------------------
+  // C — known and unknown together
+  // -------------------------------------------------------------------------
+
+  it("keeps an unrecorded currency in its own bucket beside a known one", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const part = await seedProduct({ sku: "COST-C", stockQuantity: 0 });
+
+    // The older batch loses its currency — legacy data, cost intact.
+    await receive({
+      supplierId: supplier.id,
+      productId: part.id,
+      quantity: 10,
+      unitCost: "50.00",
+      currency: "USD",
+    });
+    await forgetCurrencies(part.id);
+
+    await receive({
+      supplierId: supplier.id,
+      productId: part.id,
+      quantity: 10,
+      unitCost: "70.00",
+      currency: "USD",
+    });
+
+    await recordStockMovement({
+      productId: part.id,
+      type: "STOCK_OUT",
+      quantity: 15,
+      reference: { type: "MANUAL" },
+    });
+
+    const movement = await latest();
+
+    // The known currency first, the unrecorded one last — never merged.
+    expect(movement.costTotalByCurrency).toEqual([
+      { currency: "USD", amount: "350.00" },
+      { currency: null, amount: "500.00" },
+    ]);
+    expect(movement.costedQuantity).toBe(15);
+    expect(movement.change).toBe(-15);
+  });
+
+  // -------------------------------------------------------------------------
+  // D — every layer's currency unknown
+  // -------------------------------------------------------------------------
+
+  it("reports the amount with a null currency when none was ever recorded", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const part = await seedProduct({ sku: "COST-D", stockQuantity: 0 });
+
+    await receive({
+      supplierId: supplier.id,
+      productId: part.id,
+      quantity: 10,
+      unitCost: "25.00",
+      currency: "EUR",
+    });
+    await forgetCurrencies(part.id);
+
+    await recordStockMovement({
+      productId: part.id,
+      type: "STOCK_OUT",
+      quantity: 4,
+      reference: { type: "MANUAL" },
+    });
+
+    const movement = await latest();
+
+    // The money is real and is reported; only its label is missing.
+    expect(movement.costTotalByCurrency).toEqual([
+      { currency: null, amount: "100.00" },
+    ]);
+
+    /*
+     * An unknown *currency* is not an unknown *cost*. The established rule is
+     * that `costedQuantity` counts every layer carrying a unit cost, so these
+     * units are costed — and the table must not read as though they were not.
+     */
+    expect(movement.costedQuantity).toBe(4);
+    expect(movement.change).toBe(-4);
+  });
+
+  // -------------------------------------------------------------------------
+  // E — nothing cost-bearing at all
+  // -------------------------------------------------------------------------
+
+  it("reports nothing at all when no batch drawn carried a cost", async () => {
+    await signInWithRole("ADMIN");
+    // `lotUnitCost: null` seeds stock that predates cost tracking.
+    const part = await seedProduct({
+      sku: "COST-E",
+      stockQuantity: 12,
+      lotUnitCost: null,
+    });
+
+    await recordStockMovement({
+      productId: part.id,
+      type: "STOCK_OUT",
+      quantity: 5,
+      reference: { type: "MANUAL" },
+    });
+
+    const movement = await latest();
+
+    // Empty, which the table renders as "Unknown" — distinct from a zero.
+    expect(movement.costTotalByCurrency).toEqual([]);
+    expect(movement.costedQuantity).toBe(0);
+    expect(movement.change).toBe(-5);
+    expect(movement.newStock).toBe(7);
+  });
+
+  // -------------------------------------------------------------------------
+  // F — a genuine zero
+  // -------------------------------------------------------------------------
+
+  it("reports a free delivery as a real zero, not as no cost at all", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const part = await seedProduct({ sku: "COST-F", stockQuantity: 0 });
+
+    await receive({
+      supplierId: supplier.id,
+      productId: part.id,
+      quantity: 6,
+      unitCost: "0.00",
+      currency: "USD",
+    });
+
+    const movement = await latest();
+
+    /*
+     * Nothing was paid, which is a fact — and a different one from nobody
+     * having recorded what was paid. The two must not collapse together.
+     */
+    expect(movement.costTotalByCurrency).toEqual([
+      { currency: "USD", amount: "0.00" },
+    ]);
+    expect(movement.costTotalByCurrency).not.toEqual([]);
+    expect(movement.costedQuantity).toBe(6);
+    expect(movement.change).toBe(6);
+  });
+
+  // -------------------------------------------------------------------------
+  // The inflow path
+  // -------------------------------------------------------------------------
+
+  it("costs a receipt in the currency it was bought in, not the default", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const part = await seedProduct({ sku: "COST-IN", stockQuantity: 0 });
+
+    await receive({
+      supplierId: supplier.id,
+      productId: part.id,
+      quantity: 8,
+      unitCost: "12.50",
+      currency: "EUR",
+    });
+
+    // The setting moves on. What has already happened must not.
+    await setCurrency("INR");
+
+    const movement = await latest();
+
+    expect(movement.costTotalByCurrency).toEqual([
+      { currency: "EUR", amount: "100.00" },
+    ]);
+    expect(movement.change).toBe(8);
+    expect(movement.previousStock).toBe(0);
+    expect(movement.newStock).toBe(8);
+    expect(movement.costedQuantity).toBe(8);
   });
 });

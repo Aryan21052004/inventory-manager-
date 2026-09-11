@@ -9,6 +9,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { MoneyLines } from "@/components/ui/money";
 import { ErrorState } from "@/components/ui/error-state";
 import { Pagination } from "@/components/ui/pagination";
 import {
@@ -20,7 +21,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  formatCurrency,
   formatDateTime,
   formatDelta,
   formatNumber,
@@ -37,8 +37,6 @@ import {
   listMovements,
   type MovementListItem,
 } from "@/server/stock-movements";
-import { getCurrency } from "@/server/settings";
-import type { Currency } from "@/lib/currency";
 import { cn } from "@/lib/utils";
 
 /**
@@ -49,10 +47,7 @@ import { cn } from "@/lib/utils";
  * orders-table.tsx.
  */
 async function MovementsTable({ params }: { params: MovementListParams }) {
-  const [result, currency] = await Promise.all([
-    listMovements(params),
-    getCurrency(),
-  ]);
+  const result = await listMovements(params);
 
   if (!result.ok) {
     return (
@@ -148,7 +143,7 @@ async function MovementsTable({ params }: { params: MovementListParams }) {
               </TableCell>
 
               <TableCell className="tabular hidden text-right text-sm md:table-cell">
-                <MovementCost movement={movement} currency={currency} />
+                <MovementCost movement={movement} />
               </TableCell>
 
               <TableCell>
@@ -246,23 +241,26 @@ function SortableHead({
 /**
  * What a movement cost, and how much of it that figure speaks for.
  *
- * Three distinct states, and keeping them distinct is the point. A known cost
- * renders as money. A movement across stock that was never priced renders as
- * "Unknown" — never as a dash that reads like zero, and never as a figure
- * borrowed from the catalogue. And a movement that drew from both kinds shows
- * the money it can vouch for with its coverage underneath, so nobody reads a
- * partial total as a complete one.
+ * The distinct states are the point, and there is one more of them than there
+ * used to be. A known cost renders as money, in the currency the batch was
+ * actually bought in. Stock that was never priced renders as "Unknown" —
+ * never as a dash that reads like zero, and never as a figure borrowed from
+ * the catalogue or from today's setting. A movement that drew from both kinds
+ * shows the money it can vouch for with its coverage underneath, so nobody
+ * reads a partial total as a complete one.
+ *
+ * And the new one: FIFO can draw across batches bought in different
+ * currencies, so a movement can legitimately cost two amounts at once. Those
+ * stack. No rate exists here to turn them into one.
  */
-function MovementCost({
-  movement,
-  currency,
-}: {
-  movement: MovementListItem;
-  currency: Currency;
-}) {
+function MovementCost({ movement }: { movement: MovementListItem }) {
   const units = Math.abs(movement.change);
 
-  if (movement.costTotal === null) {
+  /*
+   * Nothing to total is not a zero, and "Unknown" says so better than the em
+   * dash `MoneyLines` would render — a dash in a money column reads as nil.
+   */
+  if (movement.costTotalByCurrency.length === 0) {
     return <span className="text-muted-foreground">Unknown</span>;
   }
 
@@ -270,7 +268,7 @@ function MovementCost({
 
   return (
     <span className="inline-flex flex-col items-end">
-      <span>{formatCurrency(movement.costTotal, currency)}</span>
+      <MoneyLines total={movement.costTotalByCurrency} />
       {partial ? (
         <span className="text-xs text-muted-foreground">
           {formatNumber(movement.costedQuantity)} of {formatNumber(units)} costed
