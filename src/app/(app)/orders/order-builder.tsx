@@ -672,9 +672,7 @@ function OrderBuilder({
                 </TableHeader>
                 <TableBody>
                   {lines.map((line) => {
-                    const unitCents = Math.round(
-                      Number(line.product.sellingPrice) * 100,
-                    );
+                    const unitCents = quoteCents(line.unitPrice);
                     const short = line.quantity > line.product.stockQuantity;
 
                     return (
