@@ -75,3 +75,26 @@ export function carriedAcrossCurrencyChange(
     .filter((line) => baselineAmounts.get(line.key) === line.amount)
     .map((line) => line.key);
 }
+
+/**
+ * Whether two figures can be compared arithmetically.
+ *
+ * True only when both name a currency and both name the same one. With no
+ * exchange rate anywhere in this system that is the only case in which
+ * subtracting one from the other yields a number meaning anything: across two
+ * currencies the difference is nonsense, and a missing currency is not evidence
+ * of agreement but the absence of evidence either way, so it answers false
+ * rather than optimistically matching.
+ *
+ * Used where a screen wants to say how far one amount sits from another — a
+ * quote against its catalogue reference. When this says no, the honest move is
+ * to show both figures in their own currencies and leave the reader the
+ * comparison this code cannot make for them.
+ */
+export function sameKnownCurrency(
+  a: Currency | null,
+  b: Currency | null,
+): boolean {
+  if (a === null || b === null) return false;
+  return a === b;
+}

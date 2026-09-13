@@ -4,6 +4,7 @@ import { DEFAULT_CURRENCY, type Currency } from "@/lib/currency";
 import {
   carriedAcrossCurrencyChange,
   clearedByCurrencyChange,
+  sameKnownCurrency,
   type PricedLine,
 } from "@/lib/document-currency";
 
@@ -178,5 +179,45 @@ describe("orders and purchases answer identically", () => {
         to: "EUR",
       }),
     ).toEqual(["part-b"]);
+  });
+});
+
+/**
+ * Whether a screen may subtract one figure from another.
+ *
+ * The order builder shows how far a quote sits from the catalogue's reference
+ * price. That difference only exists when both are denominated in the same
+ * thing; across two currencies it is a number with no meaning, and the screen
+ * shows the reference in its own currency instead.
+ */
+describe("when two figures can be compared at all", () => {
+  it("compares two figures quoted in the same currency", () => {
+    expect(sameKnownCurrency("USD", "USD")).toBe(true);
+    expect(sameKnownCurrency("INR", "INR")).toBe(true);
+  });
+
+  it("refuses two figures quoted in different currencies", () => {
+    // Symmetric: neither side is the one with authority over the other.
+    expect(sameKnownCurrency("USD", "INR")).toBe(false);
+    expect(sameKnownCurrency("INR", "USD")).toBe(false);
+  });
+
+  it("refuses a reference whose currency was never recorded", () => {
+    expect(sameKnownCurrency("USD", null)).toBe(false);
+  });
+
+  it("refuses a document that has no currency of its own", () => {
+    expect(sameKnownCurrency(null, "USD")).toBe(false);
+  });
+
+  it("never fills a missing currency in — not even with the default", () => {
+    /*
+     * Two unknowns are not a match. The installation default proposes a
+     * currency for a document being created; it is not a fact about a figure
+     * that already exists, so it can neither name one nor make two comparable.
+     */
+    expect(sameKnownCurrency(null, null)).toBe(false);
+    expect(sameKnownCurrency(DEFAULT_CURRENCY, null)).toBe(false);
+    expect(sameKnownCurrency(null, DEFAULT_CURRENCY)).toBe(false);
   });
 });

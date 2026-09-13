@@ -49,12 +49,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { CurrencySelect } from "@/components/ui/currency-select";
-import { formatEntry } from "@/components/ui/money";
+import { formatEntry, RecordMoney } from "@/components/ui/money";
 import { useCurrency } from "@/components/layout/currency-provider";
 import type { Currency } from "@/lib/currency";
 import {
   carriedAcrossCurrencyChange,
   clearedByCurrencyChange,
+  sameKnownCurrency,
 } from "@/lib/document-currency";
 import { formatCurrency, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -719,7 +720,9 @@ function OrderBuilder({
                           />
                           <QuoteNote
                             reference={line.product.sellingPrice}
+                            referenceCurrency={line.product.priceCurrency}
                             quoted={line.unitPrice}
+                            currency={currency}
                           />
                         </TableCell>
                         <TableCell className="text-right">
@@ -946,19 +949,43 @@ function isValidQuote(value: string): boolean {
  * prevents is a quote drifting from the reference *unnoticed*, which is the
  * protection that replaced the server refusing client-supplied prices at all.
  *
+ * The deviation only exists when the catalogue quoted its reference in the
+ * currency this order is being raised in. Otherwise the two figures are not on
+ * the same scale and subtracting them would invent a number — so the reference
+ * is shown in its own currency instead, which is the same fact minus the
+ * arithmetic, and the salesperson compares them knowing what each one is. A
+ * reference whose currency was never recorded is shown the same way, marked
+ * unknown: it is still worth seeing and still not comparable.
+ *
  * Nothing is shown when there is no reference to compare against, when the
- * quote is not yet usable, or when the two agree.
+ * quote is not yet usable, or when the two are comparable and agree.
  */
 function QuoteNote({
   reference,
+  referenceCurrency,
   quoted,
+  currency,
 }: {
   reference: string | null;
+  referenceCurrency: Currency | null;
   quoted: string;
+  /**
+   * What this order is denominated in — the currency on the document being
+   * built, never the installation default. The default proposes a currency for
+   * a new order and has no business labelling a figure that already has one.
+   */
+  currency: Currency;
 }) {
-  const currency = useCurrency();
-
   if (reference === null || !isValidQuote(quoted)) return null;
+
+  if (!sameKnownCurrency(currency, referenceCurrency)) {
+    return (
+      <span className="mt-1 block text-xs text-muted-foreground">
+        Reference:{" "}
+        <RecordMoney amount={reference} currency={referenceCurrency} />
+      </span>
+    );
+  }
 
   const referenceCents = Math.round(Number(reference) * 100);
   const quotedCents = quoteCents(quoted);
