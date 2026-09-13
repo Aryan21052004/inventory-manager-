@@ -4,6 +4,7 @@ import { DEFAULT_CURRENCY, type Currency } from "@/lib/currency";
 import {
   carriedAcrossCurrencyChange,
   clearedByCurrencyChange,
+  prefillableAmount,
   sameKnownCurrency,
   type PricedLine,
 } from "@/lib/document-currency";
@@ -223,121 +224,119 @@ describe("when two figures can be compared at all", () => {
 });
 
 /**
- * What `addProduct` puts on a new order line, as the builder computes it.
+ * Whether a line may start at a figure something else already recorded.
  *
- * Mirrored here rather than imported, for the same reason `initialSelection`
- * above is: the decision is four lines inside a React state updater and this
- * suite has no DOM. What it pins is the composition — that `sameKnownCurrency`
- * is the thing standing between a catalogue figure and a line denominated in
- * something else — and that an amount and its provenance always move together.
+ * One decision with two vocabularies, which is why it lives in the library and
+ * not in either builder: an order line offers the catalogue's selling price, a
+ * purchase line offers the last cost paid, and both must first ask whether that
+ * figure is denominated in what the document is denominated in.
+ *
+ * `null` is the whole answer on the refusing side — it is what leaves the box
+ * empty *and* what marks the line as the operator's own, so the two can never
+ * drift apart in a caller.
  */
-function cataloguePrefill(params: {
-  sellingPrice: string | null;
-  priceCurrency: Currency | null;
-  documentCurrency: Currency;
-}): { unitPrice: string; priceSource: "catalogue" | "manual" } {
-  const prefill =
-    params.sellingPrice !== null &&
-    sameKnownCurrency(params.documentCurrency, params.priceCurrency)
-      ? params.sellingPrice
-      : null;
-
-  return {
-    unitPrice: prefill ?? "",
-    priceSource: prefill === null ? "manual" : "catalogue",
-  };
-}
-
-describe("what a new line starts at", () => {
-  it("takes the catalogue price when the catalogue quoted it in this currency", () => {
+describe("what a new line may start at", () => {
+  it("offers the figure when it was recorded in this currency", () => {
     expect(
-      cataloguePrefill({
-        sellingPrice: "12000.00",
-        priceCurrency: "INR",
+      prefillableAmount({
+        amount: "12000.00",
+        currency: "INR",
         documentCurrency: "INR",
       }),
-    ).toEqual({ unitPrice: "12000.00", priceSource: "catalogue" });
+    ).toBe("12000.00");
   });
 
-  it("starts blank when the catalogue quoted it in something else", () => {
+  it("offers nothing when it was recorded in something else", () => {
     /*
-     * Not a default in this order's currency — a different number. Nothing
-     * converts it, so nothing may carry it across: 40.00 off a dollar price
-     * list is not the opening quote for a rupee order.
+     * Not a default in this document's currency — a different number. 40.00 off
+     * a dollar price list is not the opening quote for a rupee order, and
+     * 40.00 paid to a supplier in dollars is not what this delivery cost in
+     * rupees. Nothing converts either one, so nothing may carry it across.
      */
     expect(
-      cataloguePrefill({
-        sellingPrice: "40.00",
-        priceCurrency: "USD",
+      prefillableAmount({
+        amount: "40.00",
+        currency: "USD",
         documentCurrency: "INR",
       }),
-    ).toEqual({ unitPrice: "", priceSource: "manual" });
+    ).toBeNull();
   });
 
-  it("starts blank when nobody recorded what the catalogue price is in", () => {
-    // An unknown denomination is not this order's by default. Treating it as
-    // one is the precise assumption this whole change set exists to remove.
+  it("offers nothing when nobody recorded what the figure is in", () => {
+    // An unknown denomination is not this document's by default. Treating it
+    // as one is the precise assumption this whole change set exists to remove.
     expect(
-      cataloguePrefill({
-        sellingPrice: "40.00",
-        priceCurrency: null,
+      prefillableAmount({
+        amount: "40.00",
+        currency: null,
         documentCurrency: "USD",
       }),
-    ).toEqual({ unitPrice: "", priceSource: "manual" });
+    ).toBeNull();
   });
 
-  it("starts blank for a product with no catalogue price at all", () => {
-    // Unchanged: a part that is only ever quoted has nothing to prefill,
-    // whatever the currencies say.
+  it("offers nothing when there is no figure at all", () => {
+    // A part that is only ever quoted, or one never yet received: nothing to
+    // offer, whatever the currencies say.
     expect(
-      cataloguePrefill({
-        sellingPrice: null,
-        priceCurrency: null,
+      prefillableAmount({
+        amount: null,
+        currency: null,
         documentCurrency: "USD",
       }),
-    ).toEqual({ unitPrice: "", priceSource: "manual" });
+    ).toBeNull();
   });
 
-  it("keeps a genuine zero when the currency matches", () => {
+  it("offers a genuine zero when the currency matches", () => {
     /*
-     * Free of charge is a price somebody set, not a missing one. It prefills
-     * like any other figure and stays catalogue-sourced, so a later currency
+     * Free of charge is a figure somebody set, not a missing one — a warranty
+     * replacement still arrives and still has to be counted in. It is offered
+     * like any other amount and stays reference-sourced, so a later currency
      * change clears it along with the rest.
      */
     expect(
-      cataloguePrefill({
-        sellingPrice: "0.00",
-        priceCurrency: "EUR",
+      prefillableAmount({
+        amount: "0.00",
+        currency: "EUR",
         documentCurrency: "EUR",
       }),
-    ).toEqual({ unitPrice: "0.00", priceSource: "catalogue" });
+    ).toBe("0.00");
   });
 
-  it("drops even a zero when the currency does not match", () => {
-    // Zero is the same number in every currency, but the catalogue's claim is
-    // not: nobody priced this part in euros, so nothing is asserted for it.
+  it("offers nothing for a zero recorded in another currency", () => {
+    // Zero is the same number everywhere, but the claim behind it is not:
+    // nobody priced this in euros, so nothing is asserted for it here.
     expect(
-      cataloguePrefill({
-        sellingPrice: "0.00",
-        priceCurrency: "USD",
+      prefillableAmount({
+        amount: "0.00",
+        currency: "USD",
         documentCurrency: "EUR",
       }),
-    ).toEqual({ unitPrice: "", priceSource: "manual" });
+    ).toBeNull();
+  });
+
+  it("offers nothing when the document has no currency of its own", () => {
+    expect(
+      prefillableAmount({
+        amount: "40.00",
+        currency: "USD",
+        documentCurrency: null,
+      }),
+    ).toBeNull();
   });
 
   it("never rewrites the figure — it passes it through or drops it", () => {
-    const catalogue = { sellingPrice: "89.99", priceCurrency: "USD" as const };
+    const recorded = { amount: "89.99", currency: "USD" as const };
 
     // Through unchanged: no conversion, no rounding, no re-scaling.
-    expect(
-      cataloguePrefill({ ...catalogue, documentCurrency: "USD" }).unitPrice,
-    ).toBe("89.99");
+    expect(prefillableAmount({ ...recorded, documentCurrency: "USD" })).toBe(
+      "89.99",
+    );
     // Or not at all. There is no third answer, and in particular no converted
-    // one — an empty box is what "we cannot say" looks like.
+    // one — null is what "we cannot say" looks like.
     expect(
-      cataloguePrefill({ ...catalogue, documentCurrency: "INR" }).unitPrice,
-    ).toBe("");
-    // And the catalogue figure itself is untouched either way.
-    expect(catalogue.sellingPrice).toBe("89.99");
+      prefillableAmount({ ...recorded, documentCurrency: "INR" }),
+    ).toBeNull();
+    // And the recorded figure itself is untouched either way.
+    expect(recorded.amount).toBe("89.99");
   });
 });

@@ -98,3 +98,32 @@ export function sameKnownCurrency(
   if (a === null || b === null) return false;
   return a === b;
 }
+
+/**
+ * The historical figure a new line may start at, or nothing at all.
+ *
+ * Both builders offer a number when a line is created — the catalogue's selling
+ * price on an order, the last cost paid on a purchase — and both face the same
+ * question about it: is it denominated in what this document is denominated in?
+ * Only then is it a default. Otherwise it is a different number wearing a
+ * familiar shape, and copying it in would not convert it, it would silently
+ * re-denominate it — there being no rate here to convert it with.
+ *
+ * Returns the amount unchanged, or null. There is no third answer and in
+ * particular no converted one: a blank box is what "we cannot say" looks like,
+ * and the operator enters the figure in the document's own currency.
+ *
+ * Null is also what tells the caller to record the line as the operator's own
+ * rather than the reference's, so a later currency change has nothing to clear.
+ */
+export function prefillableAmount(params: {
+  amount: string | null;
+  currency: Currency | null;
+  documentCurrency: Currency | null;
+}): string | null {
+  if (params.amount === null) return null;
+
+  return sameKnownCurrency(params.documentCurrency, params.currency)
+    ? params.amount
+    : null;
+}

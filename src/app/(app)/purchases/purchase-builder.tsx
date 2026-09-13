@@ -54,6 +54,7 @@ import type { Currency } from "@/lib/currency";
 import {
   carriedAcrossCurrencyChange,
   clearedByCurrencyChange,
+  prefillableAmount,
 } from "@/lib/document-currency";
 import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
 
@@ -248,22 +249,36 @@ function PurchaseBuilder({
       return;
     }
 
+    /*
+     * Seeded from what was last actually paid, and left blank when this part
+     * has never been received. Blank rather than "0.00" on purpose: a zero
+     * nobody meant is a lot recorded as free stock, and what gets typed here
+     * becomes the acquisition cost of the batch. The operator has to enter
+     * what the supplier actually charged this time — the prefill is a
+     * reminder of the last invoice, not a quote for this one.
+     *
+     * And blank too when that earlier delivery was paid for in some other
+     * currency, or in one nobody recorded. This figure does not stay on a
+     * screen: it becomes `StockLot.unitCost`, frozen against the currency of
+     * the purchase that received it, and read back afterwards by FIFO as the
+     * cost of the goods. A dollar amount booked in as rupees is not a display
+     * fault that can be corrected later — it is a batch that will cost out
+     * wrong for the rest of its life, and the next purchase of this part will
+     * be seeded from it in turn.
+     */
+    const prefill = prefillableAmount({
+      amount: product.lastPaidUnitCost,
+      currency: product.lastPaidCurrency,
+      documentCurrency: currency,
+    });
+
     setLines((current) => [
       ...current,
-      /*
-       * Seeded from what was last actually paid, and left blank when this part
-       * has never been received. Blank rather than "0.00" on purpose: a zero
-       * nobody meant is a lot recorded as free stock, and what gets typed here
-       * becomes the acquisition cost of the batch. The operator has to enter
-       * what the supplier actually charged this time — the prefill is a
-       * reminder of the last invoice, not a quote for this one.
-       */
       {
         product,
         quantity: 1,
-        unitCost: product.lastPaidUnitCost ?? "",
-        costSource:
-          product.lastPaidUnitCost === null ? "manual" : "lastPaid",
+        unitCost: prefill ?? "",
+        costSource: prefill === null ? "manual" : COST_FROM_LAST_PAID,
       },
     ]);
   }

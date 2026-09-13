@@ -11,7 +11,12 @@ import { adjustmentCost } from "@/lib/validation/adjustment";
 import { openingStockCost } from "@/lib/validation/product";
 import { createProduct as createCatalogueProduct, adjustStock } from "@/server/products";
 import { createOrder } from "@/server/orders";
-import { createPurchase, receivePurchase } from "@/server/purchases";
+import {
+  createPurchase,
+  receivePurchase,
+  searchPurchaseProducts,
+} from "@/server/purchases";
+import { prefillableAmount } from "@/lib/document-currency";
 import { setCurrency } from "@/server/settings";
 
 import {
@@ -398,5 +403,98 @@ describe("the product's own price currency", () => {
 
     expect(after.sellingPrice).toBeNull();
     expect(after.priceCurrency).toBeNull();
+  });
+});
+
+/**
+ * The last invoice as a reminder, never as a default in another currency.
+ *
+ * The purchase builder offers what was paid last time. That figure came off a
+ * real batch and carries that batch's currency, and when the two disagree the
+ * form offers nothing rather than the number — because this figure does not
+ * stay on a screen. It becomes `StockLot.unitCost`, frozen against the currency
+ * of the purchase that received it, and read back afterwards as the cost of the
+ * goods. A dollar amount booked in as rupees is not a display fault somebody
+ * can correct later; it is a batch that costs out wrong for the rest of its
+ * life, and the next purchase of the part is seeded from it in turn.
+ *
+ * So this test goes all the way to storage. The decision is checked where the
+ * form makes it, and then the lots are read back to prove what the decision
+ * kept out of them.
+ */
+describe("a cost last paid in another currency", () => {
+  it("never becomes the acquisition cost of a purchase raised in a different one", async () => {
+    await signInWithRole("ADMIN");
+    const supplier = await createSupplier();
+    const part = await seedProduct({
+      sku: "LOT-CCY-PREFILL",
+      stockQuantity: 0,
+    });
+
+    // A first delivery, paid for in dollars.
+    await setCurrency("USD");
+    const first = await createPurchase({
+      supplierId: supplier.id,
+      items: [{ productId: part.id, quantity: 10, unitCost: "40.00" }],
+    });
+    await receivePurchase(first.id);
+
+    // What the builder would show beside this part next time, in its own
+    // currency: the reference is real and worth seeing.
+    const option = (await searchPurchaseProducts("LOT-CCY-PREFILL"))[0]!;
+    expect(option.lastPaidUnitCost).toBe("40.00");
+    expect(option.lastPaidCurrency).toBe("USD");
+
+    // And what a rupee purchase may start a line at: nothing. No conversion
+    // happens here or anywhere — the operator enters what was actually paid.
+    expect(
+      prefillableAmount({
+        amount: option.lastPaidUnitCost,
+        currency: option.lastPaidCurrency,
+        documentCurrency: "INR",
+      }),
+    ).toBeNull();
+
+    const second = await createPurchase({
+      supplierId: supplier.id,
+      currency: "INR",
+      items: [{ productId: part.id, quantity: 4, unitCost: "3400.00" }],
+    });
+    await receivePurchase(second.id);
+
+    const lots = await prisma.stockLot.findMany({
+      where: { productId: part.id, costSource: "PURCHASE" },
+      orderBy: { receivedAt: "asc" },
+      select: {
+        unitCost: true,
+        costCurrency: true,
+        quantityReceived: true,
+      },
+    });
+
+    expect(lots).toHaveLength(2);
+
+    // The dollar batch, unchanged by anything that happened afterwards.
+    expect(Number(lots[0]!.unitCost)).toBe(40);
+    expect(lots[0]!.costCurrency).toBe("USD");
+
+    // The one this test exists for: the rupee batch carries the rupee figure
+    // the operator typed, denominated in the currency of its own purchase.
+    expect(Number(lots[1]!.unitCost)).toBe(3400);
+    expect(lots[1]!.costCurrency).toBe("INR");
+
+    // And the shape the defect would have taken appears nowhere: the dollar
+    // magnitude wearing the rupee label.
+    expect(
+      lots.some(
+        (lot) => lot.costCurrency === "INR" && Number(lot.unitCost) === 40,
+      ),
+    ).toBe(false);
+
+    // Both deliveries arrived in full. None of this touches the shelf.
+    expect(lots[0]!.quantityReceived).toBe(10);
+    expect(lots[1]!.quantityReceived).toBe(4);
+
+    await expectLotsReconcile();
   });
 });

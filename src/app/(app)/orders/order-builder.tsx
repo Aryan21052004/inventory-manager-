@@ -55,6 +55,7 @@ import type { Currency } from "@/lib/currency";
 import {
   carriedAcrossCurrencyChange,
   clearedByCurrencyChange,
+  prefillableAmount,
   sameKnownCurrency,
 } from "@/lib/document-currency";
 import { formatCurrency, formatNumber } from "@/lib/format";
@@ -321,11 +322,11 @@ function OrderBuilder({
      * The rule `changeCurrency` applies to lines already on the order, applied
      * at the other moment a catalogue figure can get onto one.
      */
-    const prefill =
-      product.sellingPrice !== null &&
-      sameKnownCurrency(currency, product.priceCurrency)
-        ? product.sellingPrice
-        : null;
+    const prefill = prefillableAmount({
+      amount: product.sellingPrice,
+      currency: product.priceCurrency,
+      documentCurrency: currency,
+    });
 
     setLines((current) => [
       ...current,
