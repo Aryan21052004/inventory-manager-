@@ -48,7 +48,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { CurrencySelect } from "@/components/ui/currency-select";
-import { formatEntry } from "@/components/ui/money";
+import { formatEntry, moneyText } from "@/components/ui/money";
 import { useCurrency } from "@/components/layout/currency-provider";
 import type { Currency } from "@/lib/currency";
 import {
@@ -303,19 +303,8 @@ function PurchaseBuilder({
 
   const totalCents = lines.reduce((sum, line) => sum + lineCents(line), 0);
 
-  /**
-   * A line whose cost is missing, is not a usable number, or is negative.
-   *
-   * An empty box counts as missing rather than as zero. `Number("")` is 0, so
-   * letting it through would save "nobody said" as "it was free" — and what is
-   * typed here becomes the acquisition cost of a batch that has no way to
-   * record an unknown. Zero stays perfectly enterable; it just has to be
-   * entered.
-   */
-  const badCost = lines.filter((line) => {
-    const cost = line.unitCost.trim();
-    return cost === "" || !Number.isFinite(Number(cost)) || Number(cost) < 0;
-  });
+  /** Lines the form will not submit, by the rule the cost input also shows. */
+  const badCost = lines.filter((line) => !isValidCost(line.unitCost));
 
   /**
    * A line whose product has been retired. The server refuses to save or
@@ -651,7 +640,7 @@ function PurchaseBuilder({
                           step="0.01"
                           value={line.unitCost}
                           aria-label={`Unit cost for ${line.product.name}`}
-                          aria-invalid={Number(line.unitCost) < 0}
+                          aria-invalid={!isValidCost(line.unitCost)}
                           onChange={(event) =>
                             updateLine(line.product.id, {
                               unitCost: event.target.value,
@@ -661,6 +650,7 @@ function PurchaseBuilder({
                           }
                           className="tabular w-28 text-right"
                         />
+                        <LastPaidNote line={line} />
                       </TableCell>
 
                       <TableCell className="tabular text-right font-medium">
@@ -804,6 +794,52 @@ function PurchaseBuilder({
         ) : null}
       </div>
     </div>
+  );
+}
+
+/**
+ * Whether a typed cost is one the form may submit.
+ *
+ * An empty box is missing rather than zero. `Number("")` is 0, so reading it as
+ * a number would save "nobody said" as "it was free" — and what is typed here
+ * becomes the acquisition cost of a batch that has no way to record an unknown.
+ * Zero stays perfectly enterable; it just has to be entered.
+ *
+ * One rule, read by the submit gate and by the input's own invalid marker, so
+ * the field the form refuses is the field that says it is being refused.
+ */
+function isValidCost(value: string): boolean {
+  const cost = value.trim();
+  if (cost === "") return false;
+
+  const amount = Number(cost);
+  return Number.isFinite(amount) && amount >= 0;
+}
+
+/**
+ * What this part cost last time, shown only while the box is empty.
+ *
+ * The picker says this when a part is chosen and then it is gone, which is the
+ * wrong moment — the figure matters while somebody is typing the new one. So it
+ * reappears under the box, and leaves again the instant anything is entered: a
+ * reminder of one past invoice, never a standing price, which is the work the
+ * date beside it does.
+ *
+ * In the currency that delivery was actually paid in, whatever this purchase is
+ * being raised in. Nothing is converted and nothing is copied — a reference in
+ * another currency is precisely why the box was left empty.
+ */
+function LastPaidNote({ line }: { line: PurchaseLine }) {
+  const { lastPaidUnitCost, lastPaidCurrency, lastPaidAt } = line.product;
+
+  if (line.unitCost.trim() !== "" || lastPaidUnitCost === null) return null;
+
+  return (
+    <span className="mt-1 block text-xs text-muted-foreground">
+      Last paid{" "}
+      {moneyText([{ currency: lastPaidCurrency, amount: lastPaidUnitCost }])}
+      {lastPaidAt === null ? null : ` on ${formatDate(lastPaidAt)}`}
+    </span>
   );
 }
 
