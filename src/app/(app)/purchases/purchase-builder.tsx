@@ -303,10 +303,19 @@ function PurchaseBuilder({
 
   const totalCents = lines.reduce((sum, line) => sum + lineCents(line), 0);
 
-  /** A line whose cost is not a usable number, or is negative. */
-  const badCost = lines.filter(
-    (line) => !Number.isFinite(Number(line.unitCost)) || Number(line.unitCost) < 0,
-  );
+  /**
+   * A line whose cost is missing, is not a usable number, or is negative.
+   *
+   * An empty box counts as missing rather than as zero. `Number("")` is 0, so
+   * letting it through would save "nobody said" as "it was free" — and what is
+   * typed here becomes the acquisition cost of a batch that has no way to
+   * record an unknown. Zero stays perfectly enterable; it just has to be
+   * entered.
+   */
+  const badCost = lines.filter((line) => {
+    const cost = line.unitCost.trim();
+    return cost === "" || !Number.isFinite(Number(cost)) || Number(cost) < 0;
+  });
 
   /**
    * A line whose product has been retired. The server refuses to save or
@@ -331,7 +340,7 @@ function PurchaseBuilder({
     items: lines.map((line) => ({
       productId: line.product.id,
       quantity: line.quantity,
-      unitCost: line.unitCost === "" ? "0" : line.unitCost,
+      unitCost: line.unitCost,
     })),
     purchaseDate,
   });

@@ -8,11 +8,13 @@ vi.mock("@clerk/nextjs/server", async () => {
 import { prisma } from "@/lib/prisma";
 import {
   COST_BASES,
+  COST_BASIS_MESSAGES,
   UNKNOWN_COST_REASON_MAX,
   basisForQuantity,
   costBasisUnitCostCents,
   withUnknownCostReason,
 } from "@/lib/validation/cost-basis";
+import { purchaseLineSchema } from "@/lib/validation/purchase";
 import {
   adjustmentCost,
   stockAdjustmentSchema,
@@ -768,5 +770,79 @@ describe("the adjustment movement API", () => {
     // An undeclared basis produces nothing, so the engine reports the missing
     // declaration rather than a half-built one invented here.
     expect(adjustmentCost({ direction: "INCREASE" }, "USD")).toBeUndefined();
+  });
+});
+
+/**
+ * The third route, held to the same rule about blanks.
+ *
+ * A purchase is not an operator assertion — it has an invoice behind it, which
+ * is why it has no UNKNOWN arm and why `stock_lots_purchase_cost_known` leaves
+ * its lots nowhere to put a null. That makes the blank question *sharper* here,
+ * not softer: on the other two routes an unenterable cost can be declared
+ * unknown, and on this one it has nowhere to go but into a number. It used to
+ * go into zero.
+ *
+ * So the rule the two assertion flows already agree on now covers all three:
+ * an explicit zero is a cost, a blank is an absence, and an absence is refused
+ * rather than filled in.
+ */
+describe("a purchase line's unit cost", () => {
+  const line = (unitCost: string | number) =>
+    purchaseLineSchema.safeParse({
+      productId: "product-1",
+      quantity: 1,
+      unitCost,
+    });
+
+  it("refuses a blank cost", () => {
+    const result = line("");
+
+    expect(result.success).toBe(false);
+    expect(issueFor(result, "unitCost")).toBe(COST_BASIS_MESSAGES.missingCost);
+  });
+
+  it("refuses a cost that is only whitespace", () => {
+    // Trimmed before anything reads it, so a spacebar is not an entry.
+    const result = line("   ");
+
+    expect(result.success).toBe(false);
+    expect(issueFor(result, "unitCost")).toBe(COST_BASIS_MESSAGES.missingCost);
+  });
+
+  it("accepts an explicit zero, in either spelling", () => {
+    // A warranty replacement genuinely arrived free. Somebody said so.
+    expect(line("0").success).toBe(true);
+    expect(line("0.00").success).toBe(true);
+  });
+
+  it("accepts an ordinary positive cost", () => {
+    expect(line("42.50").success).toBe(true);
+  });
+
+  it("refuses a negative cost", () => {
+    expect(line("-1").success).toBe(false);
+  });
+
+  it("refuses a blank in the same words as the other two flows", () => {
+    /*
+     * The assertion this block exists for. Three routes into stock, one
+     * sentence about a missing cost — so a reader who meets it on a purchase
+     * and on an adjustment learns the same rule, and a future relaxation of
+     * one of them fails here rather than in production.
+     */
+    const adjustment = stockAdjustmentSchema.safeParse(
+      adjustmentForm({ costBasis: "KNOWN", unitCost: "" }),
+    );
+    const opening = createProductSchema.safeParse(
+      productForm({ openingStockCostBasis: "KNOWN", openingStockUnitCost: "" }),
+    );
+
+    expect(issueFor(line(""), "unitCost")).toBe(
+      issueFor(adjustment, "unitCost"),
+    );
+    expect(issueFor(line(""), "unitCost")).toBe(
+      issueFor(opening, "openingStockUnitCost"),
+    );
   });
 });

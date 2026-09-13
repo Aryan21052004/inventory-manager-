@@ -846,6 +846,41 @@ describe("totals", () => {
     expect(row.total.toString()).toBe("0");
   });
 
+  it("refuses a blank unit cost rather than receiving free stock", async () => {
+    await signInWithRole("STAFF");
+    const supplier = await createSupplier();
+    const part = await product("V-6", 0);
+
+    /*
+     * `Number("")` is 0, so an empty cost used to save as a zero-cost batch:
+     * units on the shelf, a PURCHASE lot claiming a proven cost of nothing,
+     * and nothing afterwards able to tell it from a genuine free sample. This
+     * is the one route with no UNKNOWN arm to fall back on, so the blank is
+     * refused instead of being filled in.
+     */
+    await expect(
+      createPurchase({
+        supplierId: supplier.id,
+        items: [{ productId: part.id, quantity: 3, unitCost: "" }],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    // Whitespace is a blank too. A spacebar is not an entry.
+    await expect(
+      createPurchase({
+        supplierId: supplier.id,
+        items: [{ productId: part.id, quantity: 3, unitCost: "   " }],
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    // Nothing was raised, nothing arrived, and no batch claims a free delivery.
+    expect(await prisma.purchase.count()).toBe(0);
+    expect(await stockOf(part.id)).toBe(0);
+    expect(
+      await prisma.stockLot.count({ where: { costSource: "PURCHASE" } }),
+    ).toBe(0);
+  });
+
   it("refuses a negative unit cost", async () => {
     await signInWithRole("STAFF");
     const supplier = await createSupplier();

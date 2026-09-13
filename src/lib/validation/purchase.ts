@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { CURRENCIES } from "@/lib/currency";
+import { COST_BASIS_MESSAGES } from "@/lib/validation/cost-basis";
 
 /**
  * Validation for purchases.
@@ -38,13 +39,22 @@ const lineQuantity = z
  * still arrives and still has to be counted into stock. Negative is not: a
  * refund is not a purchase line, and the column's check constraint refuses it
  * anyway.
+ *
+ * Blank is neither, and used to become zero here. `Number("")` is 0, so
+ * coercing an empty box before checking it recorded "nobody entered a cost" as
+ * "these units were free" — a cost, and a wrong one. On this route that claim
+ * is unfalsifiable afterwards: a PURCHASE lot is the one cost this system
+ * treats as proven, and `stock_lots_purchase_cost_known` leaves it nowhere to
+ * be null the way an unknown adjustment can be. So an empty cost is refused
+ * instead, in the words the opening-stock and adjustment flows already use —
+ * one rule about blanks and zeroes, not three.
  */
 const unitCost = z
   .union([z.string(), z.number()])
   .transform((value) =>
     typeof value === "number" ? String(value) : value.trim(),
   )
-  .transform((value) => (value === "" ? "0" : value))
+  .refine((value) => value !== "", COST_BASIS_MESSAGES.missingCost)
   .refine((value) => Number.isFinite(Number(value)), "Unit cost must be a number")
   .transform(Number)
   .refine((value) => value >= 0, "Unit cost cannot be negative")
