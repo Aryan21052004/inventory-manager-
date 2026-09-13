@@ -466,9 +466,11 @@ model Product {
 
   /// What `sellingPrice` is denominated in.
   ///
-  /// Paired with the price by a check constraint: a price without a currency is
-  /// a number nobody can act on, and a currency without a price describes
-  /// nothing. `selling_price IS NULL` exactly when this is null.
+  /// Paired with the price: a price without a currency is a number nobody can
+  /// act on, and a currency without a price describes nothing, so
+  /// `selling_price IS NULL` exactly when this is null. Enforced by
+  /// `createProduct` and `updateProduct`, not yet by the database — the
+  /// paired-null CHECK belongs to Phase 3, with the rest of the contract.
   ///
   /// **Mutable, unlike a transaction currency.** This is a current catalogue
   /// value, not a record of something that happened, so re-pricing a part in a
@@ -477,9 +479,10 @@ model Product {
   /// changing the installation default does not reach either of them.
   ///
   /// Nullable through Phase 0 of the currency migration for every row, because
-  /// existing prices have no recoverable currency. The check constraint is
-  /// added NOT VALID so new and edited rows are held to the pairing while
-  /// legacy rows wait for a reviewed backfill.
+  /// existing prices have no recoverable currency. A NOT VALID constraint was
+  /// drafted for the expand migration and deliberately left out: enforcing on
+  /// insert breaks every writer that does not yet supply a currency. It goes in
+  /// once the backfill has settled the legacy rows.
   priceCurrency Currency? @map("price_currency")
 
   /// Stock on hand. Never write this directly — go through the stock engine so
@@ -612,9 +615,13 @@ model OrderItem {
   /// What this customer was quoted for one unit, on this order.
   ///
   /// The authoritative selling price and the only one any revenue figure may
-  /// read. It defaults from `Product.sellingPrice` when the line is added and
-  /// is then a fact about this order alone — editing the catalogue afterwards
-  /// does not reach it, and neither does confirming, fulfilling or cancelling.
+  /// read. The order builder offers `Product.sellingPrice` as a starting value
+  /// when a line is added — and only when the catalogue quoted that price in
+  /// this order's currency, there being no rate here to make a figure in
+  /// another one mean anything. Nothing on the server reads the catalogue:
+  /// `createOrder` takes the quote from the request. Whatever is submitted is
+  /// then a fact about this order alone — editing the catalogue afterwards does
+  /// not reach it, and neither does confirming, fulfilling or cancelling.
   ///
   /// Set while the order is a draft; immutable from confirmation onward,
   /// because `isEditable` permits edits in no other status.
