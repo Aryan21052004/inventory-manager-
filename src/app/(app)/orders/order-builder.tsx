@@ -308,17 +308,36 @@ function OrderBuilder({
      * blank and must be filled in. Prefilling happens *here*, when the line is
      * created, and nowhere else — a line that already carries a quote must
      * never be re-seeded from the catalogue.
+     *
+     * And only a price the catalogue quoted in the currency this order is
+     * being raised in. A figure denominated in something else is not a default
+     * but a different number: copying 40.00 off a dollar price list into a
+     * rupee order converts nothing, it silently re-denominates it, and
+     * `OrderItem` keeps no record that the figure ever meant dollars. There
+     * are no exchange rates here, so the honest prefill is none — the picker
+     * and the note under the box each show the reference in its own currency,
+     * and the quote gets entered in this order's.
+     *
+     * The rule `changeCurrency` applies to lines already on the order, applied
+     * at the other moment a catalogue figure can get onto one.
      */
+    const prefill =
+      product.sellingPrice !== null &&
+      sameKnownCurrency(currency, product.priceCurrency)
+        ? product.sellingPrice
+        : null;
+
     setLines((current) => [
       ...current,
       {
         product,
         quantity: 1,
-        unitPrice: product.sellingPrice ?? "",
+        unitPrice: prefill ?? "",
         // Prefilled from the catalogue, so a currency change may clear it.
-        // A product with no reference price starts blank and is the
+        // Blank whenever the catalogue's figure cannot be used — no reference
+        // price, or one denominated in something else — and a blank is the
         // operator's from the outset.
-        priceSource: product.sellingPrice === null ? "manual" : "catalogue",
+        priceSource: prefill === null ? "manual" : "catalogue",
       },
     ]);
   }

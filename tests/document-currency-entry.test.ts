@@ -221,3 +221,123 @@ describe("when two figures can be compared at all", () => {
     expect(sameKnownCurrency(null, DEFAULT_CURRENCY)).toBe(false);
   });
 });
+
+/**
+ * What `addProduct` puts on a new order line, as the builder computes it.
+ *
+ * Mirrored here rather than imported, for the same reason `initialSelection`
+ * above is: the decision is four lines inside a React state updater and this
+ * suite has no DOM. What it pins is the composition — that `sameKnownCurrency`
+ * is the thing standing between a catalogue figure and a line denominated in
+ * something else — and that an amount and its provenance always move together.
+ */
+function cataloguePrefill(params: {
+  sellingPrice: string | null;
+  priceCurrency: Currency | null;
+  documentCurrency: Currency;
+}): { unitPrice: string; priceSource: "catalogue" | "manual" } {
+  const prefill =
+    params.sellingPrice !== null &&
+    sameKnownCurrency(params.documentCurrency, params.priceCurrency)
+      ? params.sellingPrice
+      : null;
+
+  return {
+    unitPrice: prefill ?? "",
+    priceSource: prefill === null ? "manual" : "catalogue",
+  };
+}
+
+describe("what a new line starts at", () => {
+  it("takes the catalogue price when the catalogue quoted it in this currency", () => {
+    expect(
+      cataloguePrefill({
+        sellingPrice: "12000.00",
+        priceCurrency: "INR",
+        documentCurrency: "INR",
+      }),
+    ).toEqual({ unitPrice: "12000.00", priceSource: "catalogue" });
+  });
+
+  it("starts blank when the catalogue quoted it in something else", () => {
+    /*
+     * Not a default in this order's currency — a different number. Nothing
+     * converts it, so nothing may carry it across: 40.00 off a dollar price
+     * list is not the opening quote for a rupee order.
+     */
+    expect(
+      cataloguePrefill({
+        sellingPrice: "40.00",
+        priceCurrency: "USD",
+        documentCurrency: "INR",
+      }),
+    ).toEqual({ unitPrice: "", priceSource: "manual" });
+  });
+
+  it("starts blank when nobody recorded what the catalogue price is in", () => {
+    // An unknown denomination is not this order's by default. Treating it as
+    // one is the precise assumption this whole change set exists to remove.
+    expect(
+      cataloguePrefill({
+        sellingPrice: "40.00",
+        priceCurrency: null,
+        documentCurrency: "USD",
+      }),
+    ).toEqual({ unitPrice: "", priceSource: "manual" });
+  });
+
+  it("starts blank for a product with no catalogue price at all", () => {
+    // Unchanged: a part that is only ever quoted has nothing to prefill,
+    // whatever the currencies say.
+    expect(
+      cataloguePrefill({
+        sellingPrice: null,
+        priceCurrency: null,
+        documentCurrency: "USD",
+      }),
+    ).toEqual({ unitPrice: "", priceSource: "manual" });
+  });
+
+  it("keeps a genuine zero when the currency matches", () => {
+    /*
+     * Free of charge is a price somebody set, not a missing one. It prefills
+     * like any other figure and stays catalogue-sourced, so a later currency
+     * change clears it along with the rest.
+     */
+    expect(
+      cataloguePrefill({
+        sellingPrice: "0.00",
+        priceCurrency: "EUR",
+        documentCurrency: "EUR",
+      }),
+    ).toEqual({ unitPrice: "0.00", priceSource: "catalogue" });
+  });
+
+  it("drops even a zero when the currency does not match", () => {
+    // Zero is the same number in every currency, but the catalogue's claim is
+    // not: nobody priced this part in euros, so nothing is asserted for it.
+    expect(
+      cataloguePrefill({
+        sellingPrice: "0.00",
+        priceCurrency: "USD",
+        documentCurrency: "EUR",
+      }),
+    ).toEqual({ unitPrice: "", priceSource: "manual" });
+  });
+
+  it("never rewrites the figure — it passes it through or drops it", () => {
+    const catalogue = { sellingPrice: "89.99", priceCurrency: "USD" as const };
+
+    // Through unchanged: no conversion, no rounding, no re-scaling.
+    expect(
+      cataloguePrefill({ ...catalogue, documentCurrency: "USD" }).unitPrice,
+    ).toBe("89.99");
+    // Or not at all. There is no third answer, and in particular no converted
+    // one — an empty box is what "we cannot say" looks like.
+    expect(
+      cataloguePrefill({ ...catalogue, documentCurrency: "INR" }).unitPrice,
+    ).toBe("");
+    // And the catalogue figure itself is untouched either way.
+    expect(catalogue.sellingPrice).toBe("89.99");
+  });
+});
