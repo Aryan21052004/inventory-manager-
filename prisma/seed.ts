@@ -52,6 +52,58 @@ if (!connectionString) {
   );
 }
 
+/**
+ * Where this seed is allowed to run.
+ *
+ * Everything below deletes every row in nine tables before it writes a single
+ * one, which makes the target database the only thing standing between "the
+ * sample data is re-runnable" and "somebody's work is gone".
+ *
+ * The *host* is what decides, not NODE_ENV. NODE_ENV does not catch the case
+ * that actually happens: `prisma db seed` spawns this file with NODE_ENV unset,
+ * so a laptop pointed at a production DATABASE_URL looks exactly like ordinary
+ * development. The connection string is the one thing that differs between the
+ * two, so it is the one thing worth checking. NODE_ENV is checked as well, as a
+ * second veto rather than the first.
+ *
+ * The same enforcement `tests/database-url.ts` applies to the test suite, for
+ * the same reason and by the same means: a destructive script decides for
+ * itself what it may point at instead of trusting whatever it was handed.
+ *
+ * This runs before the client is constructed, so a refusal opens no connection.
+ * Only the host is named in the error — never the connection string, which
+ * carries a password.
+ */
+const LOCAL_HOSTS = new Set([
+  "localhost",
+  "127.0.0.1",
+  "::1",
+  "0.0.0.0",
+  "host.docker.internal",
+]);
+
+function hostOf(url: string): string {
+  try {
+    // Postgres URLs parse as WHATWG URLs; an IPv6 host arrives bracketed.
+    return new URL(url).hostname.replace(/^[|]$/g, "");
+  } catch {
+    return "";
+  }
+}
+
+const seedHost = hostOf(connectionString);
+const inProduction = process.env["NODE_ENV"] === "production";
+
+if (inProduction || !LOCAL_HOSTS.has(seedHost)) {
+  throw new Error(
+    "Refusing to seed. This script deletes every row in nine tables, and " +
+      `DATABASE_URL points at ${seedHost ? `"${seedHost}"` : "a host it could not parse"}` +
+      `${inProduction ? " with NODE_ENV=production" : ""}. ` +
+      "The seed is development-only: point DATABASE_URL at a local database " +
+      `(${[...LOCAL_HOSTS].join(", ")}) to run it.`,
+  );
+}
+
 const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString }),
   log: ["warn", "error"],

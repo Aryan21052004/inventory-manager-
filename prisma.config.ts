@@ -22,7 +22,25 @@ export default defineConfig({
     // than plain node because the generated Prisma Client is TypeScript source.
     seed: "tsx prisma/seed.ts",
   },
+  /*
+   * The connection migrations and introspection use.
+   *
+   * Prisma 7 removed `directUrl` from the schema — connection URLs live here
+   * now — and there is no separate "direct" field here either, because there no
+   * longer needs to be: this datasource *is* the schema engine's, while the
+   * running application opens its own in src/lib/prisma.ts. Pointing this one
+   * at DIRECT_URL is the whole of the split.
+   *
+   * It matters on a pooled host. A transaction-mode pooler cannot carry DDL or
+   * the advisory lock `migrate` takes, so migrations need the direct port while
+   * the application keeps the pooled one. Locally there is one database and one
+   * URL, so DATABASE_URL is the fallback and nothing changes.
+   *
+   * `process.env` rather than Prisma's `env()` helper, which throws on a
+   * missing variable and would therefore break every developer who has no
+   * DIRECT_URL set.
+   */
   datasource: {
-    url: process.env["DATABASE_URL"],
+    url: process.env["DIRECT_URL"] ?? process.env["DATABASE_URL"],
   },
 });
