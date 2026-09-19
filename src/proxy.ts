@@ -14,6 +14,11 @@ import { NextResponse } from "next/server";
  *
  * Keys are read straight from `process.env` rather than through `lib/env`, to
  * keep the edge bundle free of database configuration it has no use for.
+ *
+ * It also serves Clerk's Frontend API from this origin. With
+ * `frontendApiProxy` enabled the SDK answers `/__clerk/*` itself — its default
+ * prefix, and the one the Clerk dashboard was given — so the browser talks to
+ * this domain instead of Clerk's, and no route handler of our own is involved.
  */
 
 const authConfigured = Boolean(
@@ -23,10 +28,20 @@ const authConfigured = Boolean(
 // In setup mode Clerk is unconfigured and `clerkMiddleware` would throw on every
 // request, so the proxy steps aside. Production refuses to start without keys
 // (see src/lib/env.ts), so this can only happen in development.
-export default authConfigured ? clerkMiddleware() : () => NextResponse.next();
+export default authConfigured
+  ? clerkMiddleware({
+      frontendApiProxy: {
+        enabled: true,
+      },
+    })
+  : () => NextResponse.next();
 
 export const config = {
   matcher: [
+    // Clerk's Frontend API proxy, listed first and spelled out. The catch-all
+    // below would not cover it: that pattern excludes anything ending `.js`,
+    // and clerk-js is served from under this prefix.
+    "/__clerk/(.*)",
     // Everything except Next internals and static files, unless a search param
     // is present — those still need an auth context.
     "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
