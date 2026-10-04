@@ -1,0 +1,66 @@
+/**
+ * A stand-in for the server Supabase Auth client.
+ *
+ * Only what `src/server/auth.ts` actually uses is implemented: one
+ * `createSupabaseServerClient` returning something with
+ * `auth.getUser()`. Reaching a real Supabase project from a test would make
+ * the suite depend on a network, an account, and — since the project in
+ * question is the production one — on nothing going wrong.
+ *
+ * The user shape follows Supabase's, including the parts that matter to the
+ * code under test: `email` optional, `email_confirmed_at` optional, and
+ * `user_metadata` an untyped bag. That awkwardness is exactly what the mapping
+ * has to cope with.
+ */
+
+export interface FakeSupabaseUser {
+  id: string;
+  email?: string | null;
+  email_confirmed_at?: string | null;
+  is_anonymous?: boolean;
+  user_metadata?: Record<string, unknown> | null;
+}
+
+let session: FakeSupabaseUser | null = null;
+
+/**
+ * Builds a Supabase user, defaulting the fields a test does not care about.
+ *
+ * The email is verified by default. The unverified case has to be asked for
+ * explicitly, because a test that forgot it would silently exercise the
+ * fail-closed path and still pass for the wrong reason.
+ */
+export function fakeSupabaseUser(
+  id: string,
+  email: string,
+  overrides: Partial<FakeSupabaseUser> = {},
+): FakeSupabaseUser {
+  return {
+    id,
+    email,
+    email_confirmed_at: "2026-01-01T00:00:00.000Z",
+    is_anonymous: false,
+    user_metadata: null,
+    ...overrides,
+  };
+}
+
+export function signInAsSupabase(user: FakeSupabaseUser): void {
+  session = user;
+}
+
+export function signOutSupabase(): void {
+  session = null;
+}
+
+/** The module namespace that stands in for `@/lib/supabase/server`. */
+export const supabaseServerMock = {
+  createSupabaseServerClient: async () => ({
+    auth: {
+      getUser: async () => ({
+        data: { user: session },
+        error: null,
+      }),
+    },
+  }),
+};

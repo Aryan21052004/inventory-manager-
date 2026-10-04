@@ -26,6 +26,20 @@ process.env["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"] = "pk_test_fake_for_tests";
 process.env["CLERK_SECRET_KEY"] = "sk_test_fake_for_tests";
 
 /*
+ * The same for Supabase Auth, which is mocked in the tests too: these only
+ * need to be present for `supabaseAuthConfigured` to be true. They are read at
+ * module scope by src/lib/supabase/config.ts, so they have to be set before
+ * anything imports it — which is why they are here rather than in a test file.
+ *
+ * Obviously fake values, for the same reason the Clerk ones are: a real project
+ * URL and key reaching this process would be a real Supabase project one
+ * careless import away, and that project holds production data.
+ */
+process.env["NEXT_PUBLIC_SUPABASE_URL"] = "https://fake-project.supabase.co";
+process.env["NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"] =
+  "sb_publishable_fake_for_tests";
+
+/*
  * Uploads go to a scratch directory, never the one a developer is using. The
  * certificate tests write real files and delete them again, and pointing that
  * at `.storage` would have the suite quietly removing documents somebody had

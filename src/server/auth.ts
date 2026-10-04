@@ -7,6 +7,8 @@ import type { UserRole } from "@/generated/prisma/enums";
 import { AppError } from "@/lib/errors";
 import { authEnabled } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
+import { supabaseAuthConfigured } from "@/lib/supabase/config";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 /**
  * The bridge between Clerk's identity and this application's user records.
@@ -42,6 +44,19 @@ import { prisma } from "@/lib/prisma";
  * forever. That is worth adding when the app has real users; it is not worth
  * the endpoint, the signature verification, and the replay handling today,
  * when nothing yet depends on the mirror being fresh.
+ *
+ * ## Two identity providers, for now
+ *
+ * A second identity source — Supabase Auth — is implemented at the bottom of
+ * this file. It is not wired into the four exported functions above: Clerk
+ * still answers every request, and nothing in the application's behaviour
+ * changes because of its presence. The switch is a later, deliberate step.
+ *
+ * Both sources land on the same `User` row and the same `role` column, so
+ * `requireRole` remains the single authorisation gate regardless of which one
+ * authenticated the request. That is the point of putting them in one file
+ * rather than two: the rest of the codebase keeps importing `requireUser` and
+ * `requireRole` and never learns which provider is active.
  */
 
 /**
@@ -275,4 +290,258 @@ function isUniqueViolation(error: unknown): boolean {
     error !== null &&
     (error as { code?: unknown }).code === "P2002"
   );
+}
+
+// ---------------------------------------------------------------------------
+// Supabase Auth
+// ---------------------------------------------------------------------------
+
+/**
+ * The same bridge, built for Supabase Auth.
+ *
+ * Nothing above calls into this section. It exists so that the switch away from
+ * Clerk is a change to which resolver `getCurrentUser` calls rather than a
+ * change to how identity works, and so that the mapping rules below can be
+ * reviewed and tested while Clerk is still serving every request.
+ *
+ * ## The join key
+ *
+ * `supabaseUserId` is the identity key, for the same reason `clerkId` is: it
+ * never changes, and an email does. The column is nullable rather than carrying
+ * an `unlinked_` placeholder — a NULL already means "no Supabase identity has
+ * claimed this row", and PostgreSQL treats NULLs as distinct in a unique index,
+ * so every unclaimed row coexists while no two rows can share an id.
+ *
+ * ## Why a verified email is required
+ *
+ * Email is the one-time adoption key: the first Supabase sign-in with an
+ * address that matches an unclaimed row takes that row over, including its
+ * role. That is how the existing administrator keeps their account instead of
+ * arriving as a new STAFF user — and it is also, stated plainly, a privilege
+ * escalation path if the address is not proven. Anyone able to register an
+ * unverified account with an administrator's address would inherit the
+ * administrator's row.
+ *
+ * So an unverified or absent email is refused outright rather than falling back
+ * to creating a fresh account. Failing closed costs a user a confusing sign-in;
+ * failing open costs the installation its authorisation model.
+ */
+
+/**
+ * The Supabase Auth fields this mapping needs. Structural, so a test can supply
+ * one without constructing a whole `@supabase/supabase-js` user.
+ */
+export interface SupabaseAuthUserLike {
+  id: string;
+  email?: string | null;
+  email_confirmed_at?: string | null;
+  is_anonymous?: boolean;
+  user_metadata?: Record<string, unknown> | null;
+}
+
+/** What a usable Supabase identity reduces to, once checked. */
+export interface SupabaseIdentity {
+  supabaseUserId: string;
+  email: string;
+  name: string;
+}
+
+/**
+ * Reduces a Supabase Auth user to the identity this application can map, or
+ * `null` if it cannot be mapped safely.
+ *
+ * Pure, and separate from the database work on purpose: every rule that decides
+ * whether a sign-in may be trusted is decided here, where it can be read in one
+ * place and tested without a database.
+ *
+ * `null` means "fail closed" — refuse rather than guess. The three ways to get
+ * it are an anonymous session (Supabase can mint one with no identity at all),
+ * a missing email, and an unverified email. None of them are recoverable by
+ * trying harder.
+ */
+export function supabaseIdentityFrom(
+  user: SupabaseAuthUserLike,
+): SupabaseIdentity | null {
+  // An anonymous sign-in is a real Supabase session with no person behind it.
+  // It must never reach the adoption path, where an email would be matched.
+  if (user.is_anonymous === true) return null;
+
+  const email = user.email?.trim().toLowerCase();
+  if (!email) return null;
+
+  // Supabase sets `email_confirmed_at` when the address is proven. Without it
+  // the address is merely claimed, which is not enough to adopt a row with.
+  if (!user.email_confirmed_at) return null;
+
+  return {
+    supabaseUserId: user.id,
+    email,
+    name: supabaseDisplayName(user.user_metadata, email),
+  };
+}
+
+/**
+ * The current user according to Supabase Auth, or null when the request carries
+ * no Supabase session.
+ *
+ * Not yet called by `getCurrentUser`. When it is, the contract is identical:
+ * null for an unauthenticated request, a `User` row otherwise, and a thrown
+ * `AppError` for a session that exists but cannot be mapped.
+ */
+export async function getCurrentSupabaseUser(): Promise<User | null> {
+  if (!supabaseAuthConfigured) return null;
+
+  const supabase = await createSupabaseServerClient();
+
+  // `getUser()` revalidates the token against Supabase rather than trusting the
+  // cookie's contents, which is the difference between reading a session and
+  // believing one. A cookie is attacker-supplied data until it is checked.
+  const { data, error } = await supabase.auth.getUser();
+
+  if (error || !data.user) return null;
+
+  const identity = supabaseIdentityFrom(data.user);
+
+  if (!identity) {
+    throw new AppError(
+      "BAD_REQUEST",
+      "Your account needs a verified email address before it can be used here.",
+    );
+  }
+
+  return resolveSupabaseUser(identity);
+}
+
+/**
+ * Finds the local user for a Supabase identity, claiming or creating one if
+ * needed.
+ *
+ * The lookup is by `supabaseUserId` and only by `supabaseUserId`. Once a row is
+ * linked, the email on the Supabase account can change freely without this
+ * function noticing or caring, which is the property that makes the id the
+ * identity key and the address merely a field.
+ */
+export async function resolveSupabaseUser(
+  identity: SupabaseIdentity,
+): Promise<User> {
+  const existing = await prisma.user.findUnique({
+    where: { supabaseUserId: identity.supabaseUserId },
+  });
+
+  // Found by identity key. Return it untouched — not the role, not the email,
+  // not the name. Signing in is not an instruction to overwrite a profile, and
+  // a local edit should not be reverted by its owner's next request.
+  if (existing) return existing;
+
+  return claimOrCreateSupabaseUser(identity);
+}
+
+/**
+ * First contact: this Supabase account has no local row yet.
+ *
+ * Mirrors `syncUser`'s approach to the same problem — check, write, and let the
+ * database arbitrate the gap between the two, because that gap is where the
+ * race lives and no amount of looking first can close it.
+ */
+async function claimOrCreateSupabaseUser(
+  identity: SupabaseIdentity,
+): Promise<User> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const unlinked = await tx.user.findFirst({
+        where: { email: identity.email, supabaseUserId: null },
+      });
+
+      if (unlinked) {
+        /*
+         * Compare-and-set rather than a plain update. Two different Supabase
+         * accounts could present the same address — an invited user and a
+         * self-registration, say — and both find this row unclaimed. A bare
+         * `update` would let the second silently take the row from the first,
+         * because they write different ids to the same row and the unique index
+         * has nothing to object to. Re-testing `supabaseUserId: null` inside
+         * the write makes the first writer the only winner.
+         */
+        const claimed = await tx.user.updateMany({
+          where: { id: unlinked.id, supabaseUserId: null },
+          // Only the identity key. The role is what the existing administrator
+          // keeps; the name and email are what somebody chose. Adoption links
+          // an account, it does not refresh a profile.
+          data: { supabaseUserId: identity.supabaseUserId },
+        });
+
+        if (claimed.count === 1) {
+          return tx.user.findUniqueOrThrow({ where: { id: unlinked.id } });
+        }
+
+        // Lost the race. Fall through to the create, which will collide on the
+        // email index and be resolved by the handler below — either this is the
+        // same account arriving twice, or it is a genuine clash.
+      }
+
+      return tx.user.create({
+        data: {
+          supabaseUserId: identity.supabaseUserId,
+          email: identity.email,
+          name: identity.name,
+          /*
+           * `clerkId` is still NOT NULL, so a Supabase-only account needs a
+           * placeholder until that column is dropped. The existing `unlinked_`
+           * prefix is exactly the right meaning — "no Clerk account owns this
+           * row" — and `resolveUser` already treats such rows as claimable, so
+           * a Clerk sign-in with the same address would adopt it rather than
+           * fail.
+           */
+          clerkId: `${UNLINKED_CLERK_ID_PREFIX}${identity.supabaseUserId}`,
+          // Least privilege. ADMIN is only ever reached by adopting a row that
+          // already held it, or by an existing admin granting it. Never by
+          // signing up.
+          role: "STAFF",
+        },
+      });
+    });
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+
+    // Someone else got there first with this same Supabase account.
+    const winner = await prisma.user.findUnique({
+      where: { supabaseUserId: identity.supabaseUserId },
+    });
+    if (winner) return winner;
+
+    // The clash was on email: a different Supabase account already owns this
+    // address locally. Resolving it means deciding which person it belongs to,
+    // which is not a decision a retry can make.
+    throw new AppError(
+      "CONFLICT",
+      "Another account in this workspace already uses that email address.",
+    );
+  }
+}
+
+/**
+ * A name to show, from whatever the Supabase account carries.
+ *
+ * Supabase puts provider profile fields in `user_metadata` with no guaranteed
+ * shape — an OAuth sign-in may bring `full_name`, a magic link brings nothing —
+ * so this reads the conventional keys defensively and falls back to the local
+ * part of the address, because `name` is NOT NULL and "" is not a name.
+ */
+function supabaseDisplayName(
+  metadata: Record<string, unknown> | null | undefined,
+  email: string,
+): string {
+  const fromMetadata = [
+    "full_name",
+    "name",
+    "user_name",
+    "preferred_username",
+  ]
+    .map((key) => metadata?.[key])
+    .find(
+      (value): value is string =>
+        typeof value === "string" && Boolean(value.trim()),
+    );
+
+  return fromMetadata?.trim() ?? email.split("@")[0] ?? "Unnamed user";
 }

@@ -295,6 +295,16 @@ model User {
   /// `resolveUser` in src/server/auth.ts.
   clerkId String @unique @map("clerk_id")
 
+  /// Supabase Auth's user id (`auth.users.id`), for the migration away from
+  /// Clerk. Nullable because it is populated the first time a row's owner signs
+  /// in through Supabase, not before: a value here means "this row has been
+  /// adopted by a Supabase identity", and NULL means "still claimable".
+  ///
+  /// It does not replace `clerkId` yet. Both columns coexist for the duration
+  /// of the migration so a row can be found by whichever provider authenticated
+  /// the request, and neither is inferred from the other.
+  supabaseUserId String? @unique @map("supabase_user_id")
+
   name  String
   email String @unique
 
