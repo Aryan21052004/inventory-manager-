@@ -35,7 +35,7 @@ import {
  * Anything in the `FormData` is whatever the client chose to send, including
  * fields the form does not have — which is why nothing here forwards the raw
  * object anywhere except a schema that names the fields it accepts, and why
- * `createdBy` is never among them. Attribution comes from the Clerk session,
+ * `createdBy` is never among them. Attribution comes from the Supabase session,
  * server-side, in `recordStockMovement`.
  */
 

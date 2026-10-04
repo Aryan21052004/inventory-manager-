@@ -6,7 +6,7 @@ import { getOrderItemImageFile } from "@/server/order-item-images";
  *
  * There is no public URL for these images and there is not meant to be. The
  * bytes live in Postgres and never leave the server except through this route,
- * which checks the Clerk session before it reads a row. A signed-out request
+ * which checks the authenticated session before it reads a row. A signed-out request
  * gets 401 without the database being asked for the image, and without learning
  * whether the id exists.
  *

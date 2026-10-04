@@ -14,12 +14,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 /**
- * The account control shown when Clerk has no keys — development only.
+ * The account control shown when Supabase Auth has no keys — development only.
  *
- * Split out of `user-menu.tsx` because that file became a server component:
- * Clerk Core 3's `<Show>` is an async server component, while this dropdown is
- * Radix and needs the client. Keeping both in one file would force the whole
- * thing to one side of the boundary, and neither side works for both.
+ * Kept separate from `user-menu.tsx` so the two states stay legible on their
+ * own terms: this one explains a missing configuration, that one belongs to a
+ * real session and can sign out of it.
  */
 function SetupModeMenu() {
   return (
@@ -33,7 +32,7 @@ function SetupModeMenu() {
         <DropdownMenuLabel>Not signed in</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <div className="px-2 py-1.5 text-xs leading-relaxed text-muted-foreground">
-          Authentication is running in setup mode. Add your Clerk keys to
+          Authentication is running in setup mode. Add your Supabase keys to
           <code className="mx-1 rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
             .env.local
           </code>

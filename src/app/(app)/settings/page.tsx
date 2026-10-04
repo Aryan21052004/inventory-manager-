@@ -80,11 +80,11 @@ export default async function SettingsPage() {
           <Separator />
           <StatusRow
             icon={KeyRound}
-            label="Authentication (Clerk)"
+            label="Authentication (Supabase)"
             detail={
               authEnabled
-                ? "Clerk keys are present. Routes are protected by the middleware."
-                : "No Clerk keys found. Every route is publicly reachable until they are added."
+                ? "Supabase keys are present. Pages under the app group require a session."
+                : "No Supabase keys found. Every route is publicly reachable until they are added."
             }
             badge={
               authEnabled ? (
@@ -247,12 +247,12 @@ function SetupChecklist({
             <p className="text-muted-foreground">
               Create an application at{" "}
               <a
-                href="https://dashboard.clerk.com"
+                href="https://supabase.com/dashboard"
                 target="_blank"
                 rel="noreferrer noopener"
                 className="text-primary underline-offset-4 hover:underline"
               >
-                dashboard.clerk.com
+                supabase.com/dashboard
               </a>{" "}
               and copy both keys into{" "}
               <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
@@ -261,7 +261,7 @@ function SetupChecklist({
               :
             </p>
             <pre className="overflow-x-auto rounded-lg border border-border bg-muted/50 p-3 font-mono text-xs">
-              {"NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_…\nCLERK_SECRET_KEY=sk_test_…"}
+              {"NEXT_PUBLIC_SUPABASE_URL=https://….supabase.co\nNEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=…"}
             </pre>
             <p className="text-muted-foreground">
               Restart the dev server afterwards — the middleware reads these at

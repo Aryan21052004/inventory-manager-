@@ -18,10 +18,11 @@ import { findNavItem } from "@/lib/nav";
  * The title is derived from the route rather than passed in by each page, so a
  * page cannot forget to set it or set one that disagrees with the sidebar.
  *
- * `userMenu` arrives as a prop rather than being imported. This component is
- * interactive and therefore client-side, while the menu resolves the Clerk
- * session with `<Show>` and is therefore a server component — so the shell
- * renders it and passes the finished element through this slot.
+ * `userMenu` arrives as a prop rather than being imported. The menu needs the
+ * signed-in user's details, which are resolved on the server in `AppShell`;
+ * importing it here would mean threading those details through this component,
+ * which has no other use for them. The shell renders the finished element and
+ * passes it through this slot instead.
  */
 function Header({
   appName,

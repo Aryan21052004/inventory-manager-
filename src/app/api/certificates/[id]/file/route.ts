@@ -6,7 +6,7 @@ import { getCertificateFile } from "@/server/certificates";
  *
  * There is no public URL for these documents and there is not meant to be. The
  * bytes live under a storage key that never leaves the server; this route is
- * the single door, and `getCertificateFile` checks the Clerk session before it
+ * the single door, and `getCertificateFile` checks the authenticated session before it
  * opens. A signed-out request gets 401 without the storage layer being touched
  * and without learning whether the id exists.
  *

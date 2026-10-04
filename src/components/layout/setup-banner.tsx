@@ -2,7 +2,7 @@ import Link from "next/link";
 import { ShieldAlert } from "lucide-react";
 
 /**
- * Shown across the top of every page while Clerk is unconfigured.
+ * Shown across the top of every page while Supabase Auth is unconfigured.
  *
  * Running without auth is a development convenience, and a convenience that is
  * easy to forget about is a security hole waiting to happen — so it announces
@@ -16,7 +16,7 @@ function SetupBanner() {
         <ShieldAlert className="size-4 shrink-0 text-warning" aria-hidden />
         <span className="font-medium">Setup mode — authentication is off.</span>
         <span className="text-muted-foreground">
-          Every route is publicly reachable until Clerk keys are added.
+          Every route is publicly reachable until Supabase keys are added.
         </span>
         <Link
           href="/settings"

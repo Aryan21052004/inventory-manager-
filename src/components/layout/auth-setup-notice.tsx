@@ -11,10 +11,11 @@ import {
 } from "@/components/ui/card";
 
 /**
- * Stands in for Clerk's sign-in and sign-up widgets while the keys are missing.
+ * Stands in for the authentication screens while the Supabase keys are missing.
  *
- * Clerk's components throw without a publishable key, which would turn a
- * half-finished setup into a stack trace. This says what is missing instead.
+ * The forms cannot build a client without a project URL and publishable key,
+ * which would turn a half-finished setup into a stack trace. This says what is
+ * missing instead.
  */
 function AuthSetupNotice({ action }: { action: string }) {
   return (
@@ -25,28 +26,28 @@ function AuthSetupNotice({ action }: { action: string }) {
           Authentication not configured
         </CardTitle>
         <CardDescription>
-          You cannot {action} until Clerk is set up for this environment.
+          You cannot {action} until Supabase Auth is set up for this environment.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4 text-sm">
         <p className="text-muted-foreground">
-          Create an application at{" "}
+          Open your project’s API settings at{" "}
           <a
-            href="https://dashboard.clerk.com"
+            href="https://supabase.com/dashboard"
             target="_blank"
             rel="noreferrer noopener"
             className="text-primary underline-offset-4 hover:underline"
           >
-            dashboard.clerk.com
+            supabase.com/dashboard
           </a>
-          , then add both keys to{" "}
+          , then add both values to{" "}
           <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
             .env.local
           </code>{" "}
           and restart the dev server.
         </p>
         <pre className="overflow-x-auto rounded-lg border border-border bg-muted/50 p-3 font-mono text-xs">
-          {"NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_…\nCLERK_SECRET_KEY=sk_test_…"}
+          {"NEXT_PUBLIC_SUPABASE_URL=https://….supabase.co\nNEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=…"}
         </pre>
         <Button asChild variant="outline" className="self-start">
           <Link href="/dashboard">Continue without signing in</Link>

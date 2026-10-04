@@ -1,58 +1,131 @@
-import { Show, SignInButton } from "@clerk/nextjs";
+"use client";
 
-import { ClientUserButton } from "@/components/layout/client-user-button";
+import { useTransition } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { LogOut, Settings, UserCircle2 } from "lucide-react";
+
 import { SetupModeMenu } from "@/components/layout/setup-mode-menu";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 /**
  * Account control in the header.
  *
- * With Clerk configured this is Clerk's own user button, which brings the
- * profile and sign-out flows with it. Without keys the app is running in setup
- * mode, and Clerk's components would throw — so a placeholder menu explains
- * what is missing instead of taking the page down.
+ * ## The account details come from the server, not from Supabase
  *
- * A server component, deliberately. Clerk Core 3 replaced `<SignedIn>` and
- * `<SignedOut>` with `<Show>`, and the `<Show>` exported from `@clerk/nextjs`
- * is an async server component — it resolves the session on the server rather
- * than shipping both branches and choosing in the browser. That is why this
- * file has no "use client" and why the header takes it as a prop instead of
- * importing it: a client component cannot render an async server one.
+ * `name`, `email` and `role` arrive as props, resolved by `getCurrentUser()` from
+ * our own `users` table. The browser Supabase client is used for one thing here —
+ * ending the session — and never to read application data: `anon` and
+ * `authenticated` hold no privilege on any table, so a PostgREST query for a user
+ * row would be refused, and it would be the wrong place to ask even if it were
+ * not. Prisma on the server is the only path to the database.
  *
- * The account button inside the signed-in branch is the one piece that cannot
- * be server-rendered; it is isolated in its own client component so the rest of
- * this stays on the server.
+ * ## The role shown here decides nothing
+ *
+ * It is a label, so a user can see which account they are using. Every privileged
+ * path re-checks `requireRole()` on the server against the column in the
+ * database; hiding a menu item is a courtesy and stops nobody who can open
+ * devtools.
+ *
+ * ## A client component now, where it used to be a server one
+ *
+ * It had to be a server component for Clerk: `<Show>` resolved the session
+ * during the render. Signing out is a browser action, so this is the natural side
+ * of the boundary — and the hydration dance that `client-user-button.tsx` existed
+ * to perform is gone with it, because nothing here waits for a third-party SDK to
+ * load before it can render.
  */
-function UserMenu({ authEnabled }: { authEnabled: boolean }) {
+
+export interface UserMenuAccount {
+  name: string;
+  email: string;
+  role: string;
+}
+
+function UserMenu({
+  authEnabled,
+  account,
+}: {
+  authEnabled: boolean;
+  account: UserMenuAccount | null;
+}) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+
   if (!authEnabled) {
     return <SetupModeMenu />;
   }
 
-  /*
-   * One `<Show>` with a fallback rather than two — a signed-in branch and a
-   * signed-out branch that could both miss, or both match, on a session that is
-   * neither. `fallback` makes "signed out" mean exactly "not signed in", so the
-   * header always has precisely one control in it.
-   */
-  return (
-    <Show
-      when="signed-in"
-      fallback={
-        <SignInButton mode="modal">
-          <Button size="sm">Sign in</Button>
-        </SignInButton>
-      }
-    >
-      {/*
-        Clerk's UserButton is deliberately not server-rendered — it only emits
-        its host element once the browser SDK has loaded, which the server can
-        never be. See ClientUserButton for the full explanation.
+  // Authenticated pages are behind the `(app)` layout's redirect, so in practice
+  // this is only reached if the session ended mid-render.
+  if (!account) {
+    return (
+      <Button asChild size="sm">
+        <Link href="/sign-in">Sign in</Link>
+      </Button>
+    );
+  }
 
-        The signed-out branch needs no such treatment: SignInButton renders its
-        child regardless of load state, so both sides agree.
-      */}
-      <ClientUserButton />
-    </Show>
+  function signOut() {
+    startTransition(async () => {
+      const supabase = createSupabaseBrowserClient();
+
+      /*
+       * `scope: "local"` ends this browser's session only. The default, "global",
+       * revokes every refresh token the account has — so signing out of a laptop
+       * would silently sign the same person out of their phone, which is not what
+       * anyone means by clicking this.
+       */
+      await supabase.auth.signOut({ scope: "local" });
+
+      // `refresh()` first so the server re-renders without the cookie; otherwise
+      // the cached render still believes there is a user and the push lands on a
+      // page that immediately redirects anyway.
+      router.refresh();
+      router.push("/sign-in");
+    });
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" aria-label="Account">
+          <UserCircle2 className="text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuLabel className="flex flex-col gap-0.5">
+          <span className="truncate font-medium">{account.name}</span>
+          <span className="truncate text-xs font-normal text-muted-foreground">
+            {account.email}
+          </span>
+          <span className="pt-1 text-[11px] font-normal uppercase tracking-wide text-muted-foreground">
+            {account.role}
+          </span>
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link href="/settings">
+            <Settings />
+            Settings
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={signOut} disabled={pending}>
+          <LogOut />
+          {pending ? "Signing out…" : "Sign out"}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

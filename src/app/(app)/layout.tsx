@@ -25,12 +25,10 @@ import { getCurrency } from "@/server/settings";
  * answer to live and drift.
  */
 export default async function AppLayout({ children }: { children: ReactNode }) {
-  if (authEnabled) {
-    const user = await getCurrentUser();
+  const user = authEnabled ? await getCurrentUser() : null;
 
-    // `redirect` throws, so nothing below runs for an unauthenticated request.
-    if (!user) redirect("/sign-in");
-  }
+  // `redirect` throws, so nothing below runs for an unauthenticated request.
+  if (authEnabled && !user) redirect("/sign-in");
 
   /*
    * Resolved here so the client components beneath can reach it. Server
@@ -44,6 +42,14 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     <AppShell
       appName={env.NEXT_PUBLIC_APP_NAME}
       authEnabled={authEnabled}
+      /*
+       * Three fields, not the row. Everything handed to `AppShell` reaches a
+       * client component, and the header needs a name, an address and a label —
+       * not the record's id, timestamps or foreign keys.
+       */
+      account={
+        user ? { name: user.name, email: user.email, role: user.role } : null
+      }
       currency={currency}
     >
       {children}
