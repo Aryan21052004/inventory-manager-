@@ -2,6 +2,8 @@ import "server-only";
 
 import { z } from "zod";
 
+import { supabaseAuthConfigured } from "@/lib/supabase/config";
+
 /**
  * Environment configuration, validated once at import time.
  *
@@ -154,13 +156,22 @@ function load() {
 export const env = load();
 
 /**
- * Whether Clerk is wired up. When false the app runs in "setup mode": the
- * middleware stops guarding routes and the shell shows a banner explaining how
- * to finish the setup. Production refuses to start in that state.
+ * Whether Supabase Auth is wired up. When false the app runs in "setup mode":
+ * the proxy stops refreshing sessions, the `(app)` layout stops redirecting, and
+ * the shell shows a banner explaining how to finish the setup. Production
+ * refuses to start in that state.
+ *
+ * Read through `lib/supabase/config` rather than from `env` above, because the
+ * browser client needs the same two values and this module is `server-only`.
+ * One source of truth matters more than usual here: if the server validates a
+ * session against one project and the browser obtains it from another, sign-in
+ * appears to succeed while the server never recognises it.
+ *
+ * Only the publishable key is involved. It is browser-visible by design, and
+ * authentication needs nothing more — `SUPABASE_SERVICE_ROLE_KEY` stays above,
+ * server-only, for the Storage driver alone.
  */
-export const authEnabled = Boolean(
-  env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && env.CLERK_SECRET_KEY,
-);
+export const authEnabled = supabaseAuthConfigured;
 
 /**
  * `next build` runs with NODE_ENV=production, but compiling a bundle is not the
@@ -173,8 +184,10 @@ const isBuildPhase = process.env.NEXT_PHASE === "phase-production-build";
 
 if (!authEnabled && env.NODE_ENV === "production" && !isBuildPhase) {
   throw new Error(
-    "Clerk is not configured. Set NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY and " +
-      "CLERK_SECRET_KEY before running in production — refusing to serve an " +
-      "unauthenticated build.",
+    "Supabase Auth is not configured. Set NEXT_PUBLIC_SUPABASE_URL and " +
+      "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY before running in production — " +
+      "refusing to serve an unauthenticated build. Note that NEXT_PUBLIC_ " +
+      "values are compiled in at build time, so a deployment must be rebuilt " +
+      "after they are set.",
   );
 }

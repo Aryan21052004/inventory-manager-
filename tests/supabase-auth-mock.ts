@@ -53,10 +53,39 @@ export function signOutSupabase(): void {
   session = null;
 }
 
-/** The module namespace that stands in for `@/lib/supabase/server`. */
+/**
+ * The module namespace that stands in for `@/lib/supabase/server`.
+ *
+ * Both calls the application makes are implemented, and the difference between
+ * them is modelled rather than glossed over:
+ *
+ * `getClaims()` returns the JWT payload, which carries `sub`, `email`,
+ * `is_anonymous` and `user_metadata` — and **not** `email_confirmed_at`, because
+ * a real token does not. Leaving it out is the point: if the mock supplied it,
+ * the verified-email gate would appear to be satisfiable from the claims alone
+ * and the tests would stop proving that `getUser()` is what makes adoption safe.
+ *
+ * `getClaims()` also returns `{ data: null, error: null }` for a request with no
+ * session, which is the real SDK's third outcome and the ordinary one.
+ */
 export const supabaseServerMock = {
   createSupabaseServerClient: async () => ({
     auth: {
+      getClaims: async () => {
+        if (!session) return { data: null, error: null };
+
+        return {
+          data: {
+            claims: {
+              sub: session.id,
+              email: session.email ?? undefined,
+              is_anonymous: session.is_anonymous ?? false,
+              user_metadata: session.user_metadata ?? {},
+            },
+          },
+          error: null,
+        };
+      },
       getUser: async () => ({
         data: { user: session },
         error: null,

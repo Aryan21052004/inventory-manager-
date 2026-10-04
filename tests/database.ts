@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
+import { UNLINKED_CLERK_ID_PREFIX } from "@/server/auth";
 
-import { fakeClerkUser, signInAs } from "./clerk-mock";
+import { fakeSupabaseUser, signInAsSupabase } from "./supabase-auth-mock";
 
 /**
  * Empties every table, children first — the foreign keys are Restrict, and a
@@ -432,24 +433,37 @@ export async function createSupplier(
 }
 
 /**
- * Signs in as a Clerk user backed by a local record with the given role.
+ * Signs in as a Supabase Auth user backed by a local record with the given role.
  *
- * The two halves matter: the Clerk session supplies the identity, and the local
- * row supplies the role and the id that foreign keys point at. Tests that skip
- * the local row are testing something else — that the first request from a new
- * Clerk account creates one.
+ * The two halves matter: the Supabase session supplies the identity, and the
+ * local row supplies the role and the id that foreign keys point at. Tests that
+ * skip the local row are testing something else — that the first request from a
+ * new account creates one.
+ *
+ * The row is created already linked, by `supabaseUserId`, so a fixture resolves
+ * on the indexed lookup rather than going through the one-time email adoption.
+ * That keeps these tests about whatever they are actually about; adoption has
+ * its own tests in `supabase-auth.test.ts`.
+ *
+ * A `clerkId` is still written because the column is NOT NULL until the Clerk
+ * migration finishes. It is an `unlinked_` placeholder: no Clerk account owns
+ * these rows, and nothing in the active code path reads it.
  */
 export async function signInWithRole(role: "ADMIN" | "STAFF") {
+  const suffix = Math.random().toString(36).slice(2, 8);
+  const supabaseUserId = `sb_${role.toLowerCase()}_${suffix}`;
+
   const local = await prisma.user.create({
     data: {
-      clerkId: `user_${role.toLowerCase()}_${Math.random().toString(36).slice(2, 8)}`,
+      clerkId: `${UNLINKED_CLERK_ID_PREFIX}${supabaseUserId}`,
+      supabaseUserId,
       name: `${role} Person`,
-      email: `${role.toLowerCase()}-${Math.random().toString(36).slice(2, 8)}@example.com`,
+      email: `${role.toLowerCase()}-${suffix}@example.com`,
       role,
     },
   });
 
-  signInAs(fakeClerkUser(local.clerkId, local.email));
+  signInAsSupabase(fakeSupabaseUser(supabaseUserId, local.email));
   return local;
 }
 

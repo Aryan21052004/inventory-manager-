@@ -1,9 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
-import { ClerkProvider } from "@clerk/nextjs";
 
 import { Providers } from "@/components/providers";
-import { authEnabled, env } from "@/lib/env";
+import { env } from "@/lib/env";
 
 import "./globals.css";
 
@@ -36,10 +35,23 @@ export const viewport: Viewport = {
   themeColor: "#090c12",
 };
 
+/*
+ * There is no auth provider here, and none is needed.
+ *
+ * Clerk required one: `<ClerkProvider>` fetched a session into React context so
+ * its hooks and components could read it. Supabase has no equivalent
+ * requirement — a client component that needs the session builds its own client
+ * with `createSupabaseBrowserClient()`, which is a singleton reading the same
+ * cookies the server reads, so there is nothing for a provider to carry.
+ *
+ * Adding one anyway would mean a context whose only job is to hold a value the
+ * consumer can already obtain, and a wrapper that has to be kept in sync with
+ * whatever the server believes about the same request.
+ */
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const tree = (
+  return (
     <html
       lang="en"
       // next-themes writes the theme class here after mount; without this the
@@ -52,9 +64,4 @@ export default function RootLayout({
       </body>
     </html>
   );
-
-  // ClerkProvider throws without a publishable key, so in setup mode the tree
-  // is rendered without it and the auth-dependent UI falls back. See env.ts —
-  // production refuses to start in that state.
-  return authEnabled ? <ClerkProvider>{tree}</ClerkProvider> : tree;
 }

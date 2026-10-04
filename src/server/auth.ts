@@ -1,30 +1,33 @@
 import "server-only";
 
-import { auth, currentUser } from "@clerk/nextjs/server";
+// Temporary migration code. `currentUser` is reached only through the legacy
+// Clerk resolver below, which no request path calls any more. `auth` is gone
+// because nothing active establishes a Clerk session.
+import { currentUser } from "@clerk/nextjs/server";
 
 import type { User } from "@/generated/prisma/client";
 import type { UserRole } from "@/generated/prisma/enums";
 import { AppError } from "@/lib/errors";
 import { authEnabled } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
-import { supabaseAuthConfigured } from "@/lib/supabase/config";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 /**
- * The bridge between Clerk's identity and this application's user records.
+ * The bridge between the identity provider and this application's user records.
  *
  * The division of responsibility, which the rest of the codebase depends on:
  *
- *   Clerk    — who the person is. Password, MFA, sessions, email verification.
- *              We never see a credential and never store one.
- *   Postgres — what that person is inside the inventory app. Their role, and a
- *              row for foreign keys such as `stock_transactions.created_by` to
- *              point at.
+ *   Supabase Auth — who the person is. Password, MFA, sessions, email
+ *                   verification. We never see a credential and never store one.
+ *   Postgres      — what that person is inside the inventory app. Their role,
+ *                   and a row for foreign keys such as
+ *                   `stock_transactions.created_by` to point at.
  *
- * `clerkId` is the join, and it is the *only* acceptable one. Email is unique
- * in our table and would appear to work, but a user can change their email in
- * Clerk whenever they like; the next request would then look like a different
- * person and quietly create a second local record. `clerkId` never changes.
+ * `supabaseUserId` is the join, and it is the *only* acceptable one. Email is
+ * unique in our table and would appear to work, but a user can change their
+ * email with the provider whenever they like; the next request would then look
+ * like a different person and quietly create a second local record. The
+ * provider's user id never changes.
  *
  * Nothing here trusts the client. The caller cannot pass in a user id — the
  * identity comes from the Clerk session on the request, and that is the only
@@ -45,18 +48,21 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
  * the endpoint, the signature verification, and the replay handling today,
  * when nothing yet depends on the mirror being fresh.
  *
- * ## Two identity providers, for now
+ * ## Clerk is no longer on the active path
  *
- * A second identity source — Supabase Auth — is implemented at the bottom of
- * this file. It is not wired into the four exported functions above: Clerk
- * still answers every request, and nothing in the application's behaviour
- * changes because of its presence. The switch is a later, deliberate step.
+ * Supabase Auth answers every request. The Clerk resolver further down —
+ * `resolveUser`, `syncUser`, `loadClerkProfile` — is **temporary migration
+ * code**, kept only so the switch can be reverted by changing which resolver
+ * `getCurrentUser` calls rather than by restoring deleted work. Nothing reaches
+ * it: no proxy establishes a Clerk session, no layout calls `auth.protect()`,
+ * and `getCurrentUser` does not consult it. It should be deleted along with the
+ * dependency once the migration has been proven in production.
  *
- * Both sources land on the same `User` row and the same `role` column, so
- * `requireRole` remains the single authorisation gate regardless of which one
- * authenticated the request. That is the point of putting them in one file
- * rather than two: the rest of the codebase keeps importing `requireUser` and
- * `requireRole` and never learns which provider is active.
+ * Both resolvers land on the same `User` row and the same `role` column, which
+ * is why `requireRole` needed no change at all: it is the single authorisation
+ * gate regardless of which provider authenticated the request, and the rest of
+ * the codebase keeps importing `requireUser` and `requireRole` without ever
+ * learning which one that was.
  */
 
 /**
@@ -79,18 +85,67 @@ interface ClerkProfile {
 /**
  * The current user, or null if the request is not authenticated.
  *
- * Returns null in setup mode too (Clerk unconfigured, development only): with
- * no identity provider there is no one to attribute a write to, so callers that
- * need a user get nothing and the write is refused rather than recorded against
- * a guess.
+ * Supabase Auth is the identity source. Returns null in setup mode too
+ * (Supabase unconfigured, development only): with no identity provider there is
+ * no one to attribute a write to, so callers that need a user get nothing and
+ * the write is refused rather than recorded against a guess.
+ *
+ * ## Why `getClaims()` and not `getSession()`
+ *
+ * The session lives in a cookie, and a cookie is attacker-supplied data until
+ * something checks it. `getSession()` decodes it and hands back whatever it
+ * said; `getClaims()` verifies the JWT's signature first. Authorisation that
+ * reads the former is authorisation that trusts the request to describe itself,
+ * so this uses the latter and the installed SDK says the same thing in its own
+ * security notice.
+ *
+ * ## Why `getUser()` is reached only on first contact
+ *
+ * The verified claims carry `sub`, which is the identity key, so a user who
+ * already has a local row is resolved with one indexed lookup and no second
+ * network call — the overwhelming majority of requests.
+ *
+ * What the claims do *not* carry is `email_confirmed_at`: that is a field of
+ * the Auth user record, not a JWT claim. It is also the fact the one-time
+ * adoption below turns on. So the fresh record is fetched here and only here,
+ * on the one request per account that can adopt a row.
  */
 export async function getCurrentUser(): Promise<User | null> {
   if (!authEnabled) return null;
 
-  const { userId } = await auth();
-  if (!userId) return null;
+  const supabase = await createSupabaseServerClient();
 
-  return resolveUser(userId);
+  const { data, error } = await supabase.auth.getClaims();
+
+  // Three outcomes, and `{ data: null, error: null }` is the ordinary one: no
+  // session on this request.
+  if (error || !data) return null;
+
+  const { claims } = data;
+
+  // An anonymous sign-in is a real session with no person behind it. It must
+  // never reach the adoption path, where an email would be matched.
+  if (claims.is_anonymous === true) return null;
+  if (!claims.sub) return null;
+
+  const linked = await prisma.user.findUnique({
+    where: { supabaseUserId: claims.sub },
+  });
+  if (linked) return linked;
+
+  const { data: fresh, error: freshError } = await supabase.auth.getUser();
+  if (freshError || !fresh.user) return null;
+
+  const identity = supabaseIdentityFrom(fresh.user);
+
+  if (!identity) {
+    throw new AppError(
+      "BAD_REQUEST",
+      "Your account needs a verified email address before it can be used here.",
+    );
+  }
+
+  return resolveSupabaseUser(identity);
 }
 
 /**
@@ -135,6 +190,16 @@ export async function requireRole(
 
   return user;
 }
+
+// ---------------------------------------------------------------------------
+// Clerk — TEMPORARY MIGRATION CODE, not on any active request path
+// ---------------------------------------------------------------------------
+//
+// Everything from here to the Supabase section is retained for rollback only.
+// `getCurrentUser` does not call it, no proxy establishes a Clerk session, and
+// no layout checks one — so a request cannot reach this code even with Clerk's
+// keys still configured. Delete it with the dependency once the migration has
+// held in production.
 
 /**
  * Finds the local user for a Clerk id, creating or claiming one if needed.
@@ -378,38 +443,6 @@ export function supabaseIdentityFrom(
     email,
     name: supabaseDisplayName(user.user_metadata, email),
   };
-}
-
-/**
- * The current user according to Supabase Auth, or null when the request carries
- * no Supabase session.
- *
- * Not yet called by `getCurrentUser`. When it is, the contract is identical:
- * null for an unauthenticated request, a `User` row otherwise, and a thrown
- * `AppError` for a session that exists but cannot be mapped.
- */
-export async function getCurrentSupabaseUser(): Promise<User | null> {
-  if (!supabaseAuthConfigured) return null;
-
-  const supabase = await createSupabaseServerClient();
-
-  // `getUser()` revalidates the token against Supabase rather than trusting the
-  // cookie's contents, which is the difference between reading a session and
-  // believing one. A cookie is attacker-supplied data until it is checked.
-  const { data, error } = await supabase.auth.getUser();
-
-  if (error || !data.user) return null;
-
-  const identity = supabaseIdentityFrom(data.user);
-
-  if (!identity) {
-    throw new AppError(
-      "BAD_REQUEST",
-      "Your account needs a verified email address before it can be used here.",
-    );
-  }
-
-  return resolveSupabaseUser(identity);
 }
 
 /**

@@ -8,21 +8,40 @@ vi.mock("@clerk/nextjs/server", async () => {
 import { AppError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
 import {
-  getCurrentUser,
   requireRole,
   requireUser,
+  resolveUser,
   UNLINKED_CLERK_ID_PREFIX,
 } from "@/server/auth";
 
+import { auth as clerkAuth } from "@clerk/nextjs/server";
+
 import { fakeClerkUser, signInAs, signOut, updateSession } from "./clerk-mock";
 import { resetDatabase } from "./database";
+import { fakeSupabaseUser, signInAsSupabase, signOutSupabase } from "./supabase-auth-mock";
 
 beforeEach(async () => {
   signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
-describe("resolving a Clerk session to a local user", () => {
+/**
+ * What `getCurrentUser()` used to do, before Supabase Auth became the active
+ * provider: read the Clerk session, then resolve it through the Clerk resolver.
+ *
+ * The mapping tests below are about that resolver, which still exists as
+ * migration code and still has to be correct for a rollback to be possible. They
+ * are no longer testing the application's live authentication path —
+ * `getCurrentUser` reaches Supabase now, and `supabase-auth.test.ts` covers it.
+ */
+async function currentClerkUser() {
+  const { userId } = await clerkAuth();
+  if (!userId) return null;
+  return resolveUser(userId);
+}
+
+describe("resolving a Clerk session to a local user (legacy resolver)", () => {
   it("returns the existing local user when one is already linked", async () => {
     const created = await prisma.user.create({
       data: {
@@ -35,7 +54,7 @@ describe("resolving a Clerk session to a local user", () => {
 
     signInAs(fakeClerkUser("user_existing", "existing@example.com"));
 
-    const resolved = await getCurrentUser();
+    const resolved = await currentClerkUser();
 
     expect(resolved?.id).toBe(created.id);
     // The role is ours, not Clerk's, and resolving must not disturb it.
@@ -52,7 +71,7 @@ describe("resolving a Clerk session to a local user", () => {
       }),
     );
 
-    const resolved = await getCurrentUser();
+    const resolved = await currentClerkUser();
 
     expect(resolved).not.toBeNull();
     expect(resolved?.clerkId).toBe("user_newcomer");
@@ -65,7 +84,7 @@ describe("resolving a Clerk session to a local user", () => {
   it("falls back to the email local part when Clerk has no name", async () => {
     signInAs(fakeClerkUser("user_nameless", "quiet.person@example.com"));
 
-    const resolved = await getCurrentUser();
+    const resolved = await currentClerkUser();
 
     // `name` is NOT NULL, so something has to be there — but not an empty
     // string pretending to be a name.
@@ -85,7 +104,7 @@ describe("resolving a Clerk session to a local user", () => {
 
     signInAs(fakeClerkUser("user_realadmin", "admin@inventory.local"));
 
-    const resolved = await getCurrentUser();
+    const resolved = await currentClerkUser();
 
     expect(resolved?.id).toBe(seeded.id);
     expect(resolved?.clerkId).toBe("user_realadmin");
@@ -95,7 +114,7 @@ describe("resolving a Clerk session to a local user", () => {
   });
 
   it("rejects an unauthenticated request", async () => {
-    expect(await getCurrentUser()).toBeNull();
+    expect(await currentClerkUser()).toBeNull();
 
     await expect(requireUser()).rejects.toMatchObject({
       code: "UNAUTHORIZED",
@@ -131,11 +150,11 @@ describe("clerkId as the identity key", () => {
     // Two tabs, or one page whose components each load data. Both find nothing
     // and both try to write; the unique index has to settle it.
     const resolved = await Promise.all([
-      getCurrentUser(),
-      getCurrentUser(),
-      getCurrentUser(),
-      getCurrentUser(),
-      getCurrentUser(),
+      currentClerkUser(),
+      currentClerkUser(),
+      currentClerkUser(),
+      currentClerkUser(),
+      currentClerkUser(),
     ]);
 
     const ids = new Set(resolved.map((user) => user?.id));
@@ -148,7 +167,7 @@ describe("clerkId as the identity key", () => {
   it("keeps the mapping when the Clerk email changes", async () => {
     signInAs(fakeClerkUser("user_movinghouse", "before@example.com"));
 
-    const first = await getCurrentUser();
+    const first = await currentClerkUser();
     expect(first?.email).toBe("before@example.com");
 
     // The scenario email-as-a-key would break: Clerk lets people change their
@@ -158,7 +177,7 @@ describe("clerkId as the identity key", () => {
       primaryEmailAddress: { emailAddress: "after@example.com" },
     });
 
-    const second = await getCurrentUser();
+    const second = await currentClerkUser();
 
     expect(second?.id).toBe(first?.id);
     expect(second?.clerkId).toBe("user_movinghouse");
@@ -181,7 +200,9 @@ describe("clerkId as the identity key", () => {
 
     // The email unique constraint stops the second record being created, and
     // the impostor is told rather than silently handed the admin's row.
-    await expect(getCurrentUser()).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(currentClerkUser()).rejects.toMatchObject({
+      code: "CONFLICT",
+    });
 
     const owner = await prisma.user.findUnique({
       where: { clerkId: "user_owner" },
@@ -191,24 +212,24 @@ describe("clerkId as the identity key", () => {
   });
 });
 
-describe("setup mode (Clerk not configured)", () => {
+describe("setup mode (Supabase Auth not configured)", () => {
   /*
    * `authEnabled` is decided when `@/lib/env` is first imported, so this is the
    * one place the modules have to be re-imported with a different environment
    * rather than simply called differently.
    */
   it("has no current user and refuses to attribute anything", async () => {
-    vi.stubEnv("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY", "");
-    vi.stubEnv("CLERK_SECRET_KEY", "");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "");
     vi.resetModules();
 
     try {
       const auth = await import("@/server/auth");
 
-      // Even with a session available, an unconfigured Clerk means there is no
-      // verified identity — so writes are refused rather than recorded against
-      // a guess.
-      signInAs(fakeClerkUser("user_anyone", "anyone@example.com"));
+      // Even with a session available, an unconfigured provider means there is
+      // no verified identity — so writes are refused rather than recorded
+      // against a guess.
+      signInAsSupabase(fakeSupabaseUser("sb_anyone", "anyone@example.com"));
 
       expect(await auth.getCurrentUser()).toBeNull();
       await expect(auth.requireUser()).rejects.toMatchObject({
@@ -226,13 +247,14 @@ describe("role checks", () => {
   it("lets an ADMIN through an ADMIN-only gate", async () => {
     await prisma.user.create({
       data: {
-        clerkId: "user_admin",
+        clerkId: `${UNLINKED_CLERK_ID_PREFIX}sb_admin`,
+        supabaseUserId: "sb_admin",
         name: "Admin",
         email: "admin@example.com",
         role: "ADMIN",
       },
     });
-    signInAs(fakeClerkUser("user_admin", "admin@example.com"));
+    signInAsSupabase(fakeSupabaseUser("sb_admin", "admin@example.com"));
 
     await expect(requireRole("ADMIN")).resolves.toMatchObject({
       role: "ADMIN",
@@ -242,13 +264,14 @@ describe("role checks", () => {
   it("refuses STAFF at an ADMIN-only gate", async () => {
     await prisma.user.create({
       data: {
-        clerkId: "user_staff",
+        clerkId: `${UNLINKED_CLERK_ID_PREFIX}sb_staff`,
+        supabaseUserId: "sb_staff",
         name: "Staff",
         email: "staff@example.com",
         role: "STAFF",
       },
     });
-    signInAs(fakeClerkUser("user_staff", "staff@example.com"));
+    signInAsSupabase(fakeSupabaseUser("sb_staff", "staff@example.com"));
 
     const error = await requireRole("ADMIN").catch((caught: unknown) => caught);
 

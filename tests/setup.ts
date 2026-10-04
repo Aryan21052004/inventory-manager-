@@ -2,6 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { config } from "dotenv";
+import { vi } from "vitest";
 
 import { testDatabaseUrl } from "./database-url";
 
@@ -48,3 +49,20 @@ process.env["NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"] =
  */
 process.env["FILE_STORAGE_DRIVER"] = "local";
 process.env["FILE_STORAGE_DIR"] = join(tmpdir(), "inventory-manager-test-storage");
+
+/*
+ * Supabase Auth is mocked for the whole suite, from here rather than from each
+ * test file.
+ *
+ * `getCurrentUser()` is Supabase-backed now, so every test that signs in needs
+ * this mock — and registering it once in a setup file applies it to all of them
+ * instead of repeating an identical `vi.mock` in thirty-seven places. A test
+ * that wants different behaviour can still override it locally.
+ *
+ * The real module would build a client against a project URL and try to reach
+ * it. The project in question holds production data, so no test may.
+ */
+vi.mock("@/lib/supabase/server", async () => {
+  const { supabaseServerMock } = await import("./supabase-auth-mock");
+  return supabaseServerMock;
+});

@@ -5,21 +5,15 @@ vi.mock("@/lib/supabase/server", async () => {
   return supabaseServerMock;
 });
 
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
-
 import { AppError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
 import {
-  getCurrentSupabaseUser,
+  getCurrentUser,
   requireRole,
   resolveSupabaseUser,
   UNLINKED_CLERK_ID_PREFIX,
 } from "@/server/auth";
 
-import { fakeClerkUser, signInAs, signOut } from "./clerk-mock";
 import { resetDatabase } from "./database";
 import {
   fakeSupabaseUser,
@@ -43,17 +37,16 @@ import {
 
 beforeEach(async () => {
   signOutSupabase();
-  signOut();
   await resetDatabase();
 });
 
 describe("an unauthenticated request", () => {
   it("returns null when there is no Supabase session", async () => {
-    expect(await getCurrentSupabaseUser()).toBeNull();
+    expect(await getCurrentUser()).toBeNull();
   });
 
   it("creates no user row when there is no session", async () => {
-    await getCurrentSupabaseUser();
+    await getCurrentUser();
 
     expect(await prisma.user.count()).toBe(0);
   });
@@ -67,7 +60,7 @@ describe("a session that cannot be mapped", () => {
       }),
     );
 
-    await expect(getCurrentSupabaseUser()).rejects.toBeInstanceOf(AppError);
+    await expect(getCurrentUser()).rejects.toBeInstanceOf(AppError);
     expect(await prisma.user.count()).toBe(0);
   });
 
@@ -91,7 +84,7 @@ describe("a session that cannot be mapped", () => {
       }),
     );
 
-    await expect(getCurrentSupabaseUser()).rejects.toBeInstanceOf(AppError);
+    await expect(getCurrentUser()).rejects.toBeInstanceOf(AppError);
 
     const untouched = await prisma.user.findUniqueOrThrow({
       where: { id: admin.id },
@@ -105,7 +98,7 @@ describe("a session that cannot be mapped", () => {
       fakeSupabaseUser("sb_anon", "admin@example.com", { is_anonymous: true }),
     );
 
-    await expect(getCurrentSupabaseUser()).rejects.toBeInstanceOf(AppError);
+    await expect(getCurrentUser()).rejects.toBeInstanceOf(AppError);
     expect(await prisma.user.count()).toBe(0);
   });
 });
@@ -124,7 +117,7 @@ describe("a session already linked to a row", () => {
 
     signInAsSupabase(fakeSupabaseUser("sb_linked", "existing@example.com"));
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.id).toBe(created.id);
     expect(await prisma.user.count()).toBe(1);
@@ -148,7 +141,7 @@ describe("a session already linked to a row", () => {
       }),
     );
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.role).toBe("ADMIN");
     expect(resolved?.email).toBe("local@example.com");
@@ -184,7 +177,7 @@ describe("a session already linked to a row", () => {
     // unclaimed admin row. The id must win.
     signInAsSupabase(fakeSupabaseUser("sb_linked", "decoy@example.com"));
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.id).toBe(linked.id);
     expect(resolved?.role).toBe("STAFF");
@@ -210,7 +203,7 @@ describe("claiming an existing unlinked row", () => {
 
     signInAsSupabase(fakeSupabaseUser("sb_new", "lead@example.com"));
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.id).toBe(existing.id);
     expect(resolved?.supabaseUserId).toBe("sb_new");
@@ -234,7 +227,7 @@ describe("claiming an existing unlinked row", () => {
 
     signInAsSupabase(fakeSupabaseUser("sb_admin", "admin@example.com"));
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.id).toBe(admin.id);
     expect(resolved?.role).toBe("ADMIN");
@@ -256,7 +249,7 @@ describe("claiming an existing unlinked row", () => {
       }),
     );
 
-    await getCurrentSupabaseUser();
+    await getCurrentUser();
 
     const after = await prisma.user.findUniqueOrThrow({
       where: { id: existing.id },
@@ -281,7 +274,7 @@ describe("claiming an existing unlinked row", () => {
 
     signInAsSupabase(fakeSupabaseUser("sb_new", "Person@Example.COM"));
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.id).toBe(existing.id);
   });
@@ -299,7 +292,7 @@ describe("claiming an existing unlinked row", () => {
 
     signInAsSupabase(fakeSupabaseUser("sb_second", "person@example.com"));
 
-    await expect(getCurrentSupabaseUser()).rejects.toBeInstanceOf(AppError);
+    await expect(getCurrentUser()).rejects.toBeInstanceOf(AppError);
 
     const rows = await prisma.user.findMany();
     expect(rows).toHaveLength(1);
@@ -311,7 +304,7 @@ describe("a Supabase identity with no local row", () => {
   it("creates one as STAFF", async () => {
     signInAsSupabase(fakeSupabaseUser("sb_fresh", "newcomer@example.com"));
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.role).toBe("STAFF");
     expect(resolved?.supabaseUserId).toBe("sb_fresh");
@@ -321,7 +314,7 @@ describe("a Supabase identity with no local row", () => {
   it("never creates an ADMIN, even when no other user exists", async () => {
     signInAsSupabase(fakeSupabaseUser("sb_first_ever", "first@example.com"));
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.role).not.toBe("ADMIN");
     expect(resolved?.role).toBe("STAFF");
@@ -330,7 +323,7 @@ describe("a Supabase identity with no local row", () => {
   it("stores a placeholder clerkId so the NOT NULL column stays honest", async () => {
     signInAsSupabase(fakeSupabaseUser("sb_fresh", "newcomer@example.com"));
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.clerkId.startsWith(UNLINKED_CLERK_ID_PREFIX)).toBe(true);
   });
@@ -338,7 +331,7 @@ describe("a Supabase identity with no local row", () => {
   it("derives a name from the email when Supabase carries none", async () => {
     signInAsSupabase(fakeSupabaseUser("sb_fresh", "warehouse.lead@example.com"));
 
-    const resolved = await getCurrentSupabaseUser();
+    const resolved = await getCurrentUser();
 
     expect(resolved?.name).toBe("warehouse.lead");
   });
@@ -389,47 +382,30 @@ describe("two requests arriving at once", () => {
   });
 });
 
-describe("the authorisation contract is unchanged", () => {
-  it("still lets an ADMIN through requireRole", async () => {
+describe("the authorisation contract", () => {
+  it("lets an ADMIN through requireRole", async () => {
     await prisma.user.create({
       data: {
-        clerkId: "user_admin",
+        clerkId: `${UNLINKED_CLERK_ID_PREFIX}sb_admin`,
+        supabaseUserId: "sb_admin",
         name: "The Administrator",
         email: "admin@example.com",
         role: "ADMIN",
       },
     });
 
-    signInAs(fakeClerkUser("user_admin", "admin@example.com"));
+    signInAsSupabase(fakeSupabaseUser("sb_admin", "admin@example.com"));
 
     const user = await requireRole("ADMIN");
 
     expect(user.role).toBe("ADMIN");
   });
 
-  it("still refuses a STAFF user an ADMIN-only action", async () => {
+  it("refuses a STAFF user an ADMIN-only action", async () => {
     await prisma.user.create({
       data: {
-        clerkId: "user_staff",
-        name: "Staff Person",
-        email: "staff@example.com",
-        role: "STAFF",
-      },
-    });
-
-    signInAs(fakeClerkUser("user_staff", "staff@example.com"));
-
-    await expect(requireRole("ADMIN")).rejects.toBeInstanceOf(AppError);
-  });
-
-  /*
-   * Authorisation reads the local row whichever provider authenticated, so a
-   * row claimed by Supabase is gated by the role it already held.
-   */
-  it("reads the role from the local row after a Supabase claim", async () => {
-    await prisma.user.create({
-      data: {
-        clerkId: "user_staff",
+        clerkId: `${UNLINKED_CLERK_ID_PREFIX}sb_staff`,
+        supabaseUserId: "sb_staff",
         name: "Staff Person",
         email: "staff@example.com",
         role: "STAFF",
@@ -437,12 +413,39 @@ describe("the authorisation contract is unchanged", () => {
     });
 
     signInAsSupabase(fakeSupabaseUser("sb_staff", "staff@example.com"));
-    const claimed = await getCurrentSupabaseUser();
 
+    await expect(requireRole("ADMIN")).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("refuses an unauthenticated request at any gate", async () => {
+    await expect(requireRole("ADMIN", "STAFF")).rejects.toBeInstanceOf(AppError);
+  });
+
+  /*
+   * The role comes from the local row, never from the Auth account. A provider
+   * that handed out its own idea of a role — in app_metadata, say — would move
+   * authorisation outside the database, where this application cannot audit it.
+   */
+  it("reads the role from the local row, not from Auth metadata", async () => {
+    await prisma.user.create({
+      data: {
+        clerkId: "user_clerk_era",
+        name: "Staff Person",
+        email: "staff@example.com",
+        role: "STAFF",
+      },
+    });
+
+    // The Auth account claims to be an admin. It is not consulted.
+    signInAsSupabase(
+      fakeSupabaseUser("sb_staff", "staff@example.com", {
+        user_metadata: { role: "ADMIN", app_role: "ADMIN" },
+      }),
+    );
+
+    const claimed = await getCurrentUser();
     expect(claimed?.role).toBe("STAFF");
 
-    // The same person through the still-active Clerk path is also STAFF.
-    signInAs(fakeClerkUser("user_staff", "staff@example.com"));
     await expect(requireRole("ADMIN")).rejects.toBeInstanceOf(AppError);
   });
 });
