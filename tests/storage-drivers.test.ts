@@ -573,7 +573,38 @@ describe("driver selection", () => {
     );
 
     expect(source).toContain("SUPABASE_SERVICE_ROLE_KEY");
-    expect(source).not.toMatch(/NEXT_PUBLIC_SUPABASE/);
+
+    /*
+     * An allowlist, not a search for the forbidden string.
+     *
+     * `/NEXT_PUBLIC_SUPABASE/` used to stand here and it was testing the wrong
+     * thing. `env.ts` names those two variables in an error message — prose
+     * telling an operator what to set — and a substring search cannot tell a
+     * sentence from a declaration: it failed on the sentence while a module that
+     * genuinely read the key through a differently-spelled name would have
+     * passed. What matters is which `NEXT_PUBLIC_` names this module *declares
+     * in its schema or reads from the environment*, so that is what this
+     * collects, and then it names the only one allowed to be there.
+     */
+    const exposed = new Set<string>();
+
+    for (const line of source.split(/\r?\n/)) {
+      // A schema key or an object property: `NEXT_PUBLIC_FOO:`.
+      const declared = /^\s*(NEXT_PUBLIC_[A-Z0-9_]+)\s*:/.exec(line);
+      if (declared?.[1]) exposed.add(declared[1]);
+
+      // A read, in either spelling `process.env` accepts.
+      const read = /process\.env(?:\.|\[")(NEXT_PUBLIC_[A-Z0-9_]+)/.exec(line);
+      if (read?.[1]) exposed.add(read[1]);
+    }
+
+    /*
+     * The display name is browser-visible by design and carries nothing. Every
+     * other value this module holds is a credential, so the list is exactly one
+     * name long — and a second entry appearing here should stop the build until
+     * somebody has said out loud why that value may ship to the browser.
+     */
+    expect([...exposed].sort()).toEqual(["NEXT_PUBLIC_APP_NAME"]);
 
     // And it is read only through the server-only env module.
     expect(source).toContain('import "server-only"');
