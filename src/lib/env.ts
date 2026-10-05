@@ -31,14 +31,6 @@ const schema = z.object({
       "DATABASE_URL must be a postgres:// or postgresql:// connection string",
     ),
 
-  /**
-   * Clerk keys. Optional in development so the foundation can be run and
-   * reviewed before an account exists; required in production, where serving
-   * an unauthenticated app would be a security hole rather than a convenience.
-   */
-  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: z.string().optional(),
-  CLERK_SECRET_KEY: z.string().optional(),
-
   NEXT_PUBLIC_APP_NAME: z.string().default("Inventory Manager"),
 
   /**
@@ -128,9 +120,6 @@ function load() {
   const parsed = schema.safeParse({
     NODE_ENV: process.env.NODE_ENV,
     DATABASE_URL: process.env.DATABASE_URL,
-    NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:
-      process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
-    CLERK_SECRET_KEY: process.env.CLERK_SECRET_KEY,
     NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
     FILE_STORAGE_DRIVER: process.env.FILE_STORAGE_DRIVER,
     FILE_STORAGE_DIR: process.env.FILE_STORAGE_DIR,

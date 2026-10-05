@@ -1,10 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
-
 import { prisma } from "@/lib/prisma";
 import {
   loadAttention,
@@ -20,7 +15,7 @@ import { loadProductStats } from "@/server/products";
 import { loadPurchaseStats, receivePurchase, createPurchase, cancelPurchase } from "@/server/purchases";
 import { cancelOrder, completeOrder, confirmOrder, createOrder } from "@/server/orders";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import { amountIn } from "./money";
 import {
   createSupplier,
@@ -46,7 +41,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 

@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { EXPIRING_SOON_DAYS } from "@/lib/certificate-status";
 import { prisma } from "@/lib/prisma";
@@ -16,7 +11,7 @@ import { loadCertificateTypes } from "@/server/certificates";
 import { loadCertificateRegisterReport } from "@/server/reports";
 import { createPurchase, receivePurchase } from "@/server/purchases";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import {
   createSupplier,
   resetDatabase,
@@ -39,7 +34,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
@@ -873,7 +868,7 @@ describe("the product-status default", () => {
 
 describe("authorisation", () => {
   it("refuses a signed-out caller", async () => {
-    signOut();
+    signOutSupabase();
 
     const result = await loadCertificateRegisterReport(params(), NOW);
     expect(result.ok).toBe(false);

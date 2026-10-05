@@ -50,7 +50,7 @@ import { clearSupplyLinksForPurchase } from "@/server/supply-links";
  *   touching the same products queue instead of deadlocking.
  *
  *   **Attributed.** Every movement records the local user resolved from the
- *   Clerk session. `createdBy` is not a parameter anywhere in this file.
+ *   session. `createdBy` is not a parameter anywhere in this file.
  *
  * It reuses the stock engine rather than reimplementing it — `lockProducts` and
  * `applyStockMovement` are the same functions the orders module and the manual
@@ -1128,9 +1128,9 @@ async function assertPurchaseLotsIntact(
  *
  * One database transaction, in this order:
  *
- *   1. Resolve the Clerk session to a local user — outside the transaction,
- *      because it may have to talk to Clerk and must not hold locks while it
- *      does.
+ *   1. Resolve the session to a local user — outside the transaction, because
+ *      it may have to reach the identity provider and must not hold locks
+ *      while it does.
  *   2. Lock the purchase row and read its status.
  *   3. Refuse the transition if it is not legal from that status.
  *   4. Load the lines and check every product is still active.
@@ -1208,7 +1208,7 @@ export async function receivePurchase(
           delta: item.quantity,
           reference: { type: "PURCHASE", id: purchaseId },
           note: `Purchase ${purchase.purchaseNumber} received`,
-          // From the session, resolved through clerkId. Never from the client.
+          // From the session, resolved server-side. Never from the client.
           userId: user.id,
         },
       );

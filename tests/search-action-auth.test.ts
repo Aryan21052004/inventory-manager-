@@ -1,16 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { searchOrderProductsAction } from "@/app/(app)/orders/actions";
 import { searchPurchaseProductsAction } from "@/app/(app)/purchases/actions";
 import { searchOrderProducts } from "@/server/orders";
 import { searchPurchaseProducts } from "@/server/purchases";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import { resetDatabase, seedProduct, signInWithRole } from "./database";
 
 /**
@@ -30,7 +25,7 @@ import { resetDatabase, seedProduct, signInWithRole } from "./database";
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 

@@ -1,10 +1,5 @@
 import "server-only";
 
-// Temporary migration code. `currentUser` is reached only through the legacy
-// Clerk resolver below, which no request path calls any more. `auth` is gone
-// because nothing active establishes a Clerk session.
-import { currentUser } from "@clerk/nextjs/server";
-
 import type { User } from "@/generated/prisma/client";
 import type { UserRole } from "@/generated/prisma/enums";
 import { AppError } from "@/lib/errors";
@@ -30,57 +25,34 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
  * provider's user id never changes.
  *
  * Nothing here trusts the client. The caller cannot pass in a user id — the
- * identity comes from the Clerk session on the request, and that is the only
+ * identity comes from the verified session on the request, and that is the only
  * place it can come from.
  *
- * Syncing is lazy: a local row appears the first time its owner makes a
- * request. That keeps the moving parts to one function and has no failure mode
- * of its own — if the sync does not run, nobody was using the app. The cost is
- * that the local mirror only refreshes when a row is created or claimed, so a
- * user who later changes their name or email in Clerk keeps the old value here
- * until something updates it. Identity is unaffected (the lookup is by
- * `clerkId`), but a stale display name is a real if minor wrong.
+ * Syncing is lazy: a local row appears the first time its owner makes a request.
+ * That keeps the moving parts to one function and has no failure mode of its own
+ * — if the sync does not run, nobody was using the app. The cost is that the
+ * local mirror only refreshes when a row is created or claimed, so a user who
+ * later changes their name with the provider keeps the old one here. Identity is
+ * unaffected, because the lookup is by `supabaseUserId`, but a stale display
+ * name is a real if minor wrong.
  *
- * A Clerk webhook on `user.updated` / `user.deleted` is the production answer
- * to that, and to deletions, which lazy sync cannot see at all — a user removed
- * in Clerk simply stops arriving, leaving a local row that looks active
- * forever. That is worth adding when the app has real users; it is not worth
- * the endpoint, the signature verification, and the replay handling today,
- * when nothing yet depends on the mirror being fresh.
- *
- * ## Clerk is no longer on the active path
- *
- * Supabase Auth answers every request. The Clerk resolver further down —
- * `resolveUser`, `syncUser`, `loadClerkProfile` — is **temporary migration
- * code**, kept only so the switch can be reverted by changing which resolver
- * `getCurrentUser` calls rather than by restoring deleted work. Nothing reaches
- * it: no proxy establishes a Clerk session, no layout calls `auth.protect()`,
- * and `getCurrentUser` does not consult it. It should be deleted along with the
- * dependency once the migration has been proven in production.
- *
- * Both resolvers land on the same `User` row and the same `role` column, which
- * is why `requireRole` needed no change at all: it is the single authorisation
- * gate regardless of which provider authenticated the request, and the rest of
- * the codebase keeps importing `requireUser` and `requireRole` without ever
- * learning which one that was.
+ * `requireRole` is the single authorisation gate, and it reads the `role` column
+ * in our own database rather than anything the request carried. That is why the
+ * provider could be replaced underneath it without touching it, and why the rest
+ * of the codebase imports `requireUser` and `requireRole` without ever learning
+ * which provider authenticated.
  */
 
 /**
- * Marks a local user created before their Clerk account existed — the seeded
- * accounts, or anyone imported from elsewhere. The first sign-in from a Clerk
- * account with a matching email claims the row (see `resolveUser`).
+ * Fills `users.clerk_id` for a row no Clerk account owns.
  *
- * A placeholder rather than a null so the identity key can stay NOT NULL and
- * every lookup can stop worrying about it.
+ * The column is a leftover. It is still NOT NULL, so every row created from here
+ * on needs *something* in it, and this prefix says plainly that the something is
+ * not an identity. Nothing reads it: the only identity key is `supabaseUserId`.
+ *
+ * It goes away when the column does, which is a separate and irreversible step.
  */
 export const UNLINKED_CLERK_ID_PREFIX = "unlinked_";
-
-/** The fields of a Clerk account this app mirrors locally. */
-interface ClerkProfile {
-  clerkId: string;
-  email: string;
-  name: string;
-}
 
 /**
  * The current user, or null if the request is not authenticated.
@@ -191,158 +163,6 @@ export async function requireRole(
   return user;
 }
 
-// ---------------------------------------------------------------------------
-// Clerk — TEMPORARY MIGRATION CODE, not on any active request path
-// ---------------------------------------------------------------------------
-//
-// Everything from here to the Supabase section is retained for rollback only.
-// `getCurrentUser` does not call it, no proxy establishes a Clerk session, and
-// no layout checks one — so a request cannot reach this code even with Clerk's
-// keys still configured. Delete it with the dependency once the migration has
-// held in production.
-
-/**
- * Finds the local user for a Clerk id, creating or claiming one if needed.
- *
- * The happy path is a single indexed lookup — the overwhelming majority of
- * requests are from users who already have a row, and those never touch Clerk's
- * API or write anything.
- */
-export async function resolveUser(clerkId: string): Promise<User> {
-  const existing = await prisma.user.findUnique({ where: { clerkId } });
-  if (existing) return existing;
-
-  return syncUser(clerkId);
-}
-
-/**
- * First contact: this Clerk account has no local row yet.
- *
- * Two requests from the same new user can arrive at once — two tabs, or a page
- * whose components each load data — and both will find nothing and both will
- * try to write. That is not prevented here; it is made harmless. The unique
- * index on `clerk_id` lets exactly one of them win, and the loser reads back
- * the winner's row instead of failing. Checking first and writing second cannot
- * be made safe by looking harder, because the gap between the two is where the
- * race lives; the database is the only thing that can arbitrate.
- */
-async function syncUser(clerkId: string): Promise<User> {
-  const profile = await loadClerkProfile(clerkId);
-
-  try {
-    return await prisma.$transaction(async (tx) => {
-      // Claim a row that was created before this Clerk account existed. Email
-      // is safe to match on here and only here: it is a one-time adoption of an
-      // explicitly unlinked record, not the ongoing identity lookup. From this
-      // point on the row is found by clerkId and the email can change freely.
-      const unlinked = await tx.user.findFirst({
-        where: {
-          email: profile.email,
-          clerkId: { startsWith: UNLINKED_CLERK_ID_PREFIX },
-        },
-      });
-
-      if (unlinked) {
-        return tx.user.update({
-          where: { id: unlinked.id },
-          // The role is deliberately left alone. It was set by whoever created
-          // the record, and signing in is not a reason to change it.
-          data: { clerkId, name: profile.name },
-        });
-      }
-
-      return tx.user.create({
-        data: {
-          clerkId,
-          email: profile.email,
-          name: profile.name,
-          // New accounts start with the least privilege. Promotion to ADMIN is
-          // a deliberate act by an existing admin, never a side effect of
-          // signing up.
-          role: "STAFF",
-        },
-      });
-    });
-  } catch (error) {
-    if (!isUniqueViolation(error)) throw error;
-
-    // Someone else got there first. Their row is the canonical one.
-    const winner = await prisma.user.findUnique({ where: { clerkId } });
-    if (winner) return winner;
-
-    // The clash was on email, not clerkId: a different Clerk account already
-    // owns this address locally. That needs a human, not a retry.
-    throw new AppError(
-      "CONFLICT",
-      "Another account in this workspace already uses that email address.",
-    );
-  }
-}
-
-/**
- * Reads the signed-in user's profile from Clerk.
- *
- * `currentUser()` only ever returns the user the request is authenticated as,
- * which is exactly the guarantee wanted here — there is no way to ask it for
- * somebody else. The `clerkId` argument is checked against what comes back
- * rather than trusted.
- */
-async function loadClerkProfile(clerkId: string): Promise<ClerkProfile> {
-  const clerkUser = await currentUser();
-
-  if (!clerkUser || clerkUser.id !== clerkId) {
-    throw new AppError(
-      "UNAUTHORIZED",
-      "Your session could not be verified. Please sign in again.",
-    );
-  }
-
-  const email =
-    clerkUser.primaryEmailAddress?.emailAddress ??
-    clerkUser.emailAddresses[0]?.emailAddress;
-
-  if (!email) {
-    // Every Clerk instance this app supports requires an email address, so
-    // reaching here means the instance is configured for a sign-in method we
-    // have no local representation for.
-    throw new AppError(
-      "BAD_REQUEST",
-      "Your account has no email address, which this application requires.",
-    );
-  }
-
-  return { clerkId, email, name: displayName(clerkUser, email) };
-}
-
-/**
- * A name to show. Clerk makes every name field optional — a user who signed up
- * with an email link may have none — so this falls back through what is
- * available and finally to the local part of the address, because `name` is
- * NOT NULL and an empty string is not a name.
- */
-function displayName(
-  clerkUser: {
-    fullName: string | null;
-    firstName: string | null;
-    lastName: string | null;
-    username: string | null;
-  },
-  email: string,
-): string {
-  const candidates = [
-    clerkUser.fullName,
-    [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(" "),
-    clerkUser.username,
-    email.split("@")[0],
-  ];
-
-  for (const candidate of candidates) {
-    const trimmed = candidate?.trim();
-    if (trimmed) return trimmed;
-  }
-
-  return "Unnamed user";
-}
 
 /**
  * Prisma's unique-constraint code. Matched structurally rather than with
@@ -362,20 +182,15 @@ function isUniqueViolation(error: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * The same bridge, built for Supabase Auth.
- *
- * Nothing above calls into this section. It exists so that the switch away from
- * Clerk is a change to which resolver `getCurrentUser` calls rather than a
- * change to how identity works, and so that the mapping rules below can be
- * reviewed and tested while Clerk is still serving every request.
+ * Mapping a Supabase Auth identity onto a local user row.
  *
  * ## The join key
  *
- * `supabaseUserId` is the identity key, for the same reason `clerkId` is: it
- * never changes, and an email does. The column is nullable rather than carrying
- * an `unlinked_` placeholder — a NULL already means "no Supabase identity has
- * claimed this row", and PostgreSQL treats NULLs as distinct in a unique index,
- * so every unclaimed row coexists while no two rows can share an id.
+ * `supabaseUserId` is the identity key: it never changes, and an email does. The
+ * column is nullable rather than carrying a placeholder — a NULL already means
+ * "no Supabase identity has claimed this row", and PostgreSQL treats NULLs as
+ * distinct in a unique index, so every unclaimed row coexists while no two rows
+ * can share an id.
  *
  * ## Why a verified email is required
  *
@@ -472,9 +287,8 @@ export async function resolveSupabaseUser(
 /**
  * First contact: this Supabase account has no local row yet.
  *
- * Mirrors `syncUser`'s approach to the same problem — check, write, and let the
- * database arbitrate the gap between the two, because that gap is where the
- * race lives and no amount of looking first can close it.
+ * Check, write, and let the database arbitrate the gap between the two, because
+ * that gap is where the race lives and no amount of looking first can close it.
  */
 async function claimOrCreateSupabaseUser(
   identity: SupabaseIdentity,
@@ -518,12 +332,9 @@ async function claimOrCreateSupabaseUser(
           email: identity.email,
           name: identity.name,
           /*
-           * `clerkId` is still NOT NULL, so a Supabase-only account needs a
-           * placeholder until that column is dropped. The existing `unlinked_`
-           * prefix is exactly the right meaning — "no Clerk account owns this
-           * row" — and `resolveUser` already treats such rows as claimable, so
-           * a Clerk sign-in with the same address would adopt it rather than
-           * fail.
+           * `clerk_id` is still NOT NULL, so a new row needs something in it
+           * until that column is dropped. Nothing reads the value — see
+           * UNLINKED_CLERK_ID_PREFIX.
            */
           clerkId: `${UNLINKED_CLERK_ID_PREFIX}${identity.supabaseUserId}`,
           // Least privilege. ADMIN is only ever reached by adopting a row that

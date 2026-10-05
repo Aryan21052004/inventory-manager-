@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { attachCertificate } from "@/server/certificates";
@@ -17,7 +12,7 @@ import {
 } from "@/server/orders";
 import { createPurchase, receivePurchase } from "@/server/purchases";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import {
   createSupplier,
   expectConsumptionsReconcile,
@@ -58,7 +53,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
@@ -853,7 +848,7 @@ describe("who may fulfil", () => {
     await receive(supplier.id, product.id, 2, "9500.00");
     const line = await lineOf(order.id);
 
-    signOut();
+    signOutSupabase();
 
     await expect(
       fulfilOrder(order.id, { lines: [{ orderItemId: line.id, quantity: 2 }] }),

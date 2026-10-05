@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import {
@@ -20,7 +15,7 @@ import { createPurchase, receivePurchase } from "@/server/purchases";
 import { setCurrency } from "@/server/settings";
 import { recordStockMovement } from "@/server/stock";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import {
   createSupplier,
   resetDatabase,
@@ -47,7 +42,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
@@ -1217,7 +1212,7 @@ describe("read access", () => {
     });
 
     for (const role of ["ADMIN", "STAFF"] as const) {
-      signOut();
+      signOutSupabase();
       await signInWithRole(role);
 
       const result = await listMovements(params());
@@ -1268,7 +1263,7 @@ describe("read access", () => {
       newStock: 101,
     });
 
-    signOut();
+    signOutSupabase();
 
     const result = await listMovements(params());
     expect(result.ok).toBe(true);

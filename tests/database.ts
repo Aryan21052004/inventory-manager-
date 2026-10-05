@@ -445,9 +445,8 @@ export async function createSupplier(
  * That keeps these tests about whatever they are actually about; adoption has
  * its own tests in `supabase-auth.test.ts`.
  *
- * A `clerkId` is still written because the column is NOT NULL until the Clerk
- * migration finishes. It is an `unlinked_` placeholder: no Clerk account owns
- * these rows, and nothing in the active code path reads it.
+ * A `clerkId` is still written because `users.clerk_id` is NOT NULL until that
+ * column is dropped. It is an `unlinked_` placeholder, and nothing reads it.
  */
 export async function signInWithRole(role: "ADMIN" | "STAFF") {
   const suffix = Math.random().toString(36).slice(2, 8);

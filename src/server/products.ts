@@ -1153,7 +1153,7 @@ export interface AdjustmentOutcome {
  * This function is a translation and nothing more: it turns "decrease 20" into
  * the signed movement the stock engine takes, and hands it over. Everything
  * that makes the operation safe lives in `recordStockMovement` — the ADMIN
- * check, resolving the Clerk session to a local user, the row lock, the
+ * check, resolving the session to a local user, the row lock, the
  * non-negative check, and writing the quantity and the ledger row in one
  * transaction. Reimplementing any of that here would be a second version of it
  * to keep in step.

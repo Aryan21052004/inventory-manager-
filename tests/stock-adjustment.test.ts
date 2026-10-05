@@ -1,15 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { adjustStock } from "@/server/products";
 
-import { fakeClerkUser, signInAs, signOut } from "./clerk-mock";
 import { resetDatabase, seedProduct, signInWithRole } from "./database";
+import {
+  fakeSupabaseUser,
+  signInAsSupabase,
+  signOutSupabase,
+} from "./supabase-auth-mock";
 
 /**
  * Manual stock adjustments.
@@ -26,7 +25,7 @@ import { resetDatabase, seedProduct, signInWithRole } from "./database";
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
@@ -105,7 +104,7 @@ describe("authorisation", () => {
     const product = await seedProduct({ sku: "ADJ-004", stockQuantity: 100 });
 
     // A request that says it is allowed. The server never reads a role from the
-    // input — it reads the one stored against the Clerk id.
+    // input — it reads the one resolved from the session.
     await expect(
       adjustStock({
         ...adjustmentForm(product.id),
@@ -195,7 +194,7 @@ describe("the transaction it writes", () => {
 });
 
 describe("attribution", () => {
-  it("takes createdBy from the Clerk session", async () => {
+  it("takes createdBy from the session", async () => {
     const admin = await signInWithRole("ADMIN");
     const product = await seedProduct({ sku: "ADJ-020", stockQuantity: 100 });
 
@@ -206,7 +205,7 @@ describe("attribution", () => {
       include: { createdByUser: true },
     });
 
-    // The local database id, not the Clerk id — the foreign key points at our
+    // The local database id, not the Auth id — the foreign key points at our
     // users table.
     expect(movement.createdBy).toBe(admin.id);
     expect(movement.createdBy).not.toBe(admin.clerkId);
@@ -241,14 +240,17 @@ describe("attribution", () => {
     expect(movement.createdBy).not.toBe(somebodyElse.id);
   });
 
-  it("resolves a first-time Clerk account to a new local user", async () => {
+  it("resolves a first-time Auth account to a new local user", async () => {
     // Signed in, but with no local row yet. The movement still has to be
     // attributable, so the row has to be created on the way through.
-    signInAs(fakeClerkUser("user_brand_new", "brandnew@example.com"));
+    signInAsSupabase(
+      fakeSupabaseUser("sb_brand_new", "brandnew@example.com"),
+    );
     await prisma.user.create({
       data: {
-        // The seeded placeholder an admin created before the Clerk account
-        // existed; the first sign-in with a matching email claims it.
+        // A row an admin created before this person had an Auth account. Its
+        // supabase_user_id is null, so the first sign-in with a matching,
+        // verified email claims it rather than creating a second account.
         clerkId: "unlinked_brandnew",
         name: "Brand New",
         email: "brandnew@example.com",
@@ -261,7 +263,7 @@ describe("attribution", () => {
     await adjustStock(adjustmentForm(product.id, { quantity: "1" }));
 
     const claimed = await prisma.user.findUniqueOrThrow({
-      where: { clerkId: "user_brand_new" },
+      where: { supabaseUserId: "sb_brand_new" },
     });
     const movement = await prisma.stockTransaction.findFirstOrThrow({
       where: { productId: product.id },

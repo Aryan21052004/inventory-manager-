@@ -1,16 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { DEFAULT_CURRENCY } from "@/lib/currency";
 import { prisma } from "@/lib/prisma";
 import { currencySettingSchema } from "@/lib/validation/settings";
 import { getCurrency, setCurrency } from "@/server/settings";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import { resetDatabase, seedProduct, signInWithRole } from "./database";
 
 /**
@@ -90,7 +85,7 @@ async function moneySnapshot() {
 describe("application currency setting", () => {
   beforeEach(async () => {
     await resetDatabase();
-    signOut();
+    signOutSupabase();
   });
 
   describe("the default", () => {
@@ -140,7 +135,7 @@ describe("application currency setting", () => {
       const admin = await signInWithRole("ADMIN");
       await setCurrency("EUR");
 
-      signOut();
+      signOutSupabase();
       await signInWithRole("STAFF");
       await expect(setCurrency("USD")).rejects.toMatchObject({
         code: "FORBIDDEN",
@@ -156,7 +151,7 @@ describe("application currency setting", () => {
     });
 
     it("refuses an unauthenticated caller", async () => {
-      signOut();
+      signOutSupabase();
 
       await expect(setCurrency("USD")).rejects.toMatchObject({
         code: "UNAUTHORIZED",
@@ -172,7 +167,7 @@ describe("application currency setting", () => {
       await signInWithRole("ADMIN");
       await setCurrency("USD");
 
-      signOut();
+      signOutSupabase();
       await signInWithRole("STAFF");
       await expect(getCurrency()).resolves.toBe("USD");
     });

@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { certificateStatus, EXPIRING_SOON_DAYS } from "@/lib/certificate-status";
 import { prisma } from "@/lib/prisma";
@@ -24,7 +19,7 @@ import {
 import { createPurchase, receivePurchase } from "@/server/purchases";
 import { fileStorage } from "@/server/storage";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import {
   createSupplier,
   resetDatabase,
@@ -44,7 +39,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
@@ -630,7 +625,7 @@ describe("who may read a certificate file", () => {
     const product = await seedProduct({ sku: "CERT-AUTH" });
     const certificate = await attach(await lotOf(product.id));
 
-    signOut();
+    signOutSupabase();
 
     await expect(getCertificateFile(certificate.id)).rejects.toMatchObject({
       code: "UNAUTHORIZED",
@@ -639,7 +634,7 @@ describe("who may read a certificate file", () => {
   });
 
   it("refuses an unauthenticated request even for an id that does not exist", async () => {
-    signOut();
+    signOutSupabase();
 
     // 401 rather than 404: a signed-out visitor must not be able to map which
     // certificate ids exist by watching which ones come back differently.
@@ -653,7 +648,7 @@ describe("who may read a certificate file", () => {
     const product = await seedProduct({ sku: "CERT-STAFFREAD" });
     const certificate = await attach(await lotOf(product.id));
 
-    signOut();
+    signOutSupabase();
     await signInWithRole("STAFF");
 
     const file = await getCertificateFile(certificate.id);
@@ -716,7 +711,7 @@ describe("who may change a certificate", () => {
       certificateNumber: "UNTOUCHED",
     });
 
-    signOut();
+    signOutSupabase();
     await signInWithRole("STAFF");
 
     await expect(
@@ -734,7 +729,7 @@ describe("who may change a certificate", () => {
     const product = await seedProduct({ sku: "CERT-STAFFDEL" });
     const certificate = await attach(await lotOf(product.id));
 
-    signOut();
+    signOutSupabase();
     await signInWithRole("STAFF");
 
     await expect(removeCertificate(certificate.id)).rejects.toMatchObject({

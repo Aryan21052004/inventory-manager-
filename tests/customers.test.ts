@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_CUSTOMER_PARAMS,
@@ -23,7 +18,7 @@ import {
 } from "@/server/customers";
 import { createOrder, loadCustomers, updateOrder } from "@/server/orders";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import { amountIn, stringIn } from "./money";
 import {
   quoted,
@@ -55,7 +50,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 

@@ -38,11 +38,9 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
  *
  * ## A client component now, where it used to be a server one
  *
- * It had to be a server component for Clerk: `<Show>` resolved the session
- * during the render. Signing out is a browser action, so this is the natural side
- * of the boundary — and the hydration dance that `client-user-button.tsx` existed
- * to perform is gone with it, because nothing here waits for a third-party SDK to
- * load before it can render.
+ * Signing out is a browser action, so the client is the natural side of the
+ * boundary. Nothing here waits for a third-party SDK to load before it can
+ * render, which is why there is no hydration dance around the account button.
  */
 
 export interface UserMenuAccount {

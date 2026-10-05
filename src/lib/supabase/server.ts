@@ -26,14 +26,11 @@ import { requireSupabaseAuthConfig } from "@/lib/supabase/config";
  * lost for this render, the caller still gets a valid user because the token it
  * just obtained is in memory, and the next request refreshes again.
  *
- * What makes that sustainable is a client in the proxy (`src/proxy.ts`) that
- * calls `getUser()` on every request, where cookies *can* be written. Reaching
- * this catch on every request means that is missing or broken, and the symptom
- * is not an error but a token refreshed over and over.
- *
- * Note for the Clerk migration: the proxy still runs `clerkMiddleware` and does
- * not touch Supabase. Until that changes, this catch is load-bearing, and a
- * Supabase session will be refreshed per render rather than per request.
+ * What makes that sustainable is `updateSession` in the proxy
+ * (`src/lib/supabase/proxy.ts`), which calls `getClaims()` on every request,
+ * where cookies *can* be written. Reaching this catch on every request means
+ * that is missing or broken, and the symptom is not an error but a token
+ * refreshed over and over.
  *
  * ## This client carries no privilege
  *

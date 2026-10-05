@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { csvField, csvRow, toCsv } from "@/lib/csv";
 import { prisma } from "@/lib/prisma";
@@ -23,7 +18,7 @@ import { confirmOrder, createOrder } from "@/server/orders";
 import { createPurchase, receivePurchase } from "@/server/purchases";
 import { setCurrency } from "@/server/settings";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import { stringIn } from "./money";
 import {
   createSupplier,
@@ -44,7 +39,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
@@ -536,7 +531,7 @@ describe("the stock movement summary export", () => {
 describe("the CSV names the currency of every amount", () => {
   beforeEach(async () => {
     await resetDatabase();
-    signOut();
+    signOutSupabase();
   });
 
   /** A product with a costed batch, so the money columns are not all zero. */

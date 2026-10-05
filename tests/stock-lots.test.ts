@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { coverageNote, marginOf } from "@/lib/cost-coverage";
@@ -17,7 +12,7 @@ import { createProduct as createCatalogueProduct } from "@/server/products";
 import { adjustStock } from "@/server/products";
 import { loadProductStats } from "@/server/products";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import { amountIn } from "./money";
 import {
   createSupplier,
@@ -51,7 +46,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 

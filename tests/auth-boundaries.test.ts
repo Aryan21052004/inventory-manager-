@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
  * each failure mode here is an import that should not exist, and code that
  * shouldn't be there passes every test written about the code that should.
  *
- *   1. No Clerk component is rendered by the application any more.
+ *   1. Nothing in the application names or imports Clerk any more.
  *   2. No client component can reach a service-role credential.
  *   3. No client component reads application data through PostgREST.
  *
@@ -67,24 +67,40 @@ function codeLines(source: string): string[] {
 
 const clientFiles = () => FILES.filter((file) => /^\s*"use client"/m.test(file.source));
 
-describe("no Clerk component is rendered any more", () => {
+describe("Clerk is gone from the application entirely", () => {
   /*
-   * `src/server/auth.ts` keeps `currentUser` from the server SDK as rollback-only
-   * migration code, which is deliberate and is not a component. Everything else
-   * must be free of Clerk.
+   * Zero allowances.
+   *
+   * The one file that used to hold an exemption — `src/server/auth.ts`, for the
+   * legacy resolver kept so a rollback stayed a one-line change — no longer
+   * imports anything from Clerk. So there is nothing left that may, and this
+   * asserts the absence rather than a permitted count. Re-adding an allowance
+   * here is how a removed dependency comes back without anyone deciding to
+   * bring it back.
    */
-  const ALLOWED_SERVER_SDK_IMPORT = "src/server/auth.ts";
 
-  it("imports no Clerk UI component anywhere", () => {
-    const offenders = FILES.filter((file) => {
-      if (file.path === ALLOWED_SERVER_SDK_IMPORT) return false;
-
-      return codeLines(file.source).some((line) =>
-        /from\s+["']@clerk\/nextjs["']/.test(line),
-      );
-    }).map((file) => file.path);
+  it("imports nothing from any @clerk package, in any file", () => {
+    const offenders = FILES.filter((file) =>
+      codeLines(file.source).some((line) => /@clerk\//.test(line)),
+    ).map((file) => file.path);
 
     expect(offenders).toEqual([]);
+  });
+
+  it("declares no Clerk package as a dependency", () => {
+    const manifest = JSON.parse(
+      readFileSync(join(ROOT, "package.json"), "utf8"),
+    ) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+
+    const declared = [
+      ...Object.keys(manifest.dependencies ?? {}),
+      ...Object.keys(manifest.devDependencies ?? {}),
+    ].filter((name) => /clerk/i.test(name));
+
+    expect(declared).toEqual([]);
   });
 
   it("names none of the Clerk components in executable code", () => {
@@ -111,12 +127,30 @@ describe("no Clerk component is rendered any more", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("keeps only the server-SDK import, and only in the legacy resolver", () => {
-    const withClerk = FILES.filter((file) =>
-      codeLines(file.source).some((line) => /@clerk\//.test(line)),
-    ).map((file) => file.path);
+  /*
+   * The leftover column, and nothing else.
+   *
+   * `users.clerk_id` is still NOT NULL, so a row created today needs something in
+   * it. Three names serve that and are exempt: the Prisma field `clerkId`, the
+   * column `clerk_id`, and `UNLINKED_CLERK_ID_PREFIX`, which supplies the value.
+   * Dropping the column removes all three, and that is a separate, irreversible
+   * step. Anything else naming Clerk in executable code is a leftover that should
+   * have gone with the dependency.
+   */
+  const LEFTOVER_COLUMN = /clerkId|clerk_id|UNLINKED_CLERK_ID_PREFIX/;
 
-    expect(withClerk).toEqual([ALLOWED_SERVER_SDK_IMPORT]);
+  it("names Clerk nowhere in executable code, except the leftover column", () => {
+    const offenders: string[] = [];
+
+    for (const file of FILES) {
+      for (const line of codeLines(file.source)) {
+        if (/clerk/i.test(line) && !LEFTOVER_COLUMN.test(line)) {
+          offenders.push(`${file.path}: ${line.trim()}`);
+        }
+      }
+    }
+
+    expect(offenders).toEqual([]);
   });
 });
 

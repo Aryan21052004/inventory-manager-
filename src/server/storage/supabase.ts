@@ -23,10 +23,12 @@ import {
  *
  * `FileStorage` is four operations keyed by an opaque string. `@supabase/
  * supabase-js` brings PostgREST, Realtime, and an auth client to serve them,
- * none of which this application wants — it already has Prisma for data and
- * Clerk for identity, and a second client library holding a second set of
- * credentials is a second thing to keep correct. The Storage REST API is
- * documented, stable, and reachable with `fetch`, so that is what this uses.
+ * none of which this application wants here. Data goes through Prisma, and the
+ * Auth client is built from the publishable key for sessions only — whereas
+ * this driver acts as the application itself, with the service-role key. Giving
+ * one client object both jobs would put that key within reach of code that has
+ * no business holding it. The Storage REST API is documented, stable, and
+ * reachable with `fetch`, so that is what this uses.
  *
  * ## What must be true of the bucket
  *

@@ -69,7 +69,7 @@ import { clearSupplyLinksForOrder } from "@/server/supply-links";
  *   in a consistent order, before any balance is read.
  *
  *   **Attributed.** Every movement records the local user resolved from the
- *   Clerk session. `createdBy` is not a parameter anywhere in this file.
+ *   session. `createdBy` is not a parameter anywhere in this file.
  *
  * As with products, there are no `next/*` imports here: the actions in
  * src/app/(app)/orders/actions.ts are thin wrappers, so these rules hold
@@ -1198,9 +1198,9 @@ function assertTransition(from: OrderStatus, to: OrderStatus): void {
  *
  * The whole operation is one database transaction, in this order:
  *
- *   1. Resolve the Clerk session to a local user. Outside the transaction,
- *      because it may have to talk to Clerk and must not hold locks while it
- *      does.
+ *   1. Resolve the session to a local user. Outside the transaction, because
+ *      it may have to reach the identity provider and must not hold locks
+ *      while it does.
  *   2. Lock the order row and read its status.
  *   3. Refuse the transition if it is not legal from that status.
  *   4. Load the lines.
@@ -1324,7 +1324,7 @@ export async function confirmOrder(
             take === item.quantity
               ? `Order ${order.orderNumber} confirmed`
               : `Order ${order.orderNumber} confirmed — ${take} of ${item.quantity} units fulfilled`,
-          // From the session, resolved through clerkId. Never from the client.
+          // From the session, resolved server-side. Never from the client.
           userId: user.id,
         },
       );
@@ -1608,7 +1608,7 @@ export async function fulfilOrder(
           delta: -want,
           reference: { type: "ORDER", id: orderId },
           note: `Order ${order.orderNumber} fulfilled — ${want} of ${item.quantity - item.fulfilledQuantity} outstanding units`,
-          // From the session, resolved through clerkId. Never from the client.
+          // From the session, resolved server-side. Never from the client.
           userId: user.id,
         },
       );

@@ -1,34 +1,44 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import type { StockMovementInput } from "@/lib/validation/stock";
 import { recordStockMovement } from "@/server/stock";
 
-import { fakeClerkUser, signInAs, signOut } from "./clerk-mock";
 import { createProduct, resetDatabase } from "./database";
+import {
+  fakeSupabaseUser,
+  signInAsSupabase,
+  signOutSupabase,
+} from "./supabase-auth-mock";
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
-/** Signs in as a Clerk user backed by a local record with the given role. */
+/**
+ * Signs in backed by a local record with the given role.
+ *
+ * Its own copy rather than the shared `signInWithRole`, because these tests also
+ * cover the case where no local row exists yet and need the two halves separate.
+ * The row is created already linked, so resolution is the indexed lookup rather
+ * than the one-time adoption.
+ */
 async function signInWithRole(role: "ADMIN" | "STAFF") {
+  const supabaseUserId = `sb_${role.toLowerCase()}`;
+
   const local = await prisma.user.create({
     data: {
-      clerkId: `user_${role.toLowerCase()}`,
+      // NOT NULL until the column is dropped; nothing reads it.
+      clerkId: `unlinked_${supabaseUserId}`,
+      supabaseUserId,
       name: `${role} Person`,
       email: `${role.toLowerCase()}@example.com`,
       role,
     },
   });
 
-  signInAs(fakeClerkUser(local.clerkId, local.email));
+  signInAsSupabase(fakeSupabaseUser(supabaseUserId, local.email));
   return local;
 }
 
@@ -59,7 +69,7 @@ describe("attribution", () => {
       UNKNOWN_COST,
     );
 
-    // Not the Clerk id — the foreign key points at our users table.
+    // Not the Auth id — the foreign key points at our users table.
     expect(transaction.createdBy).toBe(user.id);
     expect(transaction.createdBy).not.toBe(user.clerkId);
 
@@ -72,10 +82,12 @@ describe("attribution", () => {
     expect(withUser.createdByUser?.email).toBe("staff@example.com");
   });
 
-  it("creates the local user first when the Clerk account is new", async () => {
+  it("creates the local user first when the Auth account is new", async () => {
     // Nobody in the users table at all — the movement still has to be
     // attributable, so resolution has to happen on the way through.
-    signInAs(fakeClerkUser("user_firsttimer", "firsttimer@example.com"));
+    signInAsSupabase(
+      fakeSupabaseUser("sb_firsttimer", "firsttimer@example.com"),
+    );
     const product = await createProduct(10);
 
     const { transaction } = await recordStockMovement(
@@ -89,7 +101,7 @@ describe("attribution", () => {
     );
 
     const created = await prisma.user.findUniqueOrThrow({
-      where: { clerkId: "user_firsttimer" },
+      where: { supabaseUserId: "sb_firsttimer" },
     });
     expect(transaction.createdBy).toBe(created.id);
   });

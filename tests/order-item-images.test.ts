@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { readFile } from "node:fs/promises";
 
@@ -30,7 +25,7 @@ import {
   setOrderStatus,
 } from "@/server/orders";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import {
   expectFulfilmentReconciles,
   expectLotsReconcile,
@@ -62,7 +57,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
@@ -687,7 +682,7 @@ describe("authorisation", () => {
       where: { orderItemId: line.id },
     });
 
-    signOut();
+    signOutSupabase();
 
     await expect(
       attachOrderItemImages(line.id, [file("b.png", PNG)]),

@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { DEFAULT_PURCHASE_PARAMS } from "@/lib/purchase-query";
@@ -19,7 +14,7 @@ import {
 import { attachCertificate } from "@/server/certificates";
 import { confirmOrder, createOrder } from "@/server/orders";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import { amountIn } from "./money";
 import {
   createSupplier,
@@ -42,7 +37,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
@@ -720,7 +715,7 @@ describe("attribution", () => {
     const movement = (await movementsFor(purchase.id))[0]!;
     expect(movement.createdBy).toBe(actor.id);
     expect(movement.createdBy).not.toBe(somebodyElse.id);
-    // The local database id, not the Clerk id.
+    // The local database id, not the Auth id.
     expect(movement.createdBy).not.toBe(actor.clerkId);
   });
 
@@ -743,7 +738,7 @@ describe("attribution", () => {
       { productId: part.id, quantity: 10 },
     ]);
 
-    signOut();
+    signOutSupabase();
 
     await expect(receivePurchase(purchase.id)).rejects.toMatchObject({
       code: "UNAUTHORIZED",
@@ -760,7 +755,7 @@ describe("attribution", () => {
     ]);
     await receivePurchase(purchase.id);
 
-    signOut();
+    signOutSupabase();
 
     await expect(cancelPurchase(purchase.id)).rejects.toMatchObject({
       code: "UNAUTHORIZED",

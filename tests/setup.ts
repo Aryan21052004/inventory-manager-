@@ -18,23 +18,15 @@ config({ path: ".env", quiet: true });
 process.env["DATABASE_URL"] = testDatabaseUrl();
 
 /*
- * Clerk is mocked in the tests, so these only need to be present for
- * `authEnabled` to be true. They are set unconditionally rather than filled in
- * when missing — a real key reaching this process would be a real Clerk
- * instance one careless import away.
- */
-process.env["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"] = "pk_test_fake_for_tests";
-process.env["CLERK_SECRET_KEY"] = "sk_test_fake_for_tests";
-
-/*
- * The same for Supabase Auth, which is mocked in the tests too: these only
- * need to be present for `supabaseAuthConfigured` to be true. They are read at
- * module scope by src/lib/supabase/config.ts, so they have to be set before
- * anything imports it — which is why they are here rather than in a test file.
+ * Supabase Auth is mocked in the tests, so these only need to be present for
+ * `supabaseAuthConfigured` to be true. They are read at module scope by
+ * src/lib/supabase/config.ts, so they have to be set before anything imports
+ * it — which is why they are here rather than in a test file.
  *
- * Obviously fake values, for the same reason the Clerk ones are: a real project
- * URL and key reaching this process would be a real Supabase project one
- * careless import away, and that project holds production data.
+ * Obviously fake values, and set unconditionally rather than filled in when
+ * missing: a real project URL and key reaching this process would be a real
+ * Supabase project one careless import away, and that project holds production
+ * data.
  */
 process.env["NEXT_PUBLIC_SUPABASE_URL"] = "https://fake-project.supabase.co";
 process.env["NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"] =

@@ -35,7 +35,7 @@ import { requireRole, requireUser } from "@/server/auth";
  * Two things are enforced here rather than left to callers:
  *
  *   Attribution. `createdBy` is the signed-in user's *database* id, resolved
- *   from their Clerk session by `requireUser`. It is not an argument, so no
+ *   from their session by `requireUser`. It is not an argument, so no
  *   caller — server action, route handler, or anything the browser can reach —
  *   is able to attribute a movement to somebody else.
  *

@@ -1,18 +1,13 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { SALEABLE_LOT_SQL, blockedStockHint } from "@/lib/lot-status";
 import { prisma } from "@/lib/prisma";
 import { lockProduct } from "@/server/stock";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import { resetDatabase, seedProduct } from "./database";
 
 /**
@@ -31,7 +26,7 @@ import { resetDatabase, seedProduct } from "./database";
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 

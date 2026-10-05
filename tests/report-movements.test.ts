@@ -1,9 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("@clerk/nextjs/server", async () => {
-  const { clerkServerMock } = await import("./clerk-mock");
-  return clerkServerMock;
-});
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import {
@@ -18,7 +13,7 @@ import { cancelOrder, confirmOrder, createOrder } from "@/server/orders";
 import { cancelPurchase, createPurchase, receivePurchase } from "@/server/purchases";
 import { adjustStock, createProduct } from "@/server/products";
 
-import { signOut } from "./clerk-mock";
+import { signOutSupabase } from "./supabase-auth-mock";
 import {
   createSupplier,
   quoted,
@@ -45,7 +40,7 @@ import {
  */
 
 beforeEach(async () => {
-  signOut();
+  signOutSupabase();
   await resetDatabase();
 });
 
@@ -764,7 +759,7 @@ describe("empty database and access", () => {
   });
 
   it("refuses an unauthenticated caller", async () => {
-    signOut();
+    signOutSupabase();
 
     const result = await loadMovementSummaryReport(params());
     expect(result.ok).toBe(false);

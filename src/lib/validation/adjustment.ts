@@ -27,7 +27,7 @@ import {
  * place the translation happens.
  *
  * As with every stock input, there is no `createdBy` here and there never will
- * be. Attribution is read from the Clerk session on the server — a field the
+ * be. Attribution is read from the session on the server — a field the
  * client can set is a field the client can lie about. See `recordStockMovement`
  * in src/server/stock.ts.
  */
