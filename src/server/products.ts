@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { Prisma } from "@/generated/prisma/client";
+import { Prisma } from "@/generated/prisma/client";
 import type {
   LotCostSource,
   LotStatus,
@@ -9,6 +9,12 @@ import type {
 import { AppError, NotFoundError, toSafeError, type SafeError } from "@/lib/errors";
 import { certificateStatus, type CertificateStatus } from "@/lib/certificate-status";
 import type { Currency } from "@/lib/currency";
+import { SALEABLE_LOT_SQL } from "@/lib/lot-status";
+import {
+  canFulfilOutstanding,
+  ORDER_STATUSES,
+  type OrderStatus,
+} from "@/lib/order-status";
 import {
   groupTotals,
   sumByCurrency,
@@ -32,7 +38,7 @@ import {
   type ProductFieldErrors,
 } from "@/lib/validation/product";
 import { getCurrency } from "@/server/settings";
-import { requireRole } from "@/server/auth";
+import { requireRole, requireUser } from "@/server/auth";
 import {
   certificateKeysForProduct,
   deleteStoredFiles,
@@ -742,6 +748,229 @@ export async function getProductDetail(
     };
   } catch (error) {
     return { ok: false, error: toSafeError(error, "getProductDetail") };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Availability
+// ---------------------------------------------------------------------------
+
+/**
+ * Saleable stock, read without a lock.
+ *
+ * The stock engine derives the same figure inside `lockProduct`, under a
+ * `FOR UPDATE` row lock — correct for a write that is about to draw on it, and
+ * the wrong tool for a question. Answering "what can we sell" must not queue
+ * behind confirmations or make them queue behind it, so this reads the same
+ * two numbers with plain statements and no lock.
+ *
+ * "Blocked" is built from `SALEABLE_LOT_SQL`, the one definition of
+ * saleability, negated exactly as `lockProduct` negates it. A second spelling
+ * here would be how this answer and what fulfilment actually allows came to
+ * disagree.
+ *
+ * A snapshot, and only a snapshot: nothing here reserves anything, and a
+ * confirmation a moment later can take what this reported.
+ */
+export interface StockAvailability {
+  productId: string;
+  /** Physical units on hand — `Product.stockQuantity`, blocked units included. */
+  stockQuantity: number;
+  /** Units in quarantined or rejected batches. On the shelf, not for sale. */
+  blockedQuantity: number;
+  /** `stockQuantity - blockedQuantity`, floored at zero: what an order may draw. */
+  saleableQuantity: number;
+}
+
+/** Units sitting in lots FIFO may not draw, per product. */
+const BLOCKED_BY_PRODUCT = Prisma.sql`
+  SELECT product_id, SUM(quantity_remaining) AS blocked
+  FROM stock_lots
+  WHERE quantity_remaining > 0
+    AND NOT (${Prisma.raw(SALEABLE_LOT_SQL)})
+  GROUP BY product_id
+`;
+
+/**
+ * Order statuses whose outstanding units are still owed and can still be
+ * shipped — read from the order lifecycle rather than listed again here.
+ */
+const OWING_ORDER_STATUSES: OrderStatus[] = ORDER_STATUSES.filter(
+  canFulfilOutstanding,
+);
+
+/** Units sold on committed orders that have not shipped yet, per product. */
+const OWED_BY_PRODUCT = Prisma.sql`
+  SELECT oi.product_id, SUM(oi.quantity - oi.fulfilled_quantity) AS owed
+  FROM order_items oi
+  JOIN orders o ON o.id = oi.order_id
+  WHERE o.status = ANY(${OWING_ORDER_STATUSES}::"OrderStatus"[])
+    AND oi.quantity > oi.fulfilled_quantity
+  GROUP BY oi.product_id
+`;
+
+function toAvailability(row: {
+  product_id: string;
+  stock_quantity: number;
+  blocked: number;
+}): StockAvailability {
+  return {
+    productId: row.product_id,
+    stockQuantity: row.stock_quantity,
+    blockedQuantity: row.blocked,
+    saleableQuantity: Math.max(0, row.stock_quantity - row.blocked),
+  };
+}
+
+/**
+ * Saleable stock for the given products, keyed by product id. Ids that match no
+ * product are simply absent from the map.
+ *
+ * Checks the session itself, as the report loaders do, rather than relying on
+ * the page it is rendered from: it was written for the inventory assistant's
+ * route handler, which no layout guards.
+ */
+export async function loadStockAvailability(
+  productIds: readonly string[],
+): Promise<Result<Map<string, StockAvailability>>> {
+  try {
+    await requireUser();
+
+    const ids = [...new Set(productIds)];
+    if (ids.length === 0) return { ok: true, data: new Map() };
+
+    const rows = await prisma.$queryRaw<
+      { product_id: string; stock_quantity: number; blocked: number }[]
+    >`
+      SELECT
+        p.id                          AS product_id,
+        p.stock_quantity,
+        COALESCE(b.blocked, 0)::int   AS blocked
+      FROM products p
+      LEFT JOIN (${BLOCKED_BY_PRODUCT}) b ON b.product_id = p.id
+      WHERE p.id IN (${Prisma.join(ids)})
+    `;
+
+    return {
+      ok: true,
+      data: new Map(rows.map((row) => [row.product_id, toAvailability(row)])),
+    };
+  } catch (error) {
+    return { ok: false, error: toSafeError(error, "loadStockAvailability") };
+  }
+}
+
+export interface UnavailableProduct extends StockAvailability {
+  sku: string;
+  name: string;
+  category: string;
+  status: ProductStatus;
+  /**
+   * Units already sold on confirmed or completed orders and not yet shipped.
+   *
+   * Not subtracted from anything — confirmation deducts what is on hand and
+   * records the rest as owed, so these units were never in `stockQuantity`. It
+   * is carried because a part with nothing to sell *and* customers waiting is a
+   * different problem from a part with nothing to sell.
+   */
+  unitsOwed: number;
+}
+
+export interface UnavailableProductPage {
+  items: UnavailableProduct[];
+  total: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+}
+
+/**
+ * Products with nothing an order could draw right now: saleable stock of zero.
+ *
+ * ACTIVE products by default, because a retired part with an empty shelf is
+ * expected rather than a gap; `includeRetired` widens it to the whole
+ * catalogue. Ordered by what customers are owed, most first, so the parts
+ * holding up committed sales lead the list.
+ *
+ * Checks the session itself, for the reason `loadStockAvailability` does.
+ */
+export async function listProductsWithoutAvailableStock(params: {
+  includeRetired: boolean;
+  page: number;
+  pageSize: number;
+}): Promise<Result<UnavailableProductPage>> {
+  try {
+    await requireUser();
+
+    const page = Math.max(1, Math.floor(params.page));
+    const pageSize = Math.min(100, Math.max(1, Math.floor(params.pageSize)));
+
+    const where = Prisma.sql`
+      ${params.includeRetired ? Prisma.sql`TRUE` : Prisma.sql`p.status = 'ACTIVE'`}
+      AND p.stock_quantity - COALESCE(b.blocked, 0) <= 0
+    `;
+
+    const [rows, counts] = await Promise.all([
+      prisma.$queryRaw<
+        {
+          product_id: string;
+          sku: string;
+          name: string;
+          category: string;
+          status: ProductStatus;
+          stock_quantity: number;
+          blocked: number;
+          owed: number;
+        }[]
+      >`
+        SELECT
+          p.id                          AS product_id,
+          p.sku,
+          p.name,
+          p.category,
+          p.status::text                AS status,
+          p.stock_quantity,
+          COALESCE(b.blocked, 0)::int   AS blocked,
+          COALESCE(w.owed, 0)::int      AS owed
+        FROM products p
+        LEFT JOIN (${BLOCKED_BY_PRODUCT}) b ON b.product_id = p.id
+        LEFT JOIN (${OWED_BY_PRODUCT}) w    ON w.product_id = p.id
+        WHERE ${where}
+        ORDER BY COALESCE(w.owed, 0) DESC, p.name ASC, p.sku ASC
+        LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}
+      `,
+      prisma.$queryRaw<{ n: number }[]>`
+        SELECT COUNT(*)::int AS n
+        FROM products p
+        LEFT JOIN (${BLOCKED_BY_PRODUCT}) b ON b.product_id = p.id
+        WHERE ${where}
+      `,
+    ]);
+
+    const total = counts[0]?.n ?? 0;
+
+    return {
+      ok: true,
+      data: {
+        items: rows.map((row) => ({
+          ...toAvailability(row),
+          sku: row.sku,
+          name: row.name,
+          category: row.category,
+          status: row.status,
+          unitsOwed: row.owed,
+        })),
+        total,
+        page,
+        pageSize,
+        pageCount: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: toSafeError(error, "listProductsWithoutAvailableStock"),
+    };
   }
 }
 

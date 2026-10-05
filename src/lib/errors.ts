@@ -15,7 +15,9 @@ export type AppErrorCode =
   | "NOT_FOUND"
   | "CONFLICT"
   | "INSUFFICIENT_STOCK"
+  | "RATE_LIMITED"
   | "DATABASE_UNAVAILABLE"
+  | "SERVICE_UNAVAILABLE"
   | "INTERNAL";
 
 const STATUS_BY_CODE: Record<AppErrorCode, number> = {
@@ -25,9 +27,17 @@ const STATUS_BY_CODE: Record<AppErrorCode, number> = {
   NOT_FOUND: 404,
   CONFLICT: 409,
   INSUFFICIENT_STOCK: 422,
+  RATE_LIMITED: 429,
   DATABASE_UNAVAILABLE: 503,
+  /** A dependency other than the database — the assistant's AI provider. */
+  SERVICE_UNAVAILABLE: 503,
   INTERNAL: 500,
 };
+
+/** The HTTP status a route handler should answer with for an error code. */
+export function httpStatusFor(code: AppErrorCode): number {
+  return STATUS_BY_CODE[code];
+}
 
 /**
  * An error whose message is deliberately safe to display. Throw this from

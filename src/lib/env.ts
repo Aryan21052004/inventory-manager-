@@ -96,6 +96,25 @@ const schema = z.object({
    * dashboard rather than in the repository.
    */
   SUPABASE_STORAGE_BUCKET: z.string().min(1).default("certificates"),
+
+  /**
+   * The Google Gemini API key the inventory assistant authenticates with.
+   *
+   * Optional: without it the assistant is switched off — the page explains how
+   * to enable it and `/api/assistant` answers 503 — and nothing else in the
+   * application changes. No `NEXT_PUBLIC_` prefix and read only here, in a
+   * `server-only` module, because a key in the browser bundle would let anyone
+   * who loaded the app spend against the account.
+   */
+  GEMINI_API_KEY: z.string().min(1).optional(),
+
+  /**
+   * Which Gemini model answers. A plain string rather than an enum so a newer
+   * model is a configuration change, not a code change — the assistant only
+   * relies on text generation and function calling, which every current Gemini
+   * text model supports.
+   */
+  GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash-lite"),
 })
   /*
    * A driver that cannot work must not start.
@@ -126,6 +145,11 @@ function load() {
     SUPABASE_URL: process.env.SUPABASE_URL,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
     SUPABASE_STORAGE_BUCKET: process.env.SUPABASE_STORAGE_BUCKET,
+    // A blank value — the shape `.env.example` ships with — means "not set",
+    // not "set to the empty string", so it disables the assistant rather than
+    // failing validation.
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY || undefined,
+    GEMINI_MODEL: process.env.GEMINI_MODEL || undefined,
   });
 
   if (!parsed.success) {
@@ -161,6 +185,13 @@ export const env = load();
  * server-only, for the Storage driver alone.
  */
 export const authEnabled = supabaseAuthConfigured;
+
+/**
+ * Whether the inventory assistant has a model to talk to. False switches the
+ * feature off rather than failing the boot: the rest of the application does
+ * not depend on it, so a missing key is a disabled page, not a broken deploy.
+ */
+export const assistantEnabled = Boolean(env.GEMINI_API_KEY);
 
 /**
  * `next build` runs with NODE_ENV=production, but compiling a bundle is not the
