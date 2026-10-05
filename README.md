@@ -55,6 +55,11 @@ Then edit `.env.local`:
   name a disposable database whose name ends in `_test`, and not the one
   `DATABASE_URL` or `DIRECT_URL` addresses. There is no fallback: the suite
   truncates every table, so it refuses to guess where.
+- **`GEMINI_API_KEY`** — optional. Turns on the
+  [inventory assistant](#inventory-assistant); without it the assistant page
+  says it is not set up and nothing else changes. Server-only — never give it a
+  `NEXT_PUBLIC_` prefix. **`GEMINI_MODEL`** chooses the model and defaults to
+  `gemini-2.5-flash-lite`.
 
 `.env.local` is read by both Next.js and the Prisma CLI (see
 `prisma.config.ts`), so there is only one file to keep in sync.
@@ -140,9 +145,11 @@ src/
       products/          List, detail, create/edit, stock adjustment
         actions.ts       Server actions (thin — logic lives in src/server)
         [id]/            Product detail, movement history, certificates
+      assistant/         The inventory assistant's chat page
       api/
         certificates/    Authenticated file download — the only route to a
                          stored certificate; no public URLs exist
+        assistant/       The assistant's endpoint; its own auth boundary
       orders/  purchases/  customers/  suppliers/
       stock-movements/  reports/  settings/
       layout.tsx         Dashboard chrome + the authorisation boundary
@@ -173,6 +180,8 @@ src/
     certificates.ts      Certificate upload, replacement, withdrawal, access
     stock.ts             The only way stock is allowed to change
     storage/             Swappable file storage (interface + local driver)
+    assistant/           Inventory assistant: read-only tools, the
+                         function-calling loop, and the Gemini adapter
   proxy.ts               Supabase session refresh (Next 16 `proxy` convention)
 tests/                   Integration tests (real Postgres, mocked Supabase Auth)
 ```
@@ -361,6 +370,62 @@ statically, with no session in the way.
 are part of doing the job, so any signed-in user may. Uploading, replacing,
 editing and withdrawing are ADMIN, checked on the server against the role in our
 database.
+
+## Inventory assistant
+
+`/assistant` answers plain-language questions — "how many units of ABC123 do we
+have?", "what was our revenue this month?", "why can't I complete this order?" —
+from live data. It is **read-only**: it can look things up and cannot change
+anything.
+
+```
+chat page ──POST──▶ /api/assistant ──▶ Gemini (function calling)
+                     requireUser()        │ asks for a declared tool by name
+                     same-origin check    ▼
+                     rate limit       server validates the arguments (zod)
+                     body validation      │
+                                          ▼
+                     existing read-only loaders in src/server ──▶ Postgres
+```
+
+**What the model can reach.** Only the tools declared in
+`src/server/assistant/tools.ts`, each a thin wrapper over a loader the pages
+already use (`listProducts`, `getOrderDetail`, `loadSalesReport`, …). It never
+sees Prisma, SQL, credentials, the filesystem or the network, and there is no
+tool that writes. `tests/assistant-boundaries.test.ts` reads the source and
+fails if the assistant imports anything outside an allowlist of read functions,
+touches the Prisma client, or gains a tool not on the reviewed list.
+
+**Authorisation.** `/api/assistant` sits outside the `(app)` layout, and most
+read loaders do not check the session themselves, so the route calls
+`requireUser()` before it reads the body or contacts the model. The tool list
+is built from the user's role in our database: the quarantine queue is offered
+to ADMIN only. There are no company boundaries to enforce — every signed-in
+user already sees the same data in the app — and the assistant sees no more
+than the screens do. Customer and supplier contact details are left out of
+what is sent to the model.
+
+**Money.** Tool results keep every total split by currency (`MoneyByCurrency`),
+with `null` meaning "currency unknown". The model is instructed never to add,
+compare or convert across currencies, and the server never does either.
+Revenue, spend and valuation use the reports' own definitions and date bases
+(UTC), so the assistant's figures match the report screens.
+
+**Conversation.** Held in the browser for the life of the page. Each question
+sends the text of the conversation only; tool results are never accepted from
+the client, and every answer re-runs its lookups under the current session.
+Nothing is stored server-side — the logs record who asked, which tools ran and
+token counts, never the question or the answer.
+
+**Limits.** Five rounds of tool use per question, six calls per round, rows
+capped per tool, a 50-second deadline (`maxDuration` is 60 seconds on Vercel),
+and 20 questions per user per 5 minutes. The rate limit is held in memory, so
+on a host running several instances it applies per instance; the provider's
+quota is the hard limit behind it.
+
+**Configuration.** Set `GEMINI_API_KEY` (and optionally `GEMINI_MODEL`) in the
+server environment — on Vercel, Project Settings → Environment Variables — and
+redeploy. Changing the model is a configuration change only.
 
 ## Tests
 

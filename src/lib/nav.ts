@@ -6,6 +6,7 @@ import {
   PackageOpen,
   Settings,
   ShoppingCart,
+  Sparkles,
   Truck,
   Users,
   Warehouse,
@@ -111,6 +112,12 @@ export const navSections: NavSection[] = [
         href: "/reports",
         icon: BarChart3,
         description: "Valuation, movement, and sales reporting",
+      },
+      {
+        title: "Assistant",
+        href: "/assistant",
+        icon: Sparkles,
+        description: "Ask questions about your inventory in plain language",
       },
       {
         title: "Settings",
