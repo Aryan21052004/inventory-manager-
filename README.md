@@ -59,7 +59,7 @@ Then edit `.env.local`:
   [inventory assistant](#inventory-assistant); without it the assistant page
   says it is not set up and nothing else changes. Server-only — never give it a
   `NEXT_PUBLIC_` prefix. **`GEMINI_MODEL`** chooses the model and defaults to
-  `gemini-2.5-flash-lite`.
+  `gemini-3.5-flash-lite`.
 
 `.env.local` is read by both Next.js and the Prisma CLI (see
 `prisma.config.ts`), so there is only one file to keep in sync.

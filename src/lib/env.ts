@@ -114,7 +114,7 @@ const schema = z.object({
    * relies on text generation and function calling, which every current Gemini
    * text model supports.
    */
-  GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash-lite"),
+  GEMINI_MODEL: z.string().min(1).default("gemini-3.5-flash-lite"),
 })
   /*
    * A driver that cannot work must not start.
