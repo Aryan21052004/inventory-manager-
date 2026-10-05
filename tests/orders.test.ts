@@ -823,7 +823,6 @@ describe("attribution", () => {
     const actor = await signInWithRole("STAFF");
     const somebodyElse = await prisma.user.create({
       data: {
-        clerkId: "user_victim",
         name: "Victim",
         email: "victim@example.com",
         role: "ADMIN",
@@ -854,7 +853,7 @@ describe("attribution", () => {
     expect(movement.createdBy).toBe(actor.id);
     expect(movement.createdBy).not.toBe(somebodyElse.id);
     // The local database id, not the Auth id.
-    expect(movement.createdBy).not.toBe(actor.clerkId);
+    expect(movement.createdBy).not.toBe(actor.supabaseUserId);
   });
 
   it("honours the quoted price but computes every total from it", async () => {
@@ -1702,7 +1701,6 @@ describe("editing recalculates money on the server", () => {
     const actor = await signInWithRole("STAFF");
     const somebodyElse = await prisma.user.create({
       data: {
-        clerkId: "user_edit_victim",
         name: "Victim",
         email: "editvictim@example.com",
         role: "ADMIN",

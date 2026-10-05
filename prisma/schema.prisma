@@ -290,12 +290,6 @@ model AppSetting {
 model User {
   id String @id @default(cuid())
 
-  /// A leftover from the Clerk era, kept only because the column is still NOT
-  /// NULL. Nothing reads it: rows created now carry an `unlinked_` placeholder
-  /// derived from the Supabase user id (see `UNLINKED_CLERK_ID_PREFIX` in
-  /// src/server/auth.ts), and the column is dropped in its own migration.
-  clerkId String @unique @map("clerk_id")
-
   /// Supabase Auth's user id (`auth.users.id`), and the only identity key.
   /// Nullable because it is populated the first time a row's owner signs in,
   /// not before: a value here means "this row has been adopted by a Supabase

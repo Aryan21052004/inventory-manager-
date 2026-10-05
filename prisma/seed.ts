@@ -729,19 +729,16 @@ async function main(): Promise<void> {
   // Seeded users have no Auth account, so `supabase_user_id` stays NULL and the
   // rows remain claimable. Signing in with a matching confirmed address adopts
   // one, which is how the admin keeps their ADMIN role instead of arriving as a
-  // brand-new STAFF account. The `clerkId` placeholders below exist only to
-  // satisfy the leftover NOT NULL column; nothing reads them.
+  // brand-new STAFF account.
   const users = await Promise.all(
     (
       [
         {
-          clerkId: "unlinked_seed_admin",
           name: "Aryan Verma",
           email: "admin@inventory.local",
           role: "ADMIN",
         },
         {
-          clerkId: "unlinked_seed_staff",
           name: "Sana Qureshi",
           email: "staff@inventory.local",
           role: "STAFF",

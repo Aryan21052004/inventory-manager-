@@ -29,8 +29,6 @@ async function signInWithRole(role: "ADMIN" | "STAFF") {
 
   const local = await prisma.user.create({
     data: {
-      // NOT NULL until the column is dropped; nothing reads it.
-      clerkId: `unlinked_${supabaseUserId}`,
       supabaseUserId,
       name: `${role} Person`,
       email: `${role.toLowerCase()}@example.com`,
@@ -71,7 +69,7 @@ describe("attribution", () => {
 
     // Not the Auth id — the foreign key points at our users table.
     expect(transaction.createdBy).toBe(user.id);
-    expect(transaction.createdBy).not.toBe(user.clerkId);
+    expect(transaction.createdBy).not.toBe(user.supabaseUserId);
 
     // And it is a real foreign key, so the join resolves.
     const withUser = await prisma.stockTransaction.findUniqueOrThrow({
@@ -110,7 +108,6 @@ describe("attribution", () => {
     const actor = await signInWithRole("STAFF");
     const somebodyElse = await prisma.user.create({
       data: {
-        clerkId: "user_victim",
         name: "Victim",
         email: "victim@example.com",
         role: "ADMIN",

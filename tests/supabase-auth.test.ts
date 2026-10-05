@@ -11,7 +11,6 @@ import {
   getCurrentUser,
   requireRole,
   resolveSupabaseUser,
-  UNLINKED_CLERK_ID_PREFIX,
 } from "@/server/auth";
 
 import { resetDatabase } from "./database";
@@ -71,7 +70,6 @@ describe("a session that cannot be mapped", () => {
   it("does not let an unverified address claim an administrator's row", async () => {
     const admin = await prisma.user.create({
       data: {
-        clerkId: "user_admin",
         name: "The Administrator",
         email: "admin@example.com",
         role: "ADMIN",
@@ -107,7 +105,6 @@ describe("a session already linked to a row", () => {
   it("returns the linked row", async () => {
     const created = await prisma.user.create({
       data: {
-        clerkId: `${UNLINKED_CLERK_ID_PREFIX}existing`,
         supabaseUserId: "sb_linked",
         name: "Existing Person",
         email: "existing@example.com",
@@ -126,7 +123,6 @@ describe("a session already linked to a row", () => {
   it("leaves the role, email and name alone", async () => {
     await prisma.user.create({
       data: {
-        clerkId: `${UNLINKED_CLERK_ID_PREFIX}existing`,
         supabaseUserId: "sb_linked",
         name: "Locally Renamed",
         email: "local@example.com",
@@ -156,7 +152,6 @@ describe("a session already linked to a row", () => {
   it("is found by id, never by an email that matches another row", async () => {
     const linked = await prisma.user.create({
       data: {
-        clerkId: `${UNLINKED_CLERK_ID_PREFIX}linked`,
         supabaseUserId: "sb_linked",
         name: "Linked",
         email: "linked@example.com",
@@ -166,7 +161,6 @@ describe("a session already linked to a row", () => {
 
     const decoy = await prisma.user.create({
       data: {
-        clerkId: "user_decoy",
         name: "Decoy Admin",
         email: "decoy@example.com",
         role: "ADMIN",
@@ -194,7 +188,6 @@ describe("claiming an existing unlinked row", () => {
   it("links the row by email on first sign-in", async () => {
     const existing = await prisma.user.create({
       data: {
-        clerkId: "user_clerk_era",
         name: "Warehouse Lead",
         email: "lead@example.com",
         role: "STAFF",
@@ -218,7 +211,6 @@ describe("claiming an existing unlinked row", () => {
   it("preserves an ADMIN role through the claim", async () => {
     const admin = await prisma.user.create({
       data: {
-        clerkId: "user_admin",
         name: "The Administrator",
         email: "admin@example.com",
         role: "ADMIN",
@@ -233,10 +225,9 @@ describe("claiming an existing unlinked row", () => {
     expect(resolved?.role).toBe("ADMIN");
   });
 
-  it("writes only the identity key, leaving name, email and clerkId intact", async () => {
+  it("writes only the identity key, leaving name, email and role intact", async () => {
     const existing = await prisma.user.create({
       data: {
-        clerkId: "user_clerk_era",
         name: "Original Name",
         email: "person@example.com",
         role: "ADMIN",
@@ -258,14 +249,12 @@ describe("claiming an existing unlinked row", () => {
     expect(after.supabaseUserId).toBe("sb_new");
     expect(after.name).toBe("Original Name");
     expect(after.email).toBe("person@example.com");
-    expect(after.clerkId).toBe("user_clerk_era");
     expect(after.role).toBe("ADMIN");
   });
 
   it("matches the email case-insensitively", async () => {
     const existing = await prisma.user.create({
       data: {
-        clerkId: "user_clerk_era",
         name: "Person",
         email: "person@example.com",
         role: "STAFF",
@@ -282,7 +271,6 @@ describe("claiming an existing unlinked row", () => {
   it("refuses to claim a row a different Supabase account already took", async () => {
     await prisma.user.create({
       data: {
-        clerkId: "user_clerk_era",
         supabaseUserId: "sb_first",
         name: "Person",
         email: "person@example.com",
@@ -320,14 +308,6 @@ describe("a Supabase identity with no local row", () => {
     expect(resolved?.role).toBe("STAFF");
   });
 
-  it("stores a placeholder clerkId so the NOT NULL column stays honest", async () => {
-    signInAsSupabase(fakeSupabaseUser("sb_fresh", "newcomer@example.com"));
-
-    const resolved = await getCurrentUser();
-
-    expect(resolved?.clerkId.startsWith(UNLINKED_CLERK_ID_PREFIX)).toBe(true);
-  });
-
   it("derives a name from the email when Supabase carries none", async () => {
     signInAsSupabase(fakeSupabaseUser("sb_fresh", "warehouse.lead@example.com"));
 
@@ -357,7 +337,6 @@ describe("two requests arriving at once", () => {
   it("claims an unlinked row exactly once under concurrency", async () => {
     const existing = await prisma.user.create({
       data: {
-        clerkId: "user_clerk_era",
         name: "Person",
         email: "person@example.com",
         role: "ADMIN",
@@ -386,7 +365,6 @@ describe("the authorisation contract", () => {
   it("lets an ADMIN through requireRole", async () => {
     await prisma.user.create({
       data: {
-        clerkId: `${UNLINKED_CLERK_ID_PREFIX}sb_admin`,
         supabaseUserId: "sb_admin",
         name: "The Administrator",
         email: "admin@example.com",
@@ -404,7 +382,6 @@ describe("the authorisation contract", () => {
   it("refuses a STAFF user an ADMIN-only action", async () => {
     await prisma.user.create({
       data: {
-        clerkId: `${UNLINKED_CLERK_ID_PREFIX}sb_staff`,
         supabaseUserId: "sb_staff",
         name: "Staff Person",
         email: "staff@example.com",
@@ -429,7 +406,6 @@ describe("the authorisation contract", () => {
   it("reads the role from the local row, not from Auth metadata", async () => {
     await prisma.user.create({
       data: {
-        clerkId: "user_clerk_era",
         name: "Staff Person",
         email: "staff@example.com",
         role: "STAFF",

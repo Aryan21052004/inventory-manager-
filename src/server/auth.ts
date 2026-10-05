@@ -44,17 +44,6 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
  */
 
 /**
- * Fills `users.clerk_id` for a row no Clerk account owns.
- *
- * The column is a leftover. It is still NOT NULL, so every row created from here
- * on needs *something* in it, and this prefix says plainly that the something is
- * not an identity. Nothing reads it: the only identity key is `supabaseUserId`.
- *
- * It goes away when the column does, which is a separate and irreversible step.
- */
-export const UNLINKED_CLERK_ID_PREFIX = "unlinked_";
-
-/**
  * The current user, or null if the request is not authenticated.
  *
  * Supabase Auth is the identity source. Returns null in setup mode too
@@ -331,12 +320,6 @@ async function claimOrCreateSupabaseUser(
           supabaseUserId: identity.supabaseUserId,
           email: identity.email,
           name: identity.name,
-          /*
-           * `clerk_id` is still NOT NULL, so a new row needs something in it
-           * until that column is dropped. Nothing reads the value — see
-           * UNLINKED_CLERK_ID_PREFIX.
-           */
-          clerkId: `${UNLINKED_CLERK_ID_PREFIX}${identity.supabaseUserId}`,
           // Least privilege. ADMIN is only ever reached by adopting a row that
           // already held it, or by an existing admin granting it. Never by
           // signing up.

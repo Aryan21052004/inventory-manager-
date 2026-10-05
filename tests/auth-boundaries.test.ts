@@ -128,23 +128,22 @@ describe("Clerk is gone from the application entirely", () => {
   });
 
   /*
-   * The leftover column, and nothing else.
+   * No exemptions at all.
    *
-   * `users.clerk_id` is still NOT NULL, so a row created today needs something in
-   * it. Three names serve that and are exempt: the Prisma field `clerkId`, the
-   * column `clerk_id`, and `UNLINKED_CLERK_ID_PREFIX`, which supplies the value.
-   * Dropping the column removes all three, and that is a separate, irreversible
-   * step. Anything else naming Clerk in executable code is a leftover that should
-   * have gone with the dependency.
+   * `users.clerk_id` is gone, and with it the three names that used to be
+   * allowed through here — the Prisma field `clerkId`, the column `clerk_id`,
+   * and `UNLINKED_CLERK_ID_PREFIX`, which supplied its placeholder. Nothing in
+   * executable code may name Clerk now, and this asserts that rather than a
+   * permitted set. The historical comments explaining why the provider was
+   * replaced are prose, and `codeLines` already filters those out.
    */
-  const LEFTOVER_COLUMN = /clerkId|clerk_id|UNLINKED_CLERK_ID_PREFIX/;
 
-  it("names Clerk nowhere in executable code, except the leftover column", () => {
+  it("names Clerk nowhere in executable code", () => {
     const offenders: string[] = [];
 
     for (const file of FILES) {
       for (const line of codeLines(file.source)) {
-        if (/clerk/i.test(line) && !LEFTOVER_COLUMN.test(line)) {
+        if (/clerk/i.test(line)) {
           offenders.push(`${file.path}: ${line.trim()}`);
         }
       }

@@ -208,7 +208,7 @@ describe("attribution", () => {
     // The local database id, not the Auth id — the foreign key points at our
     // users table.
     expect(movement.createdBy).toBe(admin.id);
-    expect(movement.createdBy).not.toBe(admin.clerkId);
+    expect(movement.createdBy).not.toBe(admin.supabaseUserId);
     expect(movement.createdByUser?.email).toBe(admin.email);
   });
 
@@ -216,7 +216,6 @@ describe("attribution", () => {
     const actor = await signInWithRole("ADMIN");
     const somebodyElse = await prisma.user.create({
       data: {
-        clerkId: "user_victim",
         name: "Victim",
         email: "victim@example.com",
         role: "ADMIN",
@@ -251,7 +250,6 @@ describe("attribution", () => {
         // A row an admin created before this person had an Auth account. Its
         // supabase_user_id is null, so the first sign-in with a matching,
         // verified email claims it rather than creating a second account.
-        clerkId: "unlinked_brandnew",
         name: "Brand New",
         email: "brandnew@example.com",
         role: "ADMIN",

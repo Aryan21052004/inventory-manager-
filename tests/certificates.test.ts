@@ -219,7 +219,6 @@ describe("attaching a certificate", () => {
 
     const other = await prisma.user.create({
       data: {
-        clerkId: "user_other",
         name: "Somebody Else",
         email: "other@example.com",
         role: "ADMIN",

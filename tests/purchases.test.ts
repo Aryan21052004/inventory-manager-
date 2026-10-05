@@ -685,7 +685,6 @@ describe("attribution", () => {
     const actor = await signInWithRole("STAFF");
     const somebodyElse = await prisma.user.create({
       data: {
-        clerkId: "user_purchase_victim",
         name: "Victim",
         email: "purchasevictim@example.com",
         role: "ADMIN",
@@ -716,7 +715,7 @@ describe("attribution", () => {
     expect(movement.createdBy).toBe(actor.id);
     expect(movement.createdBy).not.toBe(somebodyElse.id);
     // The local database id, not the Auth id.
-    expect(movement.createdBy).not.toBe(actor.clerkId);
+    expect(movement.createdBy).not.toBe(actor.supabaseUserId);
   });
 
   it("refuses an unauthenticated purchase", async () => {

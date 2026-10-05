@@ -1,5 +1,4 @@
 import { prisma } from "@/lib/prisma";
-import { UNLINKED_CLERK_ID_PREFIX } from "@/server/auth";
 
 import { fakeSupabaseUser, signInAsSupabase } from "./supabase-auth-mock";
 
@@ -444,9 +443,6 @@ export async function createSupplier(
  * on the indexed lookup rather than going through the one-time email adoption.
  * That keeps these tests about whatever they are actually about; adoption has
  * its own tests in `supabase-auth.test.ts`.
- *
- * A `clerkId` is still written because `users.clerk_id` is NOT NULL until that
- * column is dropped. It is an `unlinked_` placeholder, and nothing reads it.
  */
 export async function signInWithRole(role: "ADMIN" | "STAFF") {
   const suffix = Math.random().toString(36).slice(2, 8);
@@ -454,7 +450,6 @@ export async function signInWithRole(role: "ADMIN" | "STAFF") {
 
   const local = await prisma.user.create({
     data: {
-      clerkId: `${UNLINKED_CLERK_ID_PREFIX}${supabaseUserId}`,
       supabaseUserId,
       name: `${role} Person`,
       email: `${role.toLowerCase()}-${suffix}@example.com`,
