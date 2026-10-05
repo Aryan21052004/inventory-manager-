@@ -142,6 +142,37 @@ describe("provider failures", () => {
     await expect(failure).rejects.not.toMatchObject({ message: expect.stringContaining("98765") });
   });
 
+  it("logs Google's own error fields — and never the key — so a 404 can be diagnosed", async () => {
+    // The body shape the SDK puts in `ApiError.message` (JSON.stringify of
+    // Google's response), with the 404 Google returns for a model a project
+    // may not use.
+    const body = {
+      error: {
+        code: 404,
+        message: "This model models/gemini-2.5-flash-lite is no longer available to new users.",
+        status: "NOT_FOUND",
+      },
+    };
+    sdk.generateContent.mockRejectedValue(
+      new ApiError({ message: JSON.stringify(body), status: 404 }),
+    );
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(createGeminiModel()(request())).rejects.toMatchObject({
+      code: "SERVICE_UNAVAILABLE",
+    });
+
+    const line = log.mock.calls.map((call) => call.join(" ")).join("\n");
+    log.mockRestore();
+
+    expect(line).toContain('"httpStatus":404');
+    expect(line).toContain('"status":"NOT_FOUND"');
+    expect(line).toContain("is no longer available to new users");
+    expect(line).toContain('"model":"gemini-test-model"');
+    expect(line).toContain('"backend":"gemini-api"');
+    expect(line).not.toContain("test-placeholder-not-a-real-key");
+  });
+
   it("reports a request abandoned by the deadline as a timeout", async () => {
     const controller = new AbortController();
     controller.abort();

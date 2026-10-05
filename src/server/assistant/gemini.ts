@@ -84,7 +84,9 @@ export function createGeminiModel(): AssistantModel {
         },
       };
     } catch (error) {
-      throw providerError(error, request.signal);
+      throw providerError(error, request.signal, {
+        backend: ai.vertexai ? "vertex-ai" : "gemini-api",
+      });
     }
   };
 }
@@ -96,7 +98,11 @@ export function createGeminiModel(): AssistantModel {
  * model, the project or the request in ways a user has no use for. The status
  * decides only which of two sentences they see.
  */
-function providerError(error: unknown, signal: AbortSignal): AppError {
+function providerError(
+  error: unknown,
+  signal: AbortSignal,
+  context: { backend: string },
+): AppError {
   if (signal.aborted) {
     return new AppError(
       "SERVICE_UNAVAILABLE",
@@ -106,9 +112,35 @@ function providerError(error: unknown, signal: AbortSignal): AppError {
 
   const status = error instanceof ApiError ? error.status : null;
 
+  /*
+   * The provider's explanation goes to the server log — it is what tells a
+   * bad key from a disabled API, a model this project cannot use, or a
+   * rejected tool schema, all of which otherwise arrive as a bare status.
+   *
+   * The SDK's `ApiError` carries only `status` and a `message` that is the
+   * JSON error body Google returned (`{"error":{code,message,status,details}}`),
+   * so that body is parsed back into its fields here. It never reaches the
+   * user, and contains neither the key (which travels in a header) nor any
+   * inventory data (which is only in the request).
+   */
+  const raw = error instanceof Error ? error.message : String(error);
+  let google: unknown = null;
+  try {
+    google = (JSON.parse(raw) as { error?: unknown }).error ?? null;
+  } catch {
+    // Not a JSON body — a network failure or an SDK-side error. Logged raw below.
+  }
+
   console.error(
     "[inventory-manager] assistant model request failed:",
-    status ?? (error instanceof Error ? error.name : "unknown error"),
+    JSON.stringify({
+      httpStatus: status,
+      model: env.GEMINI_MODEL,
+      backend: context.backend,
+      errorName: error instanceof Error ? error.name : typeof error,
+      google,
+      raw: google === null ? raw.slice(0, 1_000) : undefined,
+    }).slice(0, 4_000),
   );
 
   if (status === 429) {
