@@ -106,9 +106,20 @@ function providerError(error: unknown, signal: AbortSignal): AppError {
 
   const status = error instanceof ApiError ? error.status : null;
 
+  /*
+   * The provider's explanation goes to the server log in full — it is what
+   * distinguishes a bad key from a disabled API, a retired model or a rejected
+   * tool schema, all of which arrive as a bare 400/403/404 otherwise. It never
+   * reaches the user, and Google's error bodies do not echo the key.
+   */
   console.error(
     "[inventory-manager] assistant model request failed:",
-    status ?? (error instanceof Error ? error.name : "unknown error"),
+    JSON.stringify({
+      status,
+      model: env.GEMINI_MODEL,
+      error: error instanceof Error ? error.name : "unknown",
+      message: (error instanceof Error ? error.message : String(error)).slice(0, 1_000),
+    }),
   );
 
   if (status === 429) {
