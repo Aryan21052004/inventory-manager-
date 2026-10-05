@@ -37,8 +37,9 @@ const SINGLETON_ID = "singleton";
  * the answer to that is the default, not a 500.
  *
  * Deliberately unauthenticated. Every page that calls this sits under the
- * `(app)` layout, which has already run `auth.protect()`; adding a second check
- * inside a formatting dependency would invite ordering bugs for no gain, and
+ * `(app)` layout, which has already resolved the session and redirected if
+ * there was none; adding a second check inside a formatting dependency would
+ * invite ordering bugs for no gain, and
  * the active currency is not a secret.
  */
 export const getCurrency = cache(async (): Promise<Currency> => {

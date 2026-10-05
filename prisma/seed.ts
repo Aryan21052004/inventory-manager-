@@ -726,11 +726,11 @@ async function main(): Promise<void> {
   console.log("  cleared existing rows");
 
   // --- Users -------------------------------------------------------------
-  // Seeded users predate any Clerk account, so they carry `unlinked_`
-  // placeholders instead of real Clerk ids. Signing in with a matching email
-  // claims the row and swaps in the real `user_...` id, which is how the admin
-  // keeps their ADMIN role instead of arriving as a brand-new STAFF account.
-  // See `resolveUser` in src/server/auth.ts.
+  // Seeded users have no Auth account, so `supabase_user_id` stays NULL and the
+  // rows remain claimable. Signing in with a matching confirmed address adopts
+  // one, which is how the admin keeps their ADMIN role instead of arriving as a
+  // brand-new STAFF account. The `clerkId` placeholders below exist only to
+  // satisfy the leftover NOT NULL column; nothing reads them.
   const users = await Promise.all(
     (
       [

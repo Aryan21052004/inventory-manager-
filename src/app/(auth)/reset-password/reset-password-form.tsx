@@ -27,12 +27,13 @@ import {
  *
  * ## No token is read, parsed or displayed here
  *
- * The recovery link carries a code which `@supabase/ssr` exchanges for a
- * session on arrival — the browser client is configured for the PKCE flow and
- * does that itself. By the time this form submits there is simply a session, so
- * `updateUser` needs nothing but the new password. Reading the token out of the
- * URL by hand would mean reimplementing the exchange, and putting it on screen
- * would leak a credential into screenshots, scroll-back and support tickets.
+ * The recovery link does not come here first. It points at `/auth/confirm`,
+ * which calls `verifyOtp({ token_hash, type: "recovery" })` on the server and
+ * writes the session cookies before redirecting here — so by the time this form
+ * renders there is simply a session, and `updateUser` needs nothing but the new
+ * password. `token_hash` is single-use and never reaches the browser, which is
+ * also why the flow works from a different device than the one that asked for
+ * the link: a server-side `verifyOtp` needs no PKCE code-verifier cookie.
  *
  * If the link has expired the session will not exist and `updateUser` fails; the
  * user is told to request another rather than shown the provider's wording.

@@ -410,7 +410,7 @@ export async function setOrderStatusAction(
  *
  * **The session is checked here, not inherited.** A `"use server"` export is a
  * public HTTP endpoint whose id is recoverable from the client bundle, and the
- * `(app)` layout's `auth.protect()` runs during *render* — after an action has
+ * `(app)` layout's session check runs during *render* — after an action has
  * already executed. Relying on it would leave this reachable signed-out, which
  * is what it was: the catalogue, its selling prices and its stock levels,
  * answerable to anyone who posted the action id.

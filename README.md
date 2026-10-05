@@ -3,8 +3,8 @@
 Stock control for products, orders, purchases and suppliers, built as a
 production-shaped Next.js application.
 
-> **Status: products, inventory and certificates.** The foundation, Clerk
-> authentication, the products + inventory module, and product certificates are
+> **Status: products, inventory and certificates.** The foundation, Supabase
+> Auth, the products + inventory module, and product certificates are
 > built. Orders, purchases, customers, suppliers and reports are still
 > scaffolded pages — see [What is not built yet](#what-is-not-built-yet).
 
@@ -25,7 +25,7 @@ prefills a line, and `OrderItem.unitPrice` is what was actually charged.
 | Components     | Radix UI primitives, shadcn-style wrappers         |
 | Database       | PostgreSQL                                         |
 | ORM            | Prisma 7 with the `@prisma/adapter-pg` driver      |
-| Authentication | Clerk                                              |
+| Authentication | Supabase Auth (`@supabase/ssr`)                    |
 | Toasts         | Sonner                                             |
 | Icons          | Lucide                                             |
 
@@ -46,9 +46,15 @@ cp .env.example .env.local
 Then edit `.env.local`:
 
 - **`DATABASE_URL`** — required. Point it at a PostgreSQL database.
-- **`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`** and **`CLERK_SECRET_KEY`** — optional
-  in development, required in production. Get them from
-  [dashboard.clerk.com](https://dashboard.clerk.com).
+- **`NEXT_PUBLIC_SUPABASE_URL`** and **`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`**
+  — optional in development, required in production. Both come from the
+  Supabase dashboard under Project Settings → API. The publishable key is
+  browser-visible by design and carries no privilege: `anon` and
+  `authenticated` hold no grant on any table.
+- **`DATABASE_TEST_URL`** — required to run the tests, and only then. It must
+  name a disposable database whose name ends in `_test`, and not the one
+  `DATABASE_URL` or `DIRECT_URL` addresses. There is no fallback: the suite
+  truncates every table, so it refuses to guess where.
 
 `.env.local` is read by both Next.js and the Prisma CLI (see
 `prisma.config.ts`), so there is only one file to keep in sync.
@@ -87,13 +93,16 @@ The app is at [http://localhost:3000](http://localhost:3000), which redirects to
 
 ### Setup mode
 
-Without Clerk keys the app runs in **setup mode**: authentication is disabled,
-every route is publicly reachable, and a banner says so on every page. This
-exists so the UI can be reviewed before an account exists.
+Without `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
+the app runs in **setup mode**: authentication is disabled, every route is
+publicly reachable, and a banner says so on every page. This exists so the UI
+can be reviewed before an account exists.
 
 It is a development-only convenience. Starting the server with
-`NODE_ENV=production` and no Clerk keys throws on boot rather than serving an
-unauthenticated app — see `src/lib/env.ts`.
+`NODE_ENV=production` and either value missing throws on boot rather than
+serving an unauthenticated app — see `src/lib/env.ts`. Note that
+`NEXT_PUBLIC_` values are compiled in at build time, so a deployment has to be
+rebuilt after they are set, not merely restarted.
 
 The **Settings** page reports live status for the database and authentication,
 and lists whatever setup steps are still outstanding.
@@ -140,7 +149,7 @@ src/
       loading.tsx        Route-level skeleton
       error.tsx          Route-level error boundary
     (auth)/              sign-in and sign-up, no chrome
-    layout.tsx           Fonts, providers, conditional ClerkProvider
+    layout.tsx           Fonts, theme provider and toasts
     global-error.tsx     Last-resort boundary
     not-found.tsx
   components/
@@ -158,14 +167,14 @@ src/
     certificate-status.ts  The derived valid / expiring / expired / missing rule
     validation/          Zod schemas shared by forms and server actions
   server/
-    auth.ts              Clerk session to local user, and role checks
+    auth.ts              Supabase session to local user, and role checks
     dashboard.ts         Server-side read models
     products.ts          Catalogue reads and writes; no next/* imports
     certificates.ts      Certificate upload, replacement, withdrawal, access
     stock.ts             The only way stock is allowed to change
     storage/             Swappable file storage (interface + local driver)
-tests/                   Integration tests (real Postgres, mocked Clerk)
-  proxy.ts               Clerk auth context (Next 16 `proxy` convention)
+  proxy.ts               Supabase session refresh (Next 16 `proxy` convention)
+tests/                   Integration tests (real Postgres, mocked Supabase Auth)
 ```
 
 ## Design notes
@@ -199,39 +208,48 @@ line total always equals quantity times price, and a stock
 transaction's `previousStock`, `quantity` and `newStock` have to add up. Prisma's
 schema language cannot express these, so they live in the migration SQL.
 
-**Authorisation follows the route tree.** Access is checked with
-`auth.protect()` in the `(app)` layout rather than by path matching in the
-proxy. A page added under that group is protected because of where it lives, and
-the sign-in pages are public because they live outside it. This also matches
-Clerk's current guidance, which deprecates matcher-based protection.
+**Authorisation follows the route tree.** Access is checked by
+`getCurrentUser()` in the `(app)` layout, which redirects to `/sign-in` when
+there is no session, rather than by path matching in the proxy. A page added
+under that group is protected because of where it lives, and the sign-in pages
+are public because they live outside it. Path matching would be a second
+description of the route tree, free to drift from the real one and leave a page
+reachable; refreshing the session is the only thing the proxy does.
 
-**Clerk authenticates; the database authorises.** Clerk owns the credential —
-password, MFA, sessions — and this app never sees or stores one. The `users`
-table owns the local business identity: the `role` that decides what someone may
-do here, and a row for foreign keys such as `stock_transactions.created_by` to
-point at.
+**Supabase Auth authenticates; the database authorises.** Supabase Auth owns
+the credential — password, email confirmation, recovery, sessions — and this
+app never sees or stores one. The `users` table owns the local business
+identity: the `role` that decides what someone may do here, and a row for
+foreign keys such as `stock_transactions.created_by` to point at.
 
-`clerkId` is the join between the two, and the only acceptable one. Email is
-unique in our table and looks like it would work, but Clerk lets people change
+The session is verified with `getClaims()`, never `getSession()`. The latter
+decodes a cookie the browser supplied and will decode a forged one just as
+happily; `getClaims()` verifies the token's signature, which is the difference
+between reading a claim and trusting it.
+
+`supabaseUserId` is the join between the two, and the only identity key. Email
+is unique in our table and looks like it would work, but a user can change
 their address; the next request would then look like a different person and
-quietly create a second record. `clerkId` never changes.
+quietly create a second record. `supabaseUserId` never changes.
 
-Users are synced lazily by `resolveUser` in `src/server/auth.ts`: the first
-authenticated request from an unknown Clerk account creates a local row (as
-STAFF — signing up is not a route to ADMIN), and the unique index on `clerk_id`
-makes concurrent first requests harmless, since the loser reads back the
-winner's row. Rows that predate Clerk — the seeded accounts — carry an
-`unlinked_` placeholder, and the first sign-in with a matching email claims the
-row, which is how the seeded admin keeps its ADMIN role.
+Email is used for exactly one thing: a one-time adoption. A row whose
+`supabase_user_id` is NULL and whose address matches a newly confirmed Auth
+account is claimed by it — which is how the seeded admin keeps its ADMIN role
+rather than arriving as a brand-new STAFF account. Adoption requires a
+*confirmed* address, because an unconfirmed one proves only that somebody typed
+it, and the claim is a compare-and-set against `supabase_user_id IS NULL`, so
+two concurrent first requests cannot both take the row. An Auth account with no
+matching row gets a new one as STAFF: signing up is not a route to ADMIN, and an
+existing ADMIN is never downgraded.
 
-A Clerk webhook on `user.updated` / `user.deleted` is the production upgrade.
-Lazy sync refreshes the local mirror only when a row is created or claimed, so
-a later name or email change in Clerk leaves a stale value here, and a deletion
-in Clerk is invisible — the user simply stops arriving, leaving a local row that
-looks active forever. Identity itself is unaffected either way, because lookups
-go through `clerkId`. Worth adding once there are real users; not worth the
-endpoint, signature verification and replay handling while nothing depends on
-the mirror being fresh.
+The local mirror still refreshes only when a row is created or claimed, so a
+later name change on the Auth account leaves a stale value here, and a deleted
+Auth user leaves a row that looks active forever. Identity itself is unaffected,
+because lookups go through `supabaseUserId`. The remedy is cheaper than it was
+under a third-party provider: `auth.users` lives in the same PostgreSQL
+database, so reconciling is a query or a trigger rather than an HTTP endpoint
+with signature verification and replay handling. Worth doing once there are
+real users.
 
 **The server decides who did something, never the client.** `createdBy` is not
 an input to `recordStockMovement` — it is read from the session. A field the
@@ -276,10 +294,11 @@ that is an ADMIN-only `ADJUSTMENT` with a mandatory reason.
 
 **An adjustment is a count and a direction, never a signed number.** That is how
 the operation is described out loud — "twenty fewer than the system thinks" —
-and the sign is derived once on the way to the ledger. The server authenticates
-the Clerk session, resolves the local user through `clerkId`, checks the ADMIN
-role against our database, locks the product row `FOR UPDATE`, refuses a result
-below zero, then writes the new quantity and the `ADJUSTMENT` row together. The
+and the sign is derived once on the way to the ledger. The server verifies the
+Supabase session, resolves the local user through `supabaseUserId`, checks the
+ADMIN role against our database, locks the product row `FOR UPDATE`, refuses a
+result below zero, then writes the new quantity and the `ADJUSTMENT` row
+together. The
 row lock is what makes simultaneous adjustments safe; without it two requests
 read the same balance and the second overwrites the first.
 
@@ -334,8 +353,8 @@ swapping it means writing one class and adding a case to the switch in
 Note what the interface deliberately lacks: a URL. A storage layer that hands
 out URLs is one whose files are reachable by anyone holding one. The storage key
 never leaves the server, and the only address a browser sees is
-`/api/certificates/{id}/file`, which checks the Clerk session before it resolves
-anything. Uploads go nowhere near `public/` — Next serves that directory
+`/api/certificates/{id}/file`, which checks the Supabase session before it
+resolves anything. Uploads go nowhere near `public/` — Next serves that directory
 statically, with no session in the way.
 
 **Reading requires a session; changing requires ADMIN.** Viewing and downloading
@@ -349,10 +368,15 @@ database.
 npm test
 ```
 
-Integration tests against a real PostgreSQL database, derived from
-`DATABASE_URL` with `_test` appended and created and migrated automatically.
-Clerk is the only thing mocked, because reaching a real identity provider from
-a test would make the suite depend on a network and an account.
+Integration tests against a real PostgreSQL database, named explicitly by
+`DATABASE_TEST_URL` and created and migrated automatically. Nothing is derived
+from `DATABASE_URL` and there is no fallback to it: the suite truncates every
+table, so a guard refuses any URL whose database name does not end in `_test`,
+or that addresses the same database as `DATABASE_URL` or `DIRECT_URL`.
+
+Supabase Auth is the only thing mocked, because reaching a real identity
+provider from a test would make the suite depend on a network and an account —
+and the project it would reach holds production data.
 
 Real Postgres because most of what is worth proving here is Postgres behaviour:
 that the unique index rejects a duplicate SKU, that a filter comparing two
@@ -363,7 +387,7 @@ with the test.
 
 | File                             | Covers                                       |
 | -------------------------------- | -------------------------------------------- |
-| `tests/auth.test.ts`             | Clerk-to-database identity, roles, races      |
+| `tests/supabase-auth.test.ts`    | Auth-to-database identity, roles, adoption    |
 | `tests/stock.test.ts`            | The stock engine: attribution, ledger, limits |
 | `tests/products.test.ts`         | Catalogue CRUD, validation, search, filters   |
 | `tests/stock-adjustment.test.ts` | Adjustments, permissions, concurrency         |
@@ -386,5 +410,6 @@ The mechanism those need already exists — `recordStockMovement` in
 `src/server/stock.ts` locks, validates and writes the ledger row — so what is
 missing is the document lifecycle around it, not the stock handling.
 
-Also outstanding: CRUD for orders, purchases, customers and suppliers; the
-Clerk-to-database user sync webhook; reporting queries; and CSV export.
+Also outstanding: CRUD for orders, purchases, customers and suppliers;
+reconciling the local `users` mirror with `auth.users`; reporting queries; and
+CSV export.

@@ -14,7 +14,7 @@ import { resetDatabase, seedProduct, signInWithRole } from "./database";
  * These two were the only mutating-or-reading `"use server"` exports in the
  * application that never checked who was calling. That is not the same as being
  * unreachable: a Server Action is a public HTTP endpoint whose id is recoverable
- * from the client bundle, and the `(app)` layout's `auth.protect()` runs during
+ * from the client bundle, and the `(app)` layout's session check runs during
  * *render* — after an action has already run. Signed out, they answered with the
  * catalogue: names, SKUs, selling prices, stock levels, and on the purchase side
  * the last price paid to a supplier.

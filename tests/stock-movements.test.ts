@@ -1193,7 +1193,7 @@ describe("read access", () => {
   /*
    * These functions carry no role check of their own, and that is the existing
    * design rather than an oversight: access is enforced at the route boundary
-   * by `auth.protect()` in the `(app)` layout, exactly as it is for
+   * by `getCurrentUser()` in the `(app)` layout, exactly as it is for
    * `listProducts`, `listOrders` and `listPurchases`. The tests below pin that
    * arrangement — that reading the ledger needs no role, and that no role can
    * change it — so a future change to either half is deliberate rather than

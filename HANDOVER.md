@@ -23,7 +23,7 @@ dead-code audit and cleanup pass (§15) and the Dashboard rebuild (§12).
 | Module | State | Pages |
 | --- | --- | --- |
 | Foundation, layout, theming | Done | — |
-| Clerk authentication | Done | `/sign-in`, `/sign-up` |
+| Supabase Auth | Done | `/sign-in`, `/sign-up`, `/forgot-password`, `/reset-password` |
 | Dashboard | Done | `/dashboard` |
 | Products & inventory | Done | `/products`, `/products/[id]` |
 | Certificates | Done | on the product detail page |
@@ -138,8 +138,9 @@ holding none holds none. What that stock is *worth* is a different question, and
 it is answered from the lots.
 
 **The server decides who did something.** `createdBy` is never a parameter, in
-any module. It is read from the Clerk session, resolved through `clerkId` to a
-local user id. A field the browser can set is a field the browser can lie about.
+any module. It is read from the verified Supabase session, resolved through
+`supabaseUserId` to a local user id. A field the browser can set is a field the
+browser can lie about.
 
 **The server computes money.** Order and purchase totals are calculated
 server-side in integer cents from prices read in the transaction. Clients send
@@ -159,9 +160,10 @@ money, balanced document totals, a coherent stock ledger, and one current
 certificate per product (a partial unique index). Prisma's schema language
 cannot express these, so they live in hand-written migration SQL.
 
-**Authorisation follows the route tree.** `auth.protect()` in the `(app)` layout
-protects everything beneath it. Roles are checked server-side in `requireRole`.
-Hiding a button is a courtesy, never the control.
+**Authorisation follows the route tree.** `getCurrentUser()` in the `(app)`
+layout protects everything beneath it, redirecting to `/sign-in` when there is
+no session. Roles are checked server-side in `requireRole`. Hiding a button is a
+courtesy, never the control.
 
 **Records with history are archived, never deleted.** A product that has traded
 becomes DISCONTINUED; a customer who has ordered becomes INACTIVE; a supplier
@@ -204,7 +206,7 @@ src/
                          customer, supplier, report
     validation/          Zod schemas shared by forms and server actions
   server/
-    auth.ts              Clerk session → local user, role checks
+    auth.ts              Supabase session → local user, role checks
     stock.ts             The only way stock changes; FIFO lots live here
     stock-movements.ts   Read model over StockTransaction ledger
     products.ts  orders.ts  purchases.ts  certificates.ts
@@ -228,7 +230,7 @@ server components reading their state from the query string.
 
 ```bash
 npm install
-cp .env.example .env.local     # then fill in DATABASE_URL and the Clerk keys
+cp .env.example .env.local     # then fill in DATABASE_URL and the Supabase keys
 npm run db:migrate
 npm run db:seed                # optional; clears the tables first
 npm run dev
@@ -250,8 +252,8 @@ stage so far.
 
 ## 5. Testing
 
-**583 tests across 17 files**, all against a **real PostgreSQL** database.
-Clerk is the only thing mocked.
+**48 test files**, most of them against a **real PostgreSQL** database named by
+`DATABASE_TEST_URL`. Supabase Auth is the only thing mocked.
 
 Real Postgres because most of what is worth proving *is* Postgres: that a unique
 index rejects a duplicate SKU, that a `Restrict` foreign key stops a delete,
@@ -261,7 +263,7 @@ mock had been written to agree with the test.
 
 | File | Covers |
 | --- | --- |
-| `tests/auth.test.ts` | Clerk-to-database identity, roles, first-sign-in races |
+| `tests/supabase-auth.test.ts` | Auth-to-database identity, roles, adoption, first-sign-in races |
 | `tests/stock.test.ts` | The stock engine: attribution, ledger integrity, limits |
 | `tests/products.test.ts` | Catalogue CRUD, validation, search, filters |
 | `tests/stock-adjustment.test.ts` | Manual adjustments, permissions, concurrency |
@@ -294,8 +296,10 @@ once at process start, and `src/lib/prisma.ts` deliberately caches the client on
 `PrismaClientValidationError` or `Database not reachable` error. Fix: stop the
 dev server (`Ctrl + C`) and start it again (`npm run dev`).
 
-**New accounts are STAFF.** `syncUser` gives every new Clerk account the STAFF
-role, because signing up must not be a route to ADMIN. Creating and editing
+**New accounts are STAFF.** `claimOrCreateSupabaseUser` gives every new Auth
+account the STAFF role, because signing up must not be a route to ADMIN; a row
+adopted by a matching confirmed email keeps the role it already had, which is
+how the seeded admin stays ADMIN. Creating and editing
 products, and manual stock adjustments, are ADMIN-only — so a fresh account sees
 no "New product" button. Promote via `npm run db:studio` → `users` → set `role`
 to `ADMIN`. There is no user-management UI yet.
@@ -307,12 +311,13 @@ written to be re-runnable (`IF EXISTS`, a `WHERE` clause already satisfied) for
 exactly this reason — it failed on the first attempt. Write new migrations the
 same way.
 
-**Clerk's `UserButton` cannot be server-rendered.** It emits its host element
-only once the browser SDK has loaded, which the server never is. When the SDK
-wins the race against hydration, React finds a div the server did not send and
-discards the server HTML for the whole tree — which then trips a second,
-confusing error about `next-themes`' inline script. `ClientUserButton` renders
-it after hydration behind a matching placeholder. Do not "simplify" it back.
+**The account menu is a plain client component.** It used to be wrapped in a
+hydration dance, because the old provider's user button emitted its host element
+only after a browser SDK had loaded, and when that SDK won the race against
+hydration React discarded the server HTML for the whole tree. Nothing waits for
+an SDK now: `user-menu.tsx` renders from props the server resolved and calls
+`supabase.auth.signOut({ scope: "local" })` on click. If you find yourself
+re-adding a placeholder wrapper, the reason one existed is gone.
 
 **The seed clears every table.** Never run `npm run db:seed` against a database
 holding work you want to keep.
@@ -337,8 +342,9 @@ view. That is deliberate and tested — but it does mean the numbers do not move
 when you filter, which reads oddly the first time.
 
 **Read models carry no role check.** `listMovements`, `listProducts`,
-`listOrders` and `listPurchases` all rely on `auth.protect()` in the `(app)`
-layout rather than checking a role themselves. That is the established pattern,
+`listOrders` and `listPurchases` all rely on the `(app)` layout's
+`getCurrentUser()` redirect rather than checking a role themselves. That is the
+established pattern,
 not an oversight, and `tests/stock-movements.test.ts` pins it so a change is
 deliberate. Write paths do check, in `requireRole`.
 
@@ -447,8 +453,9 @@ discount-based margin logic, no discount column on a report, and no discount UI
 or validation. `total = subtotal` is a check constraint, so the database refuses
 a total implying one whatever wrote it.
 
-**Other gaps.** No user management UI. No Clerk webhook, so a name or email
-changed in Clerk leaves a stale local mirror and a deletion is invisible
+**Other gaps.** No user management UI. Nothing reconciles the local `users`
+mirror with `auth.users`, so a name changed on the Auth account leaves a stale
+value here and a deleted Auth user leaves a row that looks active
 (`src/server/auth.ts` explains the trade-off). No partial receipts on purchases.
 
 ---

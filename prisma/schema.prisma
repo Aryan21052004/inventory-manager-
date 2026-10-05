@@ -278,38 +278,40 @@ model AppSetting {
 
 /// An operator of the system.
 ///
-/// Clerk owns authentication — the password, MFA, the session — and this row
-/// owns the local business identity: what the person is allowed to do here, and
-/// something for foreign keys to point at. There is deliberately no password
-/// column; if one existed it would be a second, unused credential store.
+/// Supabase Auth owns authentication — the password, the email confirmation,
+/// the session — and this row owns the local business identity: what the person
+/// is allowed to do here, and something for foreign keys to point at. There is
+/// deliberately no password column; if one existed it would be a second, unused
+/// credential store.
 ///
-/// `clerkId` is the join between the two and the only stable identity key.
-/// Email is *not* usable for that: it is unique here, but a user can change it
-/// in Clerk at any time, which would silently strand the mapping.
+/// `supabaseUserId` is the join between the two and the only stable identity
+/// key. Email is *not* usable for that: it is unique here, but a user can change
+/// it at any time, which would silently strand the mapping.
 model User {
   id String @id @default(cuid())
 
-  /// Clerk's user id (`user_...`). Rows created before their Clerk account
-  /// exists — the seed's, for instance — carry an `unlinked_` placeholder
-  /// instead, which the first sign-in with a matching email claims. See
-  /// `resolveUser` in src/server/auth.ts.
+  /// A leftover from the Clerk era, kept only because the column is still NOT
+  /// NULL. Nothing reads it: rows created now carry an `unlinked_` placeholder
+  /// derived from the Supabase user id (see `UNLINKED_CLERK_ID_PREFIX` in
+  /// src/server/auth.ts), and the column is dropped in its own migration.
   clerkId String @unique @map("clerk_id")
 
-  /// Supabase Auth's user id (`auth.users.id`), for the migration away from
-  /// Clerk. Nullable because it is populated the first time a row's owner signs
-  /// in through Supabase, not before: a value here means "this row has been
-  /// adopted by a Supabase identity", and NULL means "still claimable".
+  /// Supabase Auth's user id (`auth.users.id`), and the only identity key.
+  /// Nullable because it is populated the first time a row's owner signs in,
+  /// not before: a value here means "this row has been adopted by a Supabase
+  /// identity", and NULL means "still claimable".
   ///
-  /// It does not replace `clerkId` yet. Both columns coexist for the duration
-  /// of the migration so a row can be found by whichever provider authenticated
-  /// the request, and neither is inferred from the other.
+  /// NULL rather than a placeholder, because PostgreSQL treats NULLs as distinct
+  /// in a unique index — so every unclaimed row coexists while no two rows can
+  /// share an id.
   supabaseUserId String? @unique @map("supabase_user_id")
 
   name  String
   email String @unique
 
-  /// Authorisation lives here, not in Clerk. Clerk answers "who is this?";
-  /// this column answers "what may they do in the inventory app?".
+  /// Authorisation lives here, not in the identity provider. Supabase Auth
+  /// answers "who is this?"; this column answers "what may they do in the
+  /// inventory app?".
   role UserRole @default(STAFF)
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -598,7 +600,7 @@ model Order {
   customerId String   @map("customer_id")
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  /// Who raised the order, resolved from the Clerk session on the server. Null
+  /// Who raised the order, resolved from the session on the server. Null
   /// for seeded rows, and nulled rather than cascaded if the user is later
   /// removed — the order still happened.
   createdBy     String? @map("created_by")
@@ -883,7 +885,7 @@ model Purchase {
   supplierId String   @map("supplier_id")
   supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  /// Who raised the purchase, resolved from the Clerk session on the server.
+  /// Who raised the purchase, resolved from the session on the server.
   /// Null for seeded rows, and nulled rather than cascaded if the user is later
   /// removed — the purchase still happened.
   createdBy     String? @map("created_by")
@@ -1356,7 +1358,7 @@ model Return {
   orderId String @map("order_id")
   order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  /// Who booked it in, resolved from the Clerk session on the server. Nulled
+  /// Who booked it in, resolved from the session on the server. Nulled
   /// rather than cascaded if the user is later removed — the goods still came
   /// back.
   createdBy     String? @map("created_by")
@@ -1490,7 +1492,7 @@ model Certificate {
   stockLotId String?   @map("stock_lot_id")
   stockLot   StockLot? @relation(fields: [stockLotId, productId], references: [id, productId], onDelete: Restrict, onUpdate: Cascade)
 
-  /// Who uploaded it, resolved from the Clerk session on the server. Nulled
+  /// Who uploaded it, resolved from the session on the server. Nulled
   /// rather than cascaded if the user is later removed — the upload still
   /// happened.
   uploadedBy     String? @map("uploaded_by")

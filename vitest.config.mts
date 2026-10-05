@@ -12,8 +12,10 @@ import { defineConfig } from "vitest/config";
  * would only assert that we mocked it correctly. So the suite runs against a
  * real database, created and migrated by `tests/global-setup.ts`.
  *
- * Clerk is the one thing that is mocked, because reaching a real identity
- * provider from a test would make the suite depend on a network and an account.
+ * Supabase Auth is the one thing that is mocked (in `tests/setup.ts`), because
+ * reaching a real identity provider from a test would make the suite depend on
+ * a network and an account — and the project it would reach holds production
+ * data.
  */
 export default defineConfig({
   resolve: {
